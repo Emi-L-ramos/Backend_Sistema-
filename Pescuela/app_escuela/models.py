@@ -39,16 +39,14 @@ class Instructor(models.Model):
 
 
 class Matricula(models.Model):
-    PRECIO_BASE = 6500
-    
     TIPO_PAGO_CHOICES = [
-        ('pago_completo', 'Pago Completo'),
+        ('Pago_completo', 'Pago Completo'),
         ('Anticipo', 'Anticipo'),
         ('Beneficio', 'Beneficio'),
     ]
 
     TIPO_CURSO_CHOICES = [
-        ('curso_completo', 'Completo'),
+        ('Curso_avanzado', 'avanzado'),
         ('Reforzamiento', 'Reforzamiento'),
     ]
 
@@ -59,51 +57,61 @@ class Matricula(models.Model):
     ]
 
     APARICIONIA_CHOICES = [
-        ('Facebook', 'Facebook'),
-        ('TikTok', 'TikTok'),
-        ('Instagram', 'Instagram'),
+        ('Redes_Sociales', 'Facebook'),
         ('Referido', 'Referido'),
-        ('Boletas', 'Boleta'),
-        ('Amigo', 'Amigo'),
+        ('Sitio_Web', 'Boleta'),
         ('otro', 'Otro'),
     ]
 
     SEXO_CHOICES = [
         ('M', 'Masculino'),
         ('F', 'Femenino'),
-        ('Otro', 'Otro'),   
     ]
     
-    ESTADO_PAGO_CHOICES = [
-        ('pendiente', 'Pendiente'),
-        ('parcial', 'Parcial'),
-        ('pagado', 'Pagado'),
+
+    NIVEL_EDUCATIVO_CHOICES = [
+        ('Primaria', 'Primaria'),
+        ('Secundaria', 'Secundaria'),
+        ('Universidad', 'Universidad'),
+        ('Profesional', 'Profesional'),
     ]
 
+    HORARIO_CHOICES = [
+        ('6AM A 8AM', '6AM A 8AM'),
+        ('8AM A 10AM', '8AM A 10AM'),
+        ('10AM A 12PM', '10AM A 12PM'),
+        ('12PM A 02PM', '12PM A 02PM'),
+        ('04PM A 06PM', '04PM A 06PM'),
+    ]
+
+    MODALIDAD_CHOICES = [
+        ('Regular', 'Regular'),
+        ('Extraordinario', 'Extraordinario'),
+    ]
+
+    f_matricula = models.DateField(auto_now_add=True)
     nombre = models.CharField(max_length=100)
     apellido = models.CharField(max_length=100)
     sexo = models.CharField(max_length=10, choices=SEXO_CHOICES)
+    nacionalidad=models.CharField(max_length=100)
+    fecha_nacimiento = models.DateField()
+    edad=models.IntegerField(null=True, blank=True)
     cedula = models.CharField(max_length=20, unique=True)
     direccion = models.CharField(max_length=200)
     correo_electronico = models.EmailField(unique=True)
-    nivel_educativo = models.CharField(max_length=50)
-    oficio = models.CharField(max_length=100)
-    numero_telefono = models.CharField(max_length=20)
-    fecha_nacimiento = models.DateField()
-    grado = models.CharField(max_length=50)
-    nombre_padre = models.CharField(max_length=100)
-    n_emergencia = models.CharField(max_length=100)
-    apariconia = models.CharField(max_length=100, choices=APARICIONIA_CHOICES)
-    f_matricula = models.DateField(auto_now_add=True)
-    categoria = models.CharField(max_length=50, choices=CATEGORIA_CHOICES)
+    telefono_convencional =  models.CharField(max_length=100)
+    telefono_movil = models.CharField(max_length=100)
+    nivel_educativo = models.CharField(max_length=50, choices=NIVEL_EDUCATIVO_CHOICES)
+    profesion_u_oficio = models.CharField(max_length=100)
+    en_caso_de_emrgencia= models.CharField(max_length=100)
+    telefono_emergencia = models.CharField(max_length=100)
+    modalidad = models.CharField(max_length=50, choices=MODALIDAD_CHOICES)
+    horario = models.CharField(max_length=50, choices=HORARIO_CHOICES)
     tipo_pago = models.CharField(max_length=50, choices=TIPO_PAGO_CHOICES)
     tipo_curso = models.CharField(max_length=50, choices=TIPO_CURSO_CHOICES)
-    descripcion = models.TextField(blank=True, null=True)
+    categoria = models.CharField(max_length=50, choices=CATEGORIA_CHOICES)
+    apariconia = models.CharField(max_length=100, choices=APARICIONIA_CHOICES)
     
-    monto_total = models.DecimalField(max_digits=10, decimal_places=2, default=PRECIO_BASE)
-    monto_pagado = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    estado_pagado = models.CharField(max_length=20, choices=ESTADO_PAGO_CHOICES, default='pendiente')
-
     def __str__(self):
         return f"{self.nombre} {self.apellido} - {self.cedula}"
     
@@ -123,7 +131,7 @@ class Recibo(models.Model):
         ('transferencia', 'Transferencia Bancaria'),
         ('tarjeta', 'Tarjeta de Crédito/Débito'),
         ('cheque', 'Cheque'),
-        ('otro', 'Otro'),
+
     ]
 
     matricula = models.ForeignKey(Matricula, on_delete=models.CASCADE, related_name='recibos')
@@ -131,8 +139,25 @@ class Recibo(models.Model):
     monto_pagado = models.DecimalField(max_digits=10, decimal_places=2)
     fecha_pago = models.DateField(auto_now_add=True)
     estado = models.CharField(max_length=20, choices=ESTADO_CHOICES)
-    metodo_pago = models.CharField(max_length=20, choices=METODO_PAGO_CHOICES, default='efectivo')
+    metodo_pago = models.CharField(max_length=20, choices=METODO_PAGO_CHOICES)
     observaciones = models.TextField(blank=True, null=True)
 
     def __str__(self):
         return f"Recibo #{self.numero_recibo} - {self.matricula.nombre} - C${self.monto_pagado}"
+
+class Calendario(models.Model) :
+    Matricula = models.OneToOneField('Matricula', on_delete=models.CASCADE, related_name='calendario')
+    user = models.ForeignKey('Usuario', on_delete=models.CASCADE)
+    fecha_inicio = models.DateField()
+    fecha_fin = models.DateField()
+
+def __str__ (self):
+    return f"calendario de {self.Matricula.nombre}"
+
+class Notas(models.Model) :
+    Matricula = models.OneToOneField('Matricula', on_delete=models.CASCADE, related_name='notas')
+    user = models.ForeignKey(Usuario, on_delete=models.CASCADE)
+    examen_practico = models.IntegerField(null=True, blank=True)
+    examen_teorico = models.IntegerField(null=True, blank=True)
+def __str__ (self):
+    return f"notas de {self.Matricula.nombre}"

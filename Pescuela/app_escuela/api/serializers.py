@@ -46,3 +46,27 @@ class ReciboSerializer(serializers.ModelSerializer):
     
     def get_estudiante_cedula(self, obj):
         return obj.matricula.cedula
+    
+class ReporteExcelSerializer(serializers.ModelSerializer):
+    nombre = serializers.ReadOnlyField(source='nombre')
+    apellido = serializers.ReadOnlyField(source='apellido')
+    nacionalidad = serializers.ReadOnlyField(source='nacionalidad')
+    n_documento = serializers.ReadOnlyField(source='cedula')
+    telefonia = serializers.ReadOnlyField(source='telefono_movil')
+    nivel_escolar = serializers.ReadOnlyField(source='nivel_educativo')
+    tipo_de_curso = serializers.ReadOnlyField(source='tipo_curso')
+    tipo_categoria = serializers.ReadOnlyField(source='categoria')
+    fecha_inicio = serializers.ReadOnlyField(source='f_matricula')
+    fecha_finalizacion = serializers.ReadOnlyField(source='Calendario.fecha_fin')
+    # horario_de_clases = seri... viene de asistencia/ cada asistencia 2 horas tanto practica
+    calificacion_p = serializers.ReadOnlyField(source='Notas.examen_practico')
+    calificacion_t = serializers.ReadOnlyField(source='Notas.examen_teorico')
+
+    class Meta:
+        model = Matricula
+        fields = [
+            'nombre', 'apellido', 'nacionalidad', 'n_documento', 
+            'telefonia', 'nivel_escolar', 'tipo_de_curso', 
+            'tipo_categoria', 'fecha_inicio', 'fecha_finalizacion', 
+            'calificacion_p', 'calificacion_t'
+        ]

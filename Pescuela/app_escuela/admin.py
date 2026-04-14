@@ -9,3 +9,4 @@ admin.site.register(Matricula)
 admin.site.register(Usuario, UserAdmin)
 admin.site.register(Instructor)
 admin.site.register(Recibo)
+

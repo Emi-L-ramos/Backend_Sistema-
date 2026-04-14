@@ -1,22 +1,27 @@
 # app_escuela/api/views.py
-from rest_framework.viewsets import ModelViewSet # type: ignore
-from rest_framework.decorators import api_view, permission_classes # type: ignore
-from rest_framework.permissions import IsAuthenticated, AllowAny # type: ignore
-from rest_framework.response import Response # type: ignore
-from rest_framework.authtoken.models import Token # pyright: ignore[reportMissingImports]
+import openpyxl
+from django.http import HttpResponse
+from rest_framework.viewsets import ModelViewSet 
+from rest_framework.decorators import api_view, permission_classes 
+from rest_framework.permissions import IsAuthenticated, AllowAny 
+from rest_framework.response import Response 
+from rest_framework.authtoken.models import Token 
 from django.contrib.auth import authenticate
-from rest_framework.exceptions import ValidationError # type: ignore
-from ..models import Matricula, Recibo, Usuario
-from .serializers import MatriculaSerializer, ReciboSerializer, UserSerializer
+from rest_framework.exceptions import ValidationError 
 
-PRECIO_MATRICULA = 6500
+from ..models import Matricula, Recibo, Usuario, Calendario, Notas
+from .serializers import (
+    MatriculaSerializer, 
+    ReciboSerializer, 
+    UserSerializer, 
+    ReporteExcelSerializer
+)
 
 
 class MatriculaViewSet(ModelViewSet):
     queryset = Matricula.objects.all()  
     serializer_class = MatriculaSerializer
     permission_classes = [IsAuthenticated]
-
 
 class ReciboViewSet(ModelViewSet):
     queryset = Recibo.objects.all()
@@ -35,39 +40,35 @@ class ReciboViewSet(ModelViewSet):
             raise ValidationError("Esta matrícula ya tiene los 2 pagos completos.")
         
         nuevo_total_pagado = total_pagado_anterior + monto_pagado
-        if nuevo_total_pagado > matricula.monto_total:
-            saldo_disponible = matricula.monto_total - total_pagado_anterior
+        # Ajuste de seguridad por si monto_total no está definido
+        monto_limite = getattr(matricula, 'monto_total', 0)
+        
+        if nuevo_total_pagado > monto_limite:
+            saldo_disponible = monto_limite - total_pagado_anterior
             raise ValidationError(f"El monto excede el saldo pendiente. Saldo disponible: C${saldo_disponible:.2f}")
         
-        if cantidad_pagos == 0:
-            estado_recibo = 'anticipo'
-        else:
-            estado_recibo = 'pagado'
-        
+        estado_recibo = 'anticipo' if cantidad_pagos == 0 else 'pagado'
         serializer.save(estado=estado_recibo)
         
         matricula.monto_pagado = nuevo_total_pagado
         
-        if nuevo_total_pagado >= matricula.monto_total:
+        if nuevo_total_pagado >= monto_limite:
             matricula.estado_pagado = 'pagado'
         elif nuevo_total_pagado > 0:
             matricula.estado_pagado = 'parcial'
         
         matricula.save()
 
-
 class UserViewSet(ModelViewSet):
     queryset = Usuario.objects.all()
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
-
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def login(request):
     username = request.data.get('username')
     password = request.data.get('password')
-    
     user = authenticate(username=username, password=password)
     
     if user:
@@ -84,50 +85,90 @@ def login(request):
     return Response({'error': 'Credenciales inválidas'}, status=401)
 
 
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def exportar_egresados_excel(request):
+    """Genera reporte Excel basado en la fecha de finalización del calendario"""
+    mes = request.query_params.get('mes')
+    anio = request.query_params.get('anio')
+
+    if not mes or not anio:
+        return Response({"error": "Se requieren los parámetros 'mes' y 'anio'"}, status=400)
+
+    egresados = Matricula.objects.filter(
+        calendario__fecha_fin__month=mes,
+        calendario__fecha_fin__year=anio
+    ).select_related('calendario', 'notas')
+
+    if not egresados.exists():
+        return Response({"error": "No hay egresados para la fecha seleccionada"}, status=404)
+
+    # Serializar datos
+    serializer = ReporteExcelSerializer(egresados, many=True)
+    data = serializer.data
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = f"Egresados_{mes}_{anio}"
+
+    headers = [
+        'Nombre', 'Apellido', 'Nacionalidad', 'Cédula', 'Teléfono', 
+        'Nivel Escolar', 'Tipo de Curso', 'Categoría', 
+        'Fecha Inicio Matrícula', 'Fecha Finalización', 'Calificación Práctica', 'Calificación Teórica'
+    ]
+    
+    for col_num, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_num)
+        cell.value = header
+        cell.font = openpyxl.styles.Font(bold=True)
+
+    for row_num, entry in enumerate(data, 2):
+        ws.cell(row=row_num, column=1).value = entry.get('nombre')
+        ws.cell(row=row_num, column=2).value = entry.get('apellido')
+        ws.cell(row=row_num, column=3).value = entry.get('nacionalidad')
+        ws.cell(row=row_num, column=4).value = entry.get('n_documento')
+        ws.cell(row=row_num, column=5).value = entry.get('telefonia')
+        ws.cell(row=row_num, column=6).value = entry.get('nivel_escolar')
+        ws.cell(row=row_num, column=7).value = entry.get('tipo_de_curso')
+        ws.cell(row=row_num, column=8).value = entry.get('tipo_categoria')
+        ws.cell(row=row_num, column=9).value = entry.get('fecha_inicio')
+        ws.cell(row=row_num, column=10).value = entry.get('fecha_finalizacion')
+        ws.cell(row=row_num, column=11).value = entry.get('calificacion_p')
+        ws.cell(row=row_num, column=12).value = entry.get('calificacion_t')
+
+    for col in ws.columns:
+        ws.column_dimensions[col[0].column_letter].width = 20
+
+    response = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    response['Content-Disposition'] = f'attachment; filename="Reporte_Egresados_{mes}_{anio}.xlsx"'
+    wb.save(response)
+    return response
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def saldo(request):
-    """Consultar saldo pendiente de una matrícula"""
     matricula_id = request.query_params.get('matricula')
-    
     if not matricula_id:
         return Response({"error": "Se requiere el ID de la matrícula"}, status=400)
     
     try:
         matricula = Matricula.objects.get(id=matricula_id)
         recibos = matricula.recibos.all()
-        
         total_pagado = sum(float(r.monto_pagado) for r in recibos)
         saldo_pendiente = float(matricula.monto_total - total_pagado)
-        
-        print(f"📊 Matrícula: {matricula.nombre} {matricula.apellido}")
-        print(f"   Total: C${matricula.monto_total}")
-        print(f"   Pagado: C${total_pagado}")
-        print(f"   Saldo pendiente: C${saldo_pendiente}")
-        print(f"   Cantidad pagos: {recibos.count()}")
         
         return Response({
             "monto_total": float(matricula.monto_total),
             "total_pagado": total_pagado,
             "saldo_pendiente": saldo_pendiente,
             "cantidad_pagos": recibos.count(),
-            "pagos_permitidos": 2,
             "estado": matricula.estado_pagado,
-            "tipo_pago": matricula.tipo_pago,
             "nombre": matricula.nombre,
             "apellido": matricula.apellido,
-            "cedula": matricula.cedula,
-            "precio_base": PRECIO_MATRICULA
+            "cedula": matricula.cedula
         })
     except Matricula.DoesNotExist:
         return Response({"error": "Matrícula no encontrada"}, status=404)
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def precio_base(request):
-    return Response({
-        "precio_base": PRECIO_MATRICULA,
-        "moneda": "C$",
-        "descripcion": "Precio base de la matrícula"
-    })
