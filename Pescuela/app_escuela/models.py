@@ -10,7 +10,7 @@ class Usuario(AbstractUser):
         ('cajero', 'Cajero'),
         ('consulta', 'Solo Consulta'),
     )
-    rol = models.CharField(max_length=20, choices=ROLES, default='consulta')
+    rol = models.CharField(max_length=20, choices=ROLES, default='admin')
     
     def tiene_permiso(self, permiso):
         permisos = {
@@ -77,7 +77,6 @@ class Matricula(models.Model):
     ]
 
     HORARIO_CHOICES = [
-        ('6AM A 8AM', '6AM A 8AM'),
         ('8AM A 10AM', '8AM A 10AM'),
         ('10AM A 12PM', '10AM A 12PM'),
         ('12PM A 02PM', '12PM A 02PM'),
@@ -92,14 +91,14 @@ class Matricula(models.Model):
     f_matricula = models.DateField(auto_now_add=True)
     nombre = models.CharField(max_length=100)
     apellido = models.CharField(max_length=100)
+    edad=models.CharField(max_length=100)
     sexo = models.CharField(max_length=10, choices=SEXO_CHOICES)
     nacionalidad=models.CharField(max_length=100)
     fecha_nacimiento = models.DateField()
-    edad=models.IntegerField(null=True, blank=True)
     cedula = models.CharField(max_length=20, unique=True)
     direccion = models.CharField(max_length=200)
     correo_electronico = models.EmailField(unique=True)
-    telefono_convencional =  models.CharField(max_length=100)
+    
     telefono_movil = models.CharField(max_length=100)
     nivel_educativo = models.CharField(max_length=50, choices=NIVEL_EDUCATIVO_CHOICES)
     profesion_u_oficio = models.CharField(max_length=100)
