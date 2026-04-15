@@ -40,26 +40,26 @@ class Instructor(models.Model):
 
 class Matricula(models.Model):
     TIPO_PAGO_CHOICES = [
-        ('Pago_completo', 'Pago Completo'),
+        ('Pago_completo', 'Pago_completo'),
         ('Anticipo', 'Anticipo'),
         ('Beneficio', 'Beneficio'),
     ]
 
     TIPO_CURSO_CHOICES = [
-        ('Curso_avanzado', 'avanzado'),
+        ('Curso_avanzado', 'Curso Avanzado'),  # Mejor legibilidad
         ('Reforzamiento', 'Reforzamiento'),
     ]
 
     CATEGORIA_CHOICES = [
-        ('A1', 'A1'),
-        ('A2', 'A2'),
-        ('A3', 'A3'),
+        ('1', '1'),
+        ('2', '2'),
+        ('3', '3'),
     ]
 
     APARICIONIA_CHOICES = [
-        ('Redes_Sociales', 'Facebook'),
+        ('Redes_Sociales', 'Redes_Sociales'),
         ('Referido', 'Referido'),
-        ('Sitio_Web', 'Boleta'),
+        ('Sitio_Web', 'Sitio_web'),
         ('otro', 'Otro'),
     ]
 
@@ -77,10 +77,12 @@ class Matricula(models.Model):
     ]
 
     HORARIO_CHOICES = [
-        ('8AM A 10AM', '8AM A 10AM'),
-        ('10AM A 12PM', '10AM A 12PM'),
-        ('12PM A 02PM', '12PM A 02PM'),
-        ('04PM A 06PM', '04PM A 06PM'),
+        ('6AM A 8AM', '6AM A 8AM'),      # ✅ Corregido
+        ('8AM A 10AM', '8AM A 10AM'),    # ✅ Corregido
+        ('10AM A 12PM', '10AM A 12PM'),  # ✅ Corregido
+        ('12PM A 2PM', '12PM A 2PM'),    # ✅ Corregido (cambié 02PM a 2PM)
+        ('4PM A 6PM', '4PM A 6PM'),      # ✅ Corregido (cambié 04PM a 4PM)
+        
     ]
 
     MODALIDAD_CHOICES = [
