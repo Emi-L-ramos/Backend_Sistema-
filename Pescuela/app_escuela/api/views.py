@@ -17,7 +17,6 @@ from .serializers import (
     ReporteExcelSerializer
 )
 
-
 class MatriculaViewSet(ModelViewSet):
     queryset = Matricula.objects.all()  
     serializer_class = MatriculaSerializer
@@ -29,35 +28,7 @@ class ReciboViewSet(ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def perform_create(self, serializer):
-        matricula = serializer.validated_data['matricula']
-        monto_pagado = serializer.validated_data['monto_pagado']
-        
-        recibos_existentes = Recibo.objects.filter(matricula=matricula)
-        cantidad_pagos = recibos_existentes.count()
-        total_pagado_anterior = sum(r.monto_pagado for r in recibos_existentes)
-        
-        if cantidad_pagos >= 2:
-            raise ValidationError("Esta matrícula ya tiene los 2 pagos completos.")
-        
-        nuevo_total_pagado = total_pagado_anterior + monto_pagado
-        # Ajuste de seguridad por si monto_total no está definido
-        monto_limite = getattr(matricula, 'monto_total', 0)
-        
-        if nuevo_total_pagado > monto_limite:
-            saldo_disponible = monto_limite - total_pagado_anterior
-            raise ValidationError(f"El monto excede el saldo pendiente. Saldo disponible: C${saldo_disponible:.2f}")
-        
-        estado_recibo = 'anticipo' if cantidad_pagos == 0 else 'pagado'
-        serializer.save(estado=estado_recibo)
-        
-        matricula.monto_pagado = nuevo_total_pagado
-        
-        if nuevo_total_pagado >= monto_limite:
-            matricula.estado_pagado = 'pagado'
-        elif nuevo_total_pagado > 0:
-            matricula.estado_pagado = 'parcial'
-        
-        matricula.save()
+        serializer.save()
 
 class UserViewSet(ModelViewSet):
     queryset = Usuario.objects.all()
@@ -153,22 +124,19 @@ def saldo(request):
     matricula_id = request.query_params.get('matricula')
     if not matricula_id:
         return Response({"error": "Se requiere el ID de la matrícula"}, status=400)
-    
+
     try:
         matricula = Matricula.objects.get(id=matricula_id)
         recibos = matricula.recibos.all()
         total_pagado = sum(float(r.monto_pagado) for r in recibos)
-        saldo_pendiente = float(matricula.monto_total - total_pagado)
-        
+
         return Response({
-            "monto_total": float(matricula.monto_total),
             "total_pagado": total_pagado,
-            "saldo_pendiente": saldo_pendiente,
             "cantidad_pagos": recibos.count(),
-            "estado": matricula.estado_pagado,
             "nombre": matricula.nombre,
             "apellido": matricula.apellido,
             "cedula": matricula.cedula
         })
+
     except Matricula.DoesNotExist:
         return Response({"error": "Matrícula no encontrada"}, status=404)
