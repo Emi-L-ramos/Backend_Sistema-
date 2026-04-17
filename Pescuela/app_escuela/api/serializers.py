@@ -58,7 +58,7 @@ class ReporteExcelSerializer(serializers.ModelSerializer):
     tipo_categoria = serializers.ReadOnlyField(source='categoria')
     fecha_inicio = serializers.ReadOnlyField(source='f_matricula')
     fecha_finalizacion = serializers.ReadOnlyField(source='Calendario.fecha_fin')
-    # horario_de_clases = seri... viene de asistencia/ cada asistencia 2 horas tanto practica
+    # horario_de_clases = seri... viene de asistencia/ cada asistencia 2 horas practica
     calificacion_p = serializers.ReadOnlyField(source='Notas.examen_practico')
     calificacion_t = serializers.ReadOnlyField(source='Notas.examen_teorico')
 

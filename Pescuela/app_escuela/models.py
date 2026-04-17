@@ -40,13 +40,13 @@ class Instructor(models.Model):
 
 class Matricula(models.Model):
     TIPO_PAGO_CHOICES = [
-        ('Pago_completo', 'Pago_completo'),
+        ('Pago_completo', 'Pago completo'),
         ('Anticipo', 'Anticipo'),
         ('Beneficio', 'Beneficio'),
     ]
 
     TIPO_CURSO_CHOICES = [
-        ('Curso_avanzado', 'Curso Avanzado'),  # Mejor legibilidad
+        ('Curso_regular', 'Curso Regular'),  
         ('Reforzamiento', 'Reforzamiento'),
     ]
 
@@ -57,9 +57,9 @@ class Matricula(models.Model):
     ]
 
     APARICIONIA_CHOICES = [
-        ('Redes_Sociales', 'Redes_Sociales'),
+        ('Redes_Sociales', 'Redes Sociales'),
         ('Referido', 'Referido'),
-        ('Sitio_Web', 'Sitio_web'),
+        ('Sitio_Web', 'Sitio Web'),
         ('otro', 'Otro'),
     ]
 
