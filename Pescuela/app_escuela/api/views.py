@@ -192,7 +192,12 @@ def saldo(request):
 
         if 'reforz' in tipo_matricula:
             tipo_curso = 'reforzamiento'
-            horas = int(request.query_params.get('horas', 1))
+            # Si ya hay recibos previos, usar las horas del primero
+            primer_recibo = recibos.first()
+            if primer_recibo and primer_recibo.horas_reforzamiento:
+                horas = int(primer_recibo.horas_reforzamiento)
+            else:
+                horas = int(request.query_params.get('horas', 1))
             horas = max(1, min(horas, 15))
             monto_total = horas * 433.33
         else:
