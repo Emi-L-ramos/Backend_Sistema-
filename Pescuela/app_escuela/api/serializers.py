@@ -1,6 +1,6 @@
 # app_escuela/api/serializers.py
 from rest_framework import serializers # type: ignore
-from ..models import Matricula, Recibo, Usuario
+from ..models import Calendario, Matricula, Recibo, Usuario,Calendario
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -70,3 +70,23 @@ class ReporteExcelSerializer(serializers.ModelSerializer):
             'tipo_categoria', 'fecha_inicio', 'fecha_finalizacion', 
             'calificacion_p', 'calificacion_t'
         ]
+
+class CalendarioSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Calendario
+        fields = '__all__'
+
+    def validate(self, data):
+        """
+        Validación de cruces de horario.
+        """
+        # Filtramos si ya existe un registro con el mismo instructor, fecha y hora
+        if Calendario.objects.filter(
+            instructor=data['instructor'],
+            fecha=data['fecha'],
+            hora=data['hora'] # Ajusta 'hora' según el campo que tengas en tu modelo
+        ).exists():
+            raise serializers.ValidationError(
+                "Este instructor ya tiene una clase asignada en esta fecha y hora."
+            )
+        return data

@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'rest_framework.authtoken',  # ✅ Token authentication
     'app_escuela',  # Tu aplicación
+    'django_filters',  # ✅ Para filtrado en vistas
 ]
 
 # ✅ Modelo de usuario personalizado
@@ -162,6 +163,9 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PARSER_CLASSES': [
         'rest_framework.parsers.JSONParser',
+    ],
+    'DEFAULT_FILTER_BACKENDS': [
+        'django_filters.rest_framework.DjangoFilterBackend'
     ],
 }
 
