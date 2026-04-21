@@ -39,12 +39,7 @@ class Instructor(models.Model):
 
 
 class Matricula(models.Model):
-    TIPO_PAGO_CHOICES = [
-        ('Pago_completo', 'Pago completo'),
-        ('Anticipo', 'Anticipo'),
-        ('Beneficio', 'Beneficio'),
-    ]
-
+   
     TIPO_CURSO_CHOICES = [
         ('Curso_regular', 'Curso Regular'),  
         ('Reforzamiento', 'Reforzamiento'),
@@ -108,7 +103,7 @@ class Matricula(models.Model):
     telefono_emergencia = models.CharField(max_length=100)
     modalidad = models.CharField(max_length=50, choices=MODALIDAD_CHOICES)
     horario = models.CharField(max_length=50, choices=HORARIO_CHOICES)
-    tipo_pago = models.CharField(max_length=50, choices=TIPO_PAGO_CHOICES)
+    
     tipo_curso = models.CharField(max_length=50, choices=TIPO_CURSO_CHOICES)
     categoria = models.CharField(max_length=50, choices=CATEGORIA_CHOICES)
     apariconia = models.CharField(max_length=100, choices=APARICIONIA_CHOICES)
