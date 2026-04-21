@@ -85,6 +85,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "https://wsp1llrj-5173.use2.devtunnels.ms",
+    "http://localhost:5174",
 ]
 
 # ✅ Opcional: Permitir credenciales
