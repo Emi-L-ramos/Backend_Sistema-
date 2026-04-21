@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'rest_framework.authtoken',  # ✅ Token authentication
     'app_escuela',  # Tu aplicación
+    
 ]
 
 # ✅ Modelo de usuario personalizado
@@ -83,7 +84,7 @@ DATABASES = {
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "https://wsp1llrj-5173.use2.devtunnels.ms",
+    
 ]
 
 # ✅ Opcional: Permitir credenciales
