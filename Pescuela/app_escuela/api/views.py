@@ -1,5 +1,6 @@
 # app_escuela/api/views.py
 import openpyxl
+from django.db.models import Sum
 from django.http import HttpResponse
 from rest_framework.viewsets import ModelViewSet 
 from rest_framework.decorators import api_view, permission_classes 
@@ -7,7 +8,8 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response 
 from rest_framework.authtoken.models import Token 
 from django.contrib.auth import authenticate
-from rest_framework.exceptions import ValidationError 
+from rest_framework import status
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 from ..models import Matricula, Recibo, Usuario, Calendario, Notas
 from .serializers import (
@@ -27,8 +29,23 @@ class ReciboViewSet(ModelViewSet):
     serializer_class = ReciboSerializer
     permission_classes = [IsAuthenticated]
 
-    def perform_create(self, serializer):
-        serializer.save()
+    def create(self, request, *args, **kwargs):
+        try:
+            return super().create(request, *args, **kwargs)
+        except DjangoValidationError as e:
+            return Response(
+                {"error": e.messages[0] if hasattr(e, 'messages') else str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    def update(self, request, *args, **kwargs):
+        try:
+            return super().update(request, *args, **kwargs)
+        except DjangoValidationError as e:
+            return Response(
+                {"error": e.messages[0] if hasattr(e, 'messages') else str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
 class UserViewSet(ModelViewSet):
     queryset = Usuario.objects.all()
@@ -128,14 +145,34 @@ def saldo(request):
     try:
         matricula = Matricula.objects.get(id=matricula_id)
         recibos = matricula.recibos.all()
-        total_pagado = sum(float(r.monto_pagado) for r in recibos)
+
+        tipo_matricula = str(matricula.tipo_curso).lower()
+
+        if 'reforz' in tipo_matricula:
+            tipo_curso = 'reforzamiento'
+            horas = int(request.query_params.get('horas', 1))
+            horas = max(1, min(horas, 15))
+            monto_total = horas * 433.33
+        else:
+            tipo_curso = 'regular'
+            horas = 15
+            monto_total = 6500
+
+        total_pagado = float(matricula.recibos.aggregate(total=Sum('monto_pagado'))['total'] or 0)
+        saldo_pendiente = max(monto_total - total_pagado, 0)
 
         return Response({
+            "monto_total": monto_total,
             "total_pagado": total_pagado,
+            "saldo_pendiente": saldo_pendiente,
             "cantidad_pagos": recibos.count(),
+            "pagos_permitidos": 2,
             "nombre": matricula.nombre,
             "apellido": matricula.apellido,
-            "cedula": matricula.cedula
+            "cedula": matricula.cedula,
+            "tipo_curso": tipo_curso,
+            "horas": horas,
+            "precio_hora_reforzamiento": 433.33
         })
 
     except Matricula.DoesNotExist:
