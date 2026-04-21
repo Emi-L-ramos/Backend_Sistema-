@@ -1,5 +1,8 @@
 # app_escuela/models.py
 from django.contrib.auth.models import AbstractUser
+from django.core.exceptions import ValidationError
+from datetime import time # Asegúrate de importar esto arriba
+
 from django.db import models
 
 class Usuario(AbstractUser):
@@ -107,6 +110,21 @@ class Matricula(models.Model):
     tipo_curso = models.CharField(max_length=50, choices=TIPO_CURSO_CHOICES)
     categoria = models.CharField(max_length=50, choices=CATEGORIA_CHOICES)
     apariconia = models.CharField(max_length=100, choices=APARICIONIA_CHOICES)
+
+
+    def obtener_rango_horario(self):
+        """
+        Esta función hace el trabajo sucio: convierte tu texto 
+        en objetos de tiempo (datetime.time) para poder compararlos.
+        """
+        mapeo = {
+            '6AM A 8AM': (time(6, 0), time(8, 0)),
+            '8AM A 10AM': (time(8, 0), time(10, 0)),
+            '10AM A 12PM': (time(10, 0), time(12, 0)),
+            '12PM A 2PM': (time(12, 0), time(14, 0)),
+            '4PM A 6PM': (time(16, 0), time(18, 0)),
+        }
+        return mapeo.get(self.horario)
     
     def __str__(self):
         return f"{self.nombre} {self.apellido} - {self.cedula}"
@@ -140,13 +158,35 @@ class Recibo(models.Model):
         return f"Recibo #{self.numero_recibo} - {self.matricula.nombre} - C${self.monto_pagado}"
 
 
+from django.core.exceptions import ValidationError # Asegúrate de importar esto arriba
+
 class Calendario(models.Model):
-    # Cambiamos a ForeignKey para permitir múltiples citas por estudiante
     matricula = models.ForeignKey('Matricula', on_delete=models.CASCADE, related_name='citas')
-    # Usamos 'instructor' en lugar de 'user' para mayor claridad semántica
     instructor = models.ForeignKey('Instructor', on_delete=models.CASCADE, related_name='agenda')
     fecha = models.DateField()
     hora_inicio = models.TimeField()
+
+    def clean(self):
+        # 1. Llamamos a la función de la matrícula relacionada
+        rango = self.matricula.obtener_rango_horario()
+        
+        # 2. Verificamos que el rango exista
+        if not rango:
+            raise ValidationError("La matrícula no tiene un horario definido correctamente.")
+        
+        inicio_permitido, fin_permitido = rango
+        
+        # 3. Validamos: ¿Está la hora_inicio de la cita dentro del rango permitido?
+        if not (inicio_permitido <= self.hora_inicio < fin_permitido):
+            raise ValidationError(
+                f"Error: La hora {self.hora_inicio} no coincide con el horario "
+                f"de la matrícula ({self.matricula.horario}). "
+                f"El horario debe estar entre {inicio_permitido.strftime('%H:%M')} y {fin_permitido.strftime('%H:%M')}."
+            )
+        
+        super().clean() # Llamamos al clean original de Django
+
+    
     
     # Para cumplir con tu requerimiento de "no permitir duplicados en la misma fecha y hora"
     class Meta:
