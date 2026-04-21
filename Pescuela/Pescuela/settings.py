@@ -28,7 +28,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'rest_framework.authtoken',  # ✅ Token authentication
     'app_escuela',  # Tu aplicación
-    
+    'django_filters',  # ✅ Para filtrado en vistas
 ]
 
 # ✅ Modelo de usuario personalizado
@@ -84,7 +84,8 @@ DATABASES = {
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    
+    "http://localhost:5174", # Del incoming
+    "https://wsp11lrj-5173.use2.devtunnels.ms", # Del incoming
 ]
 
 # ✅ Opcional: Permitir credenciales
@@ -163,6 +164,9 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PARSER_CLASSES': [
         'rest_framework.parsers.JSONParser',
+    ],
+    'DEFAULT_FILTER_BACKENDS': [
+        'django_filters.rest_framework.DjangoFilterBackend'
     ],
 }
 

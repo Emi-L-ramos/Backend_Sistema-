@@ -1,7 +1,7 @@
 # app_escuela/api/urls.py
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter # type: ignore
-from .views import MatriculaViewSet, ReciboViewSet, UserViewSet, login, saldo,exportar_egresados_excel
+from .views import MatriculaViewSet, ReciboViewSet, UserViewSet, login, saldo,exportar_egresados_excel, CalendarioViewSet
 
 
 
@@ -10,6 +10,7 @@ router = DefaultRouter()
 router.register(r'matricula', MatriculaViewSet)
 router.register(r'recibo', ReciboViewSet)
 router.register(r'usuarios', UserViewSet)
+router.register(r'calendario', CalendarioViewSet)
 
 urlpatterns = [
     path('login/', login, name='login'),
