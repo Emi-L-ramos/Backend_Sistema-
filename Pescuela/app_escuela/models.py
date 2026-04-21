@@ -42,12 +42,7 @@ class Instructor(models.Model):
 
 
 class Matricula(models.Model):
-    TIPO_PAGO_CHOICES = [
-        ('Pago_completo', 'Pago completo'),
-        ('Anticipo', 'Anticipo'),
-        ('Beneficio', 'Beneficio'),
-    ]
-
+   
     TIPO_CURSO_CHOICES = [
         ('Curso_regular', 'Curso Regular'),  
         ('Reforzamiento', 'Reforzamiento'),
@@ -111,7 +106,7 @@ class Matricula(models.Model):
     telefono_emergencia = models.CharField(max_length=100)
     modalidad = models.CharField(max_length=50, choices=MODALIDAD_CHOICES)
     horario = models.CharField(max_length=50, choices=HORARIO_CHOICES)
-    tipo_pago = models.CharField(max_length=50, choices=TIPO_PAGO_CHOICES)
+    
     tipo_curso = models.CharField(max_length=50, choices=TIPO_CURSO_CHOICES)
     categoria = models.CharField(max_length=50, choices=CATEGORIA_CHOICES)
     apariconia = models.CharField(max_length=100, choices=APARICIONIA_CHOICES)
@@ -119,9 +114,7 @@ class Matricula(models.Model):
     def __str__(self):
         return f"{self.nombre} {self.apellido} - {self.cedula}"
     
-    @property
-    def saldo_pendiente(self):
-        return self.monto_total - self.monto_pagado
+   
 
 class Recibo(models.Model):
     ESTADO_CHOICES = [
@@ -262,15 +255,20 @@ class Recibo(models.Model):
     def __str__(self):
         return f"Recibo #{self.numero_recibo} - {self.matricula.nombre} - C${self.monto_pagado}"
 
+class Calendario(models.Model):
+    # Cambiamos a ForeignKey para permitir múltiples citas por estudiante
+    matricula = models.ForeignKey('Matricula', on_delete=models.CASCADE, related_name='citas')
+    # Usamos 'instructor' en lugar de 'user' para mayor claridad semántica
+    instructor = models.ForeignKey('Instructor', on_delete=models.CASCADE, related_name='agenda')
+    fecha = models.DateField()
+    hora_inicio = models.TimeField()
+    
+    # Para cumplir con tu requerimiento de "no permitir duplicados en la misma fecha y hora"
+    class Meta:
+        unique_together = ('instructor', 'fecha', 'hora_inicio')
 
-class Calendario(models.Model) :
-    Matricula = models.OneToOneField('Matricula', on_delete=models.CASCADE, related_name='calendario')
-    user = models.ForeignKey('Usuario', on_delete=models.CASCADE)
-    fecha_inicio = models.DateField()
-    fecha_fin = models.DateField()
-
-def __str__ (self):
-    return f"calendario de {self.Matricula.nombre}"
+    def __str__(self):
+        return f"Cita: {self.matricula.nombre} con {self.instructor.usuario.username} el {self.fecha}"
 
 class Notas(models.Model) :
     Matricula = models.OneToOneField('Matricula', on_delete=models.CASCADE, related_name='notas')
