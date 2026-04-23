@@ -3,6 +3,8 @@ from django.contrib.auth.models import AbstractUser
 from django.db import transaction
 from django.db import models
 from decimal import Decimal
+from django.core.exceptions import ValidationError
+from datetime import time
 from rest_framework.exceptions import ValidationError
 
 class Usuario(AbstractUser):
@@ -110,6 +112,21 @@ class Matricula(models.Model):
     tipo_curso = models.CharField(max_length=50, choices=TIPO_CURSO_CHOICES)
     categoria = models.CharField(max_length=50, choices=CATEGORIA_CHOICES)
     apariconia = models.CharField(max_length=100, choices=APARICIONIA_CHOICES)
+
+    def obtener_rango_horario(self):
+        """
+        Retorna una tupla con (hora_inicio, hora_fin) basada en el campo horario.
+        """
+        mapeo = {
+            '6AM A 8AM': (time(6, 0), time(8, 0)),
+            '8AM A 10AM': (time(8, 0), time(10, 0)),
+            '10AM A 12PM': (time(10, 0), time(12, 0)),
+            '12PM A 2PM': (time(12, 0), time(14, 0)),
+            '4PM A 6PM': (time(16, 0), time(18, 0)),
+        }
+        return mapeo.get(self.horario)
+
+
     
     def __str__(self):
         return f"{self.nombre} {self.apellido} - {self.cedula}"
@@ -256,19 +273,63 @@ class Recibo(models.Model):
         return f"Recibo #{self.numero_recibo} - {self.matricula.nombre} - C${self.monto_pagado}"
 
 class Calendario(models.Model):
-    # Cambiamos a ForeignKey para permitir múltiples citas por estudiante
     matricula = models.ForeignKey('Matricula', on_delete=models.CASCADE, related_name='citas')
-    # Usamos 'instructor' en lugar de 'user' para mayor claridad semántica
     instructor = models.ForeignKey('Instructor', on_delete=models.CASCADE, related_name='agenda')
     fecha = models.DateField()
     hora_inicio = models.TimeField()
-    
-    # Para cumplir con tu requerimiento de "no permitir duplicados en la misma fecha y hora"
-    class Meta:
-        unique_together = ('instructor', 'fecha', 'hora_inicio')
+    hora_fin = models.TimeField(null=True, blank=True)  # se calcula desde la matrícula
+    numero_clase = models.PositiveSmallIntegerField(default=1)  # 1..8 regulares, 9 = examen.
+    asistio = models.BooleanField(null=True, blank=True, default=None)
+    justificada = models.BooleanField(default=False)
+    motivo_justificacion = models.TextField(blank=True, null=True)
 
-    def __str__(self):
-        return f"Cita: {self.matricula.nombre} con {self.instructor.usuario.username} el {self.fecha}"
+    class Meta:
+        ordering = ['fecha', 'hora_inicio']
+        indexes = [
+            models.Index(fields=['instructor', 'fecha']),
+           models.Index(fields=['matricula']),
+        ]
+
+    def clean(self):
+            if getattr(self, 'fecha', None) and getattr(self, 'numero_clase', None) != 9 and getattr(self, 'matricula_id', None):
+                es_extraordinario = (str(self.matricula.modalidad).lower() == 'extraordinario')
+                es_finde = self.fecha.weekday() >= 5
+                
+                if es_extraordinario and not es_finde:
+                    raise ValidationError("Curso extraordinario: las clases solo pueden ser sábado o domingo.")
+                if not es_extraordinario and es_finde:
+                    raise ValidationError("Curso regular: no se permiten clases en sábado o domingo.")
+            
+            # 2) Tomar las horas del horario de la matrícula solo para clases regulares
+            if self.matricula_id and self.numero_clase != 9 and (not self.hora_inicio or not self.hora_fin):
+                rango = self.matricula.obtener_rango_horario()
+                if rango:
+                    self.hora_inicio = self.hora_inicio or rango[0]
+                    self.hora_fin = self.hora_fin or rango[1]
+
+            # 3) Validar choque de horario (regular = exclusivo; examen = comparte solo con otro examen)
+            if self.instructor_id and self.fecha and self.hora_inicio and self.hora_fin:
+                qs = Calendario.objects.filter(
+                    instructor_id=self.instructor_id,
+                    fecha=self.fecha,
+                ).exclude(pk=self.pk)
+                for otra in qs:
+                    if not (self.hora_fin <= otra.hora_inicio or self.hora_inicio >= otra.hora_fin):
+                        if self.numero_clase == 9 and otra.numero_clase == 9:
+                            continue  # dos exámenes pueden coexistir
+                        raise ValidationError(
+                            f"El instructor ya tiene una clase de {otra.hora_inicio} a {otra.hora_fin} ese día."
+                        )
+                
+            super().clean()
+
+            def save(self, *args, **kwargs):
+                self.full_clean()
+                super().save(*args, **kwargs)
+
+            def __str__(self):
+                return f"{self.instructor} - {self.fecha} {self.hora_inicio} (Clase {self.numero_clase}/8)"
+
 
 class Notas(models.Model) :
     Matricula = models.OneToOneField('Matricula', on_delete=models.CASCADE, related_name='notas')

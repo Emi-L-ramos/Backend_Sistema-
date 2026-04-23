@@ -1,6 +1,7 @@
 # app_escuela/api/serializers.py
 from rest_framework import serializers # type: ignore
-from ..models import Calendario, Matricula, Recibo, Usuario,Calendario
+from ..models import Calendario, Matricula, Recibo, Usuario
+from ..models import Instructor
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -27,10 +28,20 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class MatriculaSerializer(serializers.ModelSerializer):
+    horas_clases = serializers.SerializerMethodField()
+
+    def get_horas_clases(self, obj):
+        if 'reforz' in str(obj.tipo_curso).lower():
+            recibo = obj.recibos.order_by('-fecha_pago').first()
+            if recibo and recibo.horas_reforzamiento:
+                return int(recibo.horas_reforzamiento)
+            return 16
+        return 16
+
     class Meta:
         model = Matricula
         fields = '__all__'
-
+    
 
 class ReciboSerializer(serializers.ModelSerializer):
     matricula_data = MatriculaSerializer(source='matricula', read_only=True)
@@ -72,21 +83,92 @@ class ReporteExcelSerializer(serializers.ModelSerializer):
         ]
 
 class CalendarioSerializer(serializers.ModelSerializer):
+    estudiante_nombre = serializers.SerializerMethodField()
+    estudiante_cedula = serializers.SerializerMethodField()
+    instructor_nombre = serializers.SerializerMethodField()
+    horario = serializers.SerializerMethodField()
+
     class Meta:
         model = Calendario
         fields = '__all__'
 
+    def get_estudiante_nombre(self, obj):
+        if obj.matricula:
+            return f"{obj.matricula.nombre} {obj.matricula.apellido}"
+        return ""
+
+    def get_estudiante_cedula(self, obj):
+        return obj.matricula.cedula if obj.matricula else ""
+
+    def get_instructor_nombre(self, obj):
+        if obj.instructor and obj.instructor.usuario:
+            u = obj.instructor.usuario
+            nombre = f"{u.first_name} {u.last_name}".strip()
+            return nombre or u.username
+        return ""
+
+    def get_horario(self, obj):
+        return obj.matricula.horario if obj.matricula else ""
+  
+# app_escuela/api/serializers.py
+
+class CrearBloqueCitasSerializer(serializers.Serializer):
+    instructor_id = serializers.IntegerField()
+    matricula_id = serializers.IntegerField()
+    fecha_inicio = serializers.DateField()
+
+    def validate_fecha_inicio(self, value):
+        # La regla depende de la modalidad de la matrícula, se valida en validate()
+        return value
+
     def validate(self, data):
-        """
-        Validación de cruces de horario.
-        """
-        # Filtramos si ya existe un registro con el mismo instructor, fecha y hora
-        if Calendario.objects.filter(
-            instructor=data['instructor'],
-            fecha=data['fecha'],
-            hora=data['hora'] # Ajusta 'hora' según el campo que tengas en tu modelo
-        ).exists():
+        from datetime import date
+
+        try:
+            matricula = Matricula.objects.get(pk=data['matricula_id'])
+        except Matricula.DoesNotExist:
+            raise serializers.ValidationError("Matrícula no encontrada.")
+
+        es_extraordinario = (str(matricula.modalidad).lower() == 'extraordinario')
+        es_finde = data['fecha_inicio'].weekday() >= 5
+
+        if es_extraordinario and not es_finde:
             raise serializers.ValidationError(
-                "Este instructor ya tiene una clase asignada en esta fecha y hora."
+                "Curso extraordinario: la fecha de inicio debe ser sábado o domingo."
+            )
+        if not es_extraordinario and es_finde:
+            raise serializers.ValidationError(
+                "Curso regular: la fecha de inicio no puede ser sábado o domingo."
+            )
+
+        es_reforzamiento = 'reforz' in str(matricula.tipo_curso).lower()
+
+        if es_reforzamiento:
+            recibo = matricula.recibos.order_by('-fecha_pago').first()
+            horas = int(recibo.horas_reforzamiento) if recibo and recibo.horas_reforzamiento else 16
+            num_clases = horas // 2
+        else:
+            num_clases = 8
+
+        existe_bloque_activo = Calendario.objects.filter(
+            matricula_id=data['matricula_id'],
+            fecha__gte=date.today(),
+            numero_clase__lte=num_clases,
+        ).exists()
+        if existe_bloque_activo:
+            raise serializers.ValidationError(
+                "Esta matrícula ya tiene un bloque de clases en curso."
             )
         return data
+        
+class InstructorSerializer(serializers.ModelSerializer):
+        nombre = serializers.SerializerMethodField()
+        username = serializers.CharField(source='usuario.username', read_only=True)
+        class Meta:
+            model = Instructor
+            fields = ['id', 'nombre', 'username', 'especialidad']
+        def get_nombre(self, obj):
+            if obj.usuario:
+                n = f"{obj.usuario.first_name} {obj.usuario.last_name}".strip()
+                return n or obj.usuario.username
+            return "Sin nombre"

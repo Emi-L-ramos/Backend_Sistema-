@@ -22,6 +22,8 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('app_escuela.api.urls')),  # Agrega esta línea para incluir las URLs de la API
 
+  
+
     path('api/token/', TokenObtainPairView.as_view()),
     path('api/token/refresh/', TokenRefreshView.as_view()),
     path('accounts/', include('django.contrib.auth.urls')),
