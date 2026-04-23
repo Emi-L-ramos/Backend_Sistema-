@@ -97,9 +97,9 @@ class Matricula(models.Model):
     sexo = models.CharField(max_length=10, choices=SEXO_CHOICES)
     nacionalidad=models.CharField(max_length=100)
     fecha_nacimiento = models.DateField()
-    cedula = models.CharField(max_length=20, unique=True)
+    cedula = models.CharField(max_length=20)
     direccion = models.CharField(max_length=200)
-    correo_electronico = models.EmailField(unique=True)
+    correo_electronico = models.EmailField()
     
     telefono_movil = models.CharField(max_length=100)
     nivel_educativo = models.CharField(max_length=50, choices=NIVEL_EDUCATIVO_CHOICES)
