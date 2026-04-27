@@ -305,26 +305,29 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response({"error": "Matrícula no existe"}, status=400)
 
         # Obtener el horario de la matrícula
+        from datetime import datetime, timedelta
+
+        horas_por_dia = int(data.get('horas_por_dia', 2))
         rango = matricula.obtener_rango_horario()
         if not rango:
             return Response(
                 {"error": "La matrícula no tiene un horario válido"},
                 status=400,
             )
-        hora_inicio, hora_fin = rango
-
+        hora_inicio = rango[0]
+        hora_fin = (datetime.combine(datetime.today(), hora_inicio) + timedelta(hours=horas_por_dia)).time()
         es_extraordinario = (str(matricula.modalidad).lower() == 'extraordinario')
         es_reforzamiento = 'reforz' in str(matricula.tipo_curso).lower()
 
         if es_reforzamiento:
-            recibo = matricula.recibos.order_by('-fecha_pago').first()
-            horas = int(recibo.horas_reforzamiento) if recibo and recibo.horas_reforzamiento else 16
-            num_clases = horas // 2   # 2 horas por día → 16h = 8 clases, 10h = 5 clases
+            horas = int(matricula.horas_reforzamiento) if matricula.horas_reforzamiento else 16
+            num_clases = horas // horas_por_dia
         else:
-            num_clases = 8
+            num_clases = 16 // horas_por_dia
 
         fechas = []
-        actual = data['fecha_inicio']
+        from datetime import date
+        actual = date.fromisoformat(data['fecha_inicio']) if isinstance(data['fecha_inicio'], str) else data['fecha_inicio']
         while len(fechas) < num_clases:
             if es_extraordinario:
                 if actual.weekday() >= 5:        # solo sábado y domingo
@@ -401,8 +404,6 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response({"error": "Matrícula no encontrada"}, status=404)
         except Instructor.DoesNotExist:
             return Response({"error": "Instructor no encontrado"}, status=404)
-        
-from datetime import timedelta
 
 @api_view(['POST','OPTIONS'])
 @permission_classes([IsAuthenticated])

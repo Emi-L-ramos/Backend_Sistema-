@@ -32,10 +32,7 @@ class MatriculaSerializer(serializers.ModelSerializer):
 
     def get_horas_clases(self, obj):
         if 'reforz' in str(obj.tipo_curso).lower():
-            recibo = obj.recibos.order_by('-fecha_pago').first()
-            if recibo and recibo.horas_reforzamiento:
-                return int(recibo.horas_reforzamiento)
-            return 16
+            return int(obj.horas_reforzamiento) if obj.horas_reforzamiento else 16
         return 16
 
     class Meta:
@@ -116,6 +113,7 @@ class CrearBloqueCitasSerializer(serializers.Serializer):
     instructor_id = serializers.IntegerField()
     matricula_id = serializers.IntegerField()
     fecha_inicio = serializers.DateField()
+    horas_por_dia = serializers.IntegerField(default=2, required=False)
 
     def validate_fecha_inicio(self, value):
         # La regla depende de la modalidad de la matrícula, se valida en validate()
@@ -143,12 +141,12 @@ class CrearBloqueCitasSerializer(serializers.Serializer):
 
         es_reforzamiento = 'reforz' in str(matricula.tipo_curso).lower()
 
+        horas_por_dia = data.get('horas_por_dia', 2)
         if es_reforzamiento:
-            recibo = matricula.recibos.order_by('-fecha_pago').first()
-            horas = int(recibo.horas_reforzamiento) if recibo and recibo.horas_reforzamiento else 16
-            num_clases = horas // 2
+            horas = int(matricula.horas_reforzamiento) if matricula.horas_reforzamiento else 16
+            num_clases = horas // horas_por_dia
         else:
-            num_clases = 8
+            num_clases = 16 // horas_por_dia
 
         existe_bloque_activo = Calendario.objects.filter(
             matricula_id=data['matricula_id'],

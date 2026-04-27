@@ -77,11 +77,12 @@ class Matricula(models.Model):
     ]
 
     HORARIO_CHOICES = [
-        ('6AM A 8AM', '6AM A 8AM'),      # ✅ Corregido
-        ('8AM A 10AM', '8AM A 10AM'),    # ✅ Corregido
-        ('10AM A 12PM', '10AM A 12PM'),  # ✅ Corregido
-        ('12PM A 2PM', '12PM A 2PM'),    # ✅ Corregido (cambié 02PM a 2PM)
-        ('4PM A 6PM', '4PM A 6PM'),      # ✅ Corregido (cambié 04PM a 4PM)
+        ('6AM', '6AM'),      # ✅ Corregido
+        ('8AM', '8AM'),    # ✅ Corregido
+        ('10AM', '10AM'),  # ✅ Corregido
+        ('12PM', '12PM'),
+        ('02PM', '02PM'),    # ✅ Corregido (cambié 02PM a 2PM)
+        ('04PM', '04PM'),      # ✅ Corregido (cambié 04PM a 4PM)
         
     ]
 
@@ -110,19 +111,19 @@ class Matricula(models.Model):
     horario = models.CharField(max_length=50, choices=HORARIO_CHOICES)
     
     tipo_curso = models.CharField(max_length=50, choices=TIPO_CURSO_CHOICES)
+    horas_reforzamiento = models.IntegerField(null=True, blank=True, verbose_name="Horas de Reforzamiento")
     categoria = models.CharField(max_length=50, choices=CATEGORIA_CHOICES)
     apariconia = models.CharField(max_length=100, choices=APARICIONIA_CHOICES)
+    observaciones = models.TextField(blank=True, null=True)
 
     def obtener_rango_horario(self):
-        """
-        Retorna una tupla con (hora_inicio, hora_fin) basada en el campo horario.
-        """
         mapeo = {
-            '6AM A 8AM': (time(6, 0), time(8, 0)),
-            '8AM A 10AM': (time(8, 0), time(10, 0)),
-            '10AM A 12PM': (time(10, 0), time(12, 0)),
-            '12PM A 2PM': (time(12, 0), time(14, 0)),
-            '4PM A 6PM': (time(16, 0), time(18, 0)),
+            '6AM':  (time(6,  0), time(8,  0)),
+            '8AM':  (time(8,  0), time(10, 0)),
+            '10AM': (time(10, 0), time(12, 0)),
+            '12PM': (time(12, 0), time(14, 0)),
+            '02PM': (time(14, 0), time(16, 0)),
+            '04PM': (time(16, 0), time(18, 0)),
         }
         return mapeo.get(self.horario)
 
@@ -282,6 +283,7 @@ class Calendario(models.Model):
     asistio = models.BooleanField(null=True, blank=True, default=None)
     justificada = models.BooleanField(default=False)
     motivo_justificacion = models.TextField(blank=True, null=True)
+    
 
     class Meta:
         ordering = ['fecha', 'hora_inicio']
@@ -304,8 +306,7 @@ class Calendario(models.Model):
             if self.matricula_id and self.numero_clase != 9 and (not self.hora_inicio or not self.hora_fin):
                 rango = self.matricula.obtener_rango_horario()
                 if rango:
-                    self.hora_inicio = self.hora_inicio or rango[0]
-                    self.hora_fin = self.hora_fin or rango[1]
+                    self.hora_inicio = self.hora_inicio or rango
 
             # 3) Validar choque de horario (regular = exclusivo; examen = comparte solo con otro examen)
             if self.instructor_id and self.fecha and self.hora_inicio and self.hora_fin:
