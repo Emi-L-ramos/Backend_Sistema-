@@ -160,13 +160,17 @@ class CrearBloqueCitasSerializer(serializers.Serializer):
         return data
         
 class InstructorSerializer(serializers.ModelSerializer):
-        nombre = serializers.SerializerMethodField()
-        username = serializers.CharField(source='usuario.username', read_only=True)
-        class Meta:
-            model = Instructor
-            fields = ['id', 'nombre', 'username', 'especialidad']
-        def get_nombre(self, obj):
-            if obj.usuario:
-                n = f"{obj.usuario.first_name} {obj.usuario.last_name}".strip()
-                return n or obj.usuario.username
-            return "Sin nombre"
+    nombre = serializers.CharField(source='usuario.first_name', read_only=True)
+    apellido = serializers.CharField(source='usuario.last_name', read_only=True)
+    username = serializers.CharField(source='usuario.username', read_only=True)
+    nombre_completo = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Instructor
+        fields = ['id', 'nombre', 'apellido', 'username', 'especialidad', 'nombre_completo']
+
+    def get_nombre_completo(self, obj):
+        if obj.usuario:
+            full = f"{obj.usuario.first_name} {obj.usuario.last_name}".strip()
+            return full if full else obj.usuario.username
+        return f"Instructor {obj.id}"

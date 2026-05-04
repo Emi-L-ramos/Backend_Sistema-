@@ -45,6 +45,8 @@ class InstructorViewSet(viewsets.ModelViewSet):
     serializer_class = InstructorSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        return Instructor.objects.select_related('usuario').all()
 
 # VIEWSETS
 class MatriculaViewSet(viewsets.ModelViewSet):
@@ -93,7 +95,7 @@ def login(request):
     username = request.data.get('username')
     password = request.data.get('password')
 
-    user = authenticate(username=username, password=password)
+    user = authenticate(username=username, password=password)   
 
     if user:
         token, created = Token.objects.get_or_create(user=user)
@@ -451,7 +453,7 @@ def listar_asistencia(request):
     matriculas = Matricula.objects.all()  # sin select_related
     resultado = []
 
-    if matricula.tipo_curso == 'Reforzamiento':
+    if matricula.tipo_curso == 'Reforzamiento': # type: ignore
         try:
                 recibo = matricula.recibos.order_by('-fecha_pago').first()
                 horas = int(recibo.horas_reforzamiento) if recibo and recibo.horas_reforzamiento else 16
