@@ -1,13 +1,13 @@
 # app_escuela/api/views.py
-from datetime import timedelta, date, datetime
+from datetime import timedelta, date 
 import openpyxl
 from django.db.models import Sum
+from django.db.models.functions import TruncMonth
 from django.http import HttpResponse
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import status
 
 # Decoradores y permisos
-from rest_framework import permissions
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
 
@@ -17,7 +17,6 @@ from rest_framework.authtoken.models import Token
 from django.contrib.auth import authenticate
 
 # Excepciones y filtros
-from rest_framework.exceptions import ValidationError
 from django_filters.rest_framework import DjangoFilterBackend
 
 # ViewSets
@@ -38,7 +37,6 @@ from .serializers import (
     CrearBloqueCitasSerializer,
     InstructorSerializer,
 )
-
 
 class InstructorViewSet(viewsets.ModelViewSet):
     queryset = Instructor.objects.all()
@@ -108,7 +106,6 @@ def login(request):
         })
 
     return Response({'error': 'Credenciales inválidas'}, status=401)
-
 
 # EXPORTAR EXCEL
 @api_view(['GET'])
@@ -183,7 +180,6 @@ def exportar_egresados_excel(request):
     wb.save(response)
     return response
 
-
 # SALDO DE MATRÍCULA
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -239,7 +235,6 @@ def saldo(request):
             {"error": "Matrícula no encontrada"},
             status=404,
         )
-
 
 # CALENDARIO
 class CalendarioViewSet(viewsets.ModelViewSet):
@@ -495,7 +490,6 @@ def listar_asistencia(request):
 
     return Response(resultado)
 
-
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def marcar_asistencia(request):
@@ -509,3 +503,91 @@ def marcar_asistencia(request):
         return Response({'mensaje': 'Asistencia registrada'})
     except Calendario.DoesNotExist:
         return Response({'error': 'Clase no encontrada'}, status=404)
+    
+#Dashboarda grafica
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def dashboard_ganancias(request):
+    # Agrupación con corte el día 26 de cada mes
+    recibos = (
+        Recibo.objects
+        .extra(select={
+            'mes_fiscal': """
+                CASE
+                    WHEN EXTRACT(DAY FROM fecha_pago) <= 26
+                    THEN TO_CHAR(fecha_pago, 'YYYY-MM')
+                    ELSE TO_CHAR(fecha_pago + INTERVAL '1 month', 'YYYY-MM')
+                END
+            """
+        })
+        .values('mes_fiscal')
+        .annotate(total=Sum('monto_pagado'))
+        .order_by('mes_fiscal')
+    )
+
+    data = [
+        {"mes": item["mes_fiscal"], "total": float(item["total"] or 0)}
+        for item in recibos
+        if item["mes_fiscal"] is not None
+    ]
+    return Response(data)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def dashboard_resumen(request):
+    from datetime import date as d
+    hoy = d.today()
+
+    # Período ACTUAL (abierto): del 27 al 26 del mes siguiente
+    if hoy.day <= 26:
+        mes_ant = hoy.month - 1 if hoy.month > 1 else 12
+        anio_ant = hoy.year if hoy.month > 1 else hoy.year - 1
+        inicio_actual = d(anio_ant, mes_ant, 27)
+        fin_actual = d(hoy.year, hoy.month, 26)
+    else:
+        mes_sig = hoy.month + 1 if hoy.month < 12 else 1
+        anio_sig = hoy.year if hoy.month < 12 else hoy.year + 1
+        inicio_actual = d(hoy.year, hoy.month, 27)
+        fin_actual = d(anio_sig, mes_sig, 26)
+
+    # Matriculados en el período actual
+    matriculados_periodo = Matricula.objects.filter(
+        f_matricula__gte=inicio_actual,
+        f_matricula__lte=fin_actual
+    ).count()
+
+    total_matriculados = Matricula.objects.count()
+
+    # Asistencia real
+    total_citas = Calendario.objects.filter(asistio__isnull=False).count()
+    asistencia = round(
+        Calendario.objects.filter(asistio=True).count() / total_citas * 100
+        if total_citas > 0 else 0
+    )
+
+    # Ingresos acumulados TOTALES (todos los recibos históricos)
+    ingresos_totales = float(
+        Recibo.objects.aggregate(total=Sum('monto_cordobas'))['total'] or
+        Recibo.objects.aggregate(total=Sum('monto_pagado'))['total'] or 0
+    )
+
+    # Ingresos solo del período actual
+    ingresos_periodo = float(
+        Recibo.objects.filter(fecha_pago__gte=inicio_actual, fecha_pago__lte=fin_actual)
+        .aggregate(total=Sum('monto_cordobas'))['total'] or 0
+    )
+
+    ingresos_totales = float(
+        Recibo.objects.aggregate(total=Sum('monto_cordobas'))['total'] or
+        Recibo.objects.aggregate(total=Sum('monto_pagado'))['total'] or 0
+    )
+
+    return Response({
+        "matriculados_periodo": matriculados_periodo,
+        "total_matriculados": total_matriculados,
+        "asistencia": asistencia,
+        "ingresos_totales": ingresos_totales,       # ← AGREGA esta línea
+        "ingresos_periodo": ingresos_periodo,
+        "periodo_inicio": inicio_actual.strftime("%d/%m/%Y"),
+        "periodo_fin": fin_actual.strftime("%d/%m/%Y"),
+    })
