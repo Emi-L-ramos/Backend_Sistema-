@@ -77,12 +77,11 @@ class Matricula(models.Model):
     ]
 
     HORARIO_CHOICES = [
-        ('6AM', '6AM'),      # ✅ Corregido
-        ('8AM', '8AM'),    # ✅ Corregido
-        ('10AM', '10AM'),  # ✅ Corregido
+        ('06AM', '06AM'),      
+        ('08AM', '08AM'),    
+        ('10AM', '10AM'),  
         ('12PM', '12PM'),
-        ('02PM', '02PM'),    # ✅ Corregido (cambié 02PM a 2PM)
-        ('04PM', '04PM'),      # ✅ Corregido (cambié 04PM a 4PM)
+        ('04PM', '04PM'),     
         
     ]
 
@@ -118,11 +117,10 @@ class Matricula(models.Model):
 
     def obtener_rango_horario(self):
         mapeo = {
-            '6AM':  (time(6,  0), time(8,  0)),
-            '8AM':  (time(8,  0), time(10, 0)),
+            '06AM':  (time(6,  0), time(8,  0)),
+            '08AM':  (time(8,  0), time(10, 0)),
             '10AM': (time(10, 0), time(12, 0)),
             '12PM': (time(12, 0), time(14, 0)),
-            '02PM': (time(14, 0), time(16, 0)),
             '04PM': (time(16, 0), time(18, 0)),
         }
         return mapeo.get(self.horario)
