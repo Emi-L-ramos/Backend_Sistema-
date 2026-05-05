@@ -508,15 +508,14 @@ def marcar_asistencia(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def dashboard_ganancias(request):
-    # Agrupación con corte el día 26 de cada mes
     recibos = (
         Recibo.objects
         .extra(select={
             'mes_fiscal': """
                 CASE
-                    WHEN EXTRACT(DAY FROM fecha_pago) <= 26
-                    THEN TO_CHAR(fecha_pago, 'YYYY-MM')
-                    ELSE TO_CHAR(fecha_pago + INTERVAL '1 month', 'YYYY-MM')
+                    WHEN DAY(fecha_pago) <= 26
+                    THEN DATE_FORMAT(fecha_pago, '%%Y-%%m')
+                    ELSE DATE_FORMAT(DATE_ADD(fecha_pago, INTERVAL 1 MONTH), '%%Y-%%m')
                 END
             """
         })
@@ -530,6 +529,7 @@ def dashboard_ganancias(request):
         for item in recibos
         if item["mes_fiscal"] is not None
     ]
+
     return Response(data)
 
 @api_view(['GET'])
