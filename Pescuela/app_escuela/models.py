@@ -6,6 +6,7 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from datetime import time
 from rest_framework.exceptions import ValidationError
+from django.utils import timezone
 
 class Usuario(AbstractUser):
     ROLES = (
@@ -90,7 +91,7 @@ class Matricula(models.Model):
         ('Extraordinario', 'Extraordinario'),
     ]
 
-    f_matricula = models.DateField(auto_now_add=True)
+    f_matricula = models.DateField(default=timezone.now)
     nombre = models.CharField(max_length=100)
     apellido = models.CharField(max_length=100)
     edad=models.CharField(max_length=100)
@@ -154,7 +155,7 @@ class Recibo(models.Model):
     matricula = models.ForeignKey(Matricula, on_delete=models.CASCADE, related_name='recibos')
     numero_recibo = models.CharField(max_length=50, unique=True)
     monto_pagado = models.DecimalField(max_digits=10, decimal_places=2)
-    fecha_pago = models.DateField(auto_now_add=True)
+    fecha_pago = models.DateField(default=timezone.now)
 
     tipo_pago = models.CharField(max_length=20, choices=TIPO_PAGO_CHOICES, default='anticipo')
     cantidad = models.PositiveSmallIntegerField(default=15)

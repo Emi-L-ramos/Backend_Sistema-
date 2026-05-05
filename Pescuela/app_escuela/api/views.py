@@ -504,10 +504,12 @@ def marcar_asistencia(request):
     except Calendario.DoesNotExist:
         return Response({'error': 'Clase no encontrada'}, status=404)
     
-#Dashboarda grafica
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def dashboard_ganancias(request):
+    from django.db.models import Count, Sum
+
+    # Ganancias por mes fiscal (27 → 26) desde Recibo
     recibos = (
         Recibo.objects
         .extra(select={
@@ -524,12 +526,37 @@ def dashboard_ganancias(request):
         .order_by('mes_fiscal')
     )
 
-    data = [
-        {"mes": item["mes_fiscal"], "total": float(item["total"] or 0)}
-        for item in recibos
-        if item["mes_fiscal"] is not None
-    ]
+    # Matriculados por mes fiscal desde Matricula (usando f_matricula)
+    matriculas = (
+        Matricula.objects
+        .extra(select={
+            'mes_fiscal': """
+                CASE
+                    WHEN DAY(f_matricula) <= 26
+                    THEN DATE_FORMAT(f_matricula, '%%Y-%%m')
+                    ELSE DATE_FORMAT(DATE_ADD(f_matricula, INTERVAL 1 MONTH), '%%Y-%%m')
+                END
+            """
+        })
+        .values('mes_fiscal')
+        .annotate(matriculados=Count('id'))
+    )
+    map_matriculas = {m['mes_fiscal']: m['matriculados'] for m in matriculas if m['mes_fiscal']}
 
+    # Unimos meses presentes en cualquiera de las dos fuentes
+    meses = sorted(
+        {r['mes_fiscal'] for r in recibos if r['mes_fiscal']} | set(map_matriculas.keys())
+    )
+    map_recibos = {r['mes_fiscal']: float(r['total'] or 0) for r in recibos if r['mes_fiscal']}
+
+    data = [
+        {
+            "mes": mes,
+            "total": map_recibos.get(mes, 0),
+            "matriculados": map_matriculas.get(mes, 0),
+        }
+        for mes in meses
+    ]
     return Response(data)
 
 @api_view(['GET'])
