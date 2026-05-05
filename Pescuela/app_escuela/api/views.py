@@ -199,24 +199,36 @@ def saldo(request):
         recibos = matricula.recibos.all()
         tipo_matricula = str(matricula.tipo_curso).lower()
 
-        if 'reforz' in tipo_matricula:
-            tipo_curso = 'reforzamiento'
+        # Cursos por horas: intermedio, avanzado (y compatibilidad con 'reforz')
+        es_por_horas = (
+            'intermedio' in tipo_matricula or
+            'avanzado'   in tipo_matricula or
+            'reforz'     in tipo_matricula
+        )
+
+        if es_por_horas:
+            if 'avanzado' in tipo_matricula:
+                tipo_curso = 'avanzado'
+            else:
+                tipo_curso = 'intermedio'
+
+            # Las horas vienen del primer recibo o de la matrícula
             primer_recibo = recibos.first()
             if primer_recibo and primer_recibo.horas_reforzamiento:
                 horas = int(primer_recibo.horas_reforzamiento)
             else:
                 horas = int(request.query_params.get('horas', 1))
-            horas = max(1, min(horas, 15))
-            monto_total = horas * 433.33
+            horas = max(1, horas)
+            monto_total = round(horas * 433.33)
         else:
-            tipo_curso = 'regular'
+            tipo_curso = 'principiante'
             horas = 15
-            monto_total = 6500
+            monto_total = round(15 * 433.33)  # 6500
 
         total_pagado = float(
             matricula.recibos.aggregate(total=Sum('monto_pagado'))['total'] or 0
         )
-        saldo_pendiente = max(monto_total - total_pagado, 0)
+        saldo_pendiente = max(round(monto_total - total_pagado), 0)
 
         return Response({
             "monto_total": monto_total,
