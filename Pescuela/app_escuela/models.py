@@ -13,19 +13,14 @@ class Usuario(AbstractUser):
     ROLES = (
         ('admin', 'Administrador'),
         ('instructor', 'Instructor'),
-        ('secretaria', 'Secretaria'),
-        ('cajero', 'Cajero'),
-        ('consulta', 'Solo Consulta'),
+        ('estudiante', 'Estudiante'),
     )
     rol = models.CharField(max_length=20, choices=ROLES, default='admin')
 
     def tiene_permiso(self, permiso):
         permisos = {
             'admin': ['*'],
-            'secretaria': ['ver_matriculas', 'crear_matriculas', 'editar_matriculas',
-                           'ver_recibos', 'crear_recibos', 'exportar'],
-            'cajero': ['ver_matriculas', 'ver_recibos', 'crear_recibos', 'editar_recibos', 'exportar'],
-            'consulta': ['ver_matriculas', 'ver_recibos'],
+            'estudiante': ['ver_matriculas', 'ver_recibos'],
             'instructor': ['ver_matriculas', 'ver_recibos'],
         }
         if permiso in permisos.get(self.rol, []) or '*' in permisos.get(self.rol, []):
@@ -45,6 +40,13 @@ class Instructor(models.Model):
 
 
 class Matricula(models.Model):
+    usuario = models.OneToOneField(
+    Usuario, 
+    on_delete=models.SET_NULL, 
+    null=True, 
+    blank=True, 
+    related_name='matricula'
+    )
 
     TIPO_CURSO_CHOICES = [
         ('Principiante', 'Principiante'),
@@ -159,7 +161,6 @@ class Recibo(models.Model):
     monto_dolares       = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     tasa_cambio         = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('36.60'))
     tipo_curso          = models.CharField(max_length=20, default='Principiante')
-
     horas_reforzamiento = models.PositiveSmallIntegerField(null=True, blank=True)
     estado              = models.CharField(max_length=20, choices=ESTADO_CHOICES)
     metodo_pago         = models.CharField(max_length=20, choices=METODO_PAGO_CHOICES)
