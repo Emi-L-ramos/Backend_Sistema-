@@ -85,6 +85,32 @@ class UserViewSet(viewsets.ModelViewSet):
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
 
+    def create(self, request, *args, **kwargs):
+        matricula_id = request.data.get('matricula_id')
+        response = super().create(request, *args, **kwargs)
+        if matricula_id and response.status_code == 201:
+            try:
+                matricula = Matricula.objects.get(pk=int(matricula_id))
+                usuario = Usuario.objects.get(pk=response.data['id'])
+                matricula.usuario = usuario
+                matricula.save()
+            except (Matricula.DoesNotExist, ValueError, TypeError):
+                pass
+        return response
+
+    def update(self, request, *args, **kwargs):
+        matricula_id = request.data.get('matricula_id')
+        response = super().update(request, *args, **kwargs)
+        if matricula_id and response.status_code == 200:
+            try:
+                matricula = Matricula.objects.get(pk=matricula_id)
+                usuario = Usuario.objects.get(pk=response.data['id'])
+                matricula.usuario = usuario
+                matricula.save()
+            except Matricula.DoesNotExist:
+                pass
+        return response
+
 
 # LOGIN
 @api_view(['POST'])
@@ -282,8 +308,11 @@ class CalendarioViewSet(viewsets.ModelViewSet):
 
         if hasattr(user, 'instructor'):
             return qs.filter(instructor=user.instructor).order_by('fecha', 'hora_inicio')
-
-        return qs.none()
+        
+        if getattr(user, 'rol', None) == 'estudiante':
+            if hasattr(user, 'matricula'):
+                return qs.filter(matricula=user.matricula).order_by('fecha', 'hora_inicio')
+            return qs.none()
 
     @action(detail=False, methods=['get'], url_path='hoy')
     def citas_hoy(self, request):

@@ -13,19 +13,14 @@ class Usuario(AbstractUser):
     ROLES = (
         ('admin', 'Administrador'),
         ('instructor', 'Instructor'),
-        ('secretaria', 'Secretaria'),
-        ('cajero', 'Cajero'),
-        ('consulta', 'Solo Consulta'),
+        ('estudiante', 'Estudiante'),
     )
     rol = models.CharField(max_length=20, choices=ROLES, default='admin')
 
     def tiene_permiso(self, permiso):
         permisos = {
             'admin': ['*'],
-            'secretaria': ['ver_matriculas', 'crear_matriculas', 'editar_matriculas',
-                           'ver_recibos', 'crear_recibos', 'exportar'],
-            'cajero': ['ver_matriculas', 'ver_recibos', 'crear_recibos', 'editar_recibos', 'exportar'],
-            'consulta': ['ver_matriculas', 'ver_recibos'],
+            'estudiante': ['ver_matriculas', 'ver_recibos'],
             'instructor': ['ver_matriculas', 'ver_recibos'],
         }
         if permiso in permisos.get(self.rol, []) or '*' in permisos.get(self.rol, []):
@@ -45,6 +40,13 @@ class Instructor(models.Model):
 
 
 class Matricula(models.Model):
+    usuario = models.OneToOneField(
+    Usuario, 
+    on_delete=models.SET_NULL, 
+    null=True, 
+    blank=True, 
+    related_name='matricula'
+    )
 
     TIPO_CURSO_CHOICES = [
         ('Principiante', 'Principiante'),
@@ -90,7 +92,7 @@ class Matricula(models.Model):
         ('Extraordinario', 'Extraordinario'),
     ]
 
-    f_matricula          = models.DateField(auto_now_add=True)
+    f_matricula          = models.DateField(default=timezone.now)
     nombre               = models.CharField(max_length=100)
     apellido             = models.CharField(max_length=100)
     edad                 = models.CharField(max_length=100)
@@ -150,7 +152,7 @@ class Recibo(models.Model):
     matricula           = models.ForeignKey(Matricula, on_delete=models.CASCADE, related_name='recibos')
     numero_recibo       = models.CharField(max_length=50, unique=True)
     monto_pagado        = models.DecimalField(max_digits=10, decimal_places=2)
-    fecha_pago          = models.DateField(auto_now_add=True)
+    fecha_pago          = models.DateField(default=timezone.now)
     tipo_pago           = models.CharField(max_length=20, choices=TIPO_PAGO_CHOICES, default='anticipo')
     cantidad            = models.PositiveSmallIntegerField(default=15)
     monto_unitario      = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('433.33'))
