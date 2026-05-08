@@ -24,4 +24,10 @@ urlpatterns = [
     path('justificar-clase/', justificar_clase),
     path('dashboard/ganancias/', dashboard_ganancias),
     path('dashboard/resumen/', dashboard_resumen),
+    
+
+
+
+
+
 ]

@@ -29,6 +29,7 @@ class UserSerializer(serializers.ModelSerializer):
 
 class MatriculaSerializer(serializers.ModelSerializer):
     horas_clases = serializers.SerializerMethodField()
+    estado_display = serializers.CharField(source='get_estado_display', read_only=True)
 
     def get_horas_clases(self, obj):
         if 'reforz' in str(obj.tipo_curso).lower():

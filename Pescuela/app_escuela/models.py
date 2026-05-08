@@ -9,26 +9,45 @@ from rest_framework.exceptions import ValidationError
 from django.utils import timezone
 
 
+from django.contrib.auth.models import AbstractUser
+from django.db import models
+
+class Rol(models.Model):
+    nombre = models.CharField(max_length=50, unique=True) # "admin", "estudiante", etc.
+
+    def __str__(self):
+        return self.nombre
+
 class Usuario(AbstractUser):
-    ROLES = (
-        ('admin', 'Administrador'),
-        ('instructor', 'Instructor'),
-        ('estudiante', 'Estudiante'),
+    # Relación con el modelo Rol (creado manualmente por el admin)
+    rol = models.ForeignKey(
+        Rol,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='usuarios'
     )
-    rol = models.CharField(max_length=20, choices=ROLES, default='admin')
+
+    @property
+    def rol_nombre(self):
+        return self.rol.nombre.lower() if self.rol else ""
 
     def tiene_permiso(self, permiso):
+        # Tu lógica de permisos
         permisos = {
             'admin': ['*'],
             'estudiante': ['ver_matriculas', 'ver_recibos'],
             'instructor': ['ver_matriculas', 'ver_recibos'],
         }
-        if permiso in permisos.get(self.rol, []) or '*' in permisos.get(self.rol, []):
+        
+        # Usamos rol_nombre para la comparación
+        rol_actual = self.rol_nombre
+        if permiso in permisos.get(rol_actual, []) or '*' in permisos.get(rol_actual, []):
             return True
         return False
 
     def __str__(self):
-        return f"{self.username} - {self.get_rol_display()}"
+        return f"{self.username} - {self.rol_nombre}"
 
 
 class Instructor(models.Model):
@@ -47,6 +66,11 @@ class Matricula(models.Model):
     blank=True, 
     related_name='matricula'
     )
+
+    ESTADO_CHOICES = [
+    ('pendiente', 'Pendiente'),
+    ('aprobado', 'Aprobado'),
+]
 
     TIPO_CURSO_CHOICES = [
         ('Principiante', 'Principiante'),
@@ -92,6 +116,7 @@ class Matricula(models.Model):
         ('Extraordinario', 'Extraordinario'),
     ]
 
+    estado = models.CharField(max_length=20,choices=ESTADO_CHOICES,default='pendiente')
     f_matricula          = models.DateField(default=timezone.now)
     nombre               = models.CharField(max_length=100)
     apellido             = models.CharField(max_length=100)
@@ -124,6 +149,14 @@ class Matricula(models.Model):
             '04PM': (time(16, 0), time(18, 0)),
         }
         return mapeo.get(self.horario)
+    
+    def actualizar_estado_pago(self):
+        total_pagado = self.recibos.filter(
+            estado='pagado'
+        ).exists()
+
+        self.estado = 'aprobado' if total_pagado else 'pendiente'
+        self.save(update_fields=['estado'])
 
     def __str__(self):
         return f"{self.nombre} {self.apellido} - {self.cedula}"
@@ -165,6 +198,8 @@ class Recibo(models.Model):
     estado              = models.CharField(max_length=20, choices=ESTADO_CHOICES)
     metodo_pago         = models.CharField(max_length=20, choices=METODO_PAGO_CHOICES)
     observaciones       = models.TextField(blank=True, null=True)
+
+    
 
     def _calcular_monto_total_curso(self):
         """Devuelve el monto total esperado del curso para esta matrícula."""
@@ -261,6 +296,8 @@ class Recibo(models.Model):
                         self.monto_cordobas = monto_total
                         self.concepto = f"{self.concepto} (consolidado)"
                         super().save(*args, **kwargs)
+                        self.matricula.estado = 'aprobado'
+                        self.matricula.save(update_fields=['estado'])
                     return
                 else:
                     # Primer anticipo: debe ser menor al total
@@ -278,7 +315,11 @@ class Recibo(models.Model):
                     )
                 self.estado = 'pagado'
 
-        super().save(*args, **kwargs)
+            super().save(*args, **kwargs)
+
+            if self.estado == 'pagado' or self.tipo_pago in ['completo', 'beneficio']:
+                self.matricula.estado = 'aprobado'
+                self.matricula.save(update_fields=['estado'])
 
     def __str__(self):
         return f"Recibo #{self.numero_recibo} - {self.matricula.nombre} - C${self.monto_pagado}"

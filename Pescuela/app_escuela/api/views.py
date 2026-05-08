@@ -26,6 +26,7 @@ from rest_framework import viewsets
 from ..models import Matricula, Recibo, Usuario, Calendario, Notas, Instructor
 
 from django.db import transaction
+from django.db.models import Q
 
 # Serializers
 from .serializers import (
@@ -51,6 +52,76 @@ class MatriculaViewSet(viewsets.ModelViewSet):
     queryset = Matricula.objects.all()
     serializer_class = MatriculaSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = Matricula.objects.all().order_by('-id')
+        buscar = self.request.query_params.get('buscar')
+        estado = self.request.query_params.get('estado')
+
+        if buscar:
+            queryset = queryset.filter(cedula__icontains=buscar)
+
+        if estado:
+            queryset = queryset.filter(estado=estado)
+
+        return queryset
+
+    @action(detail=False, methods=['get'], url_path='buscar-estudiante')
+    def buscar_estudiante(self, request):
+        q = request.query_params.get('q')
+
+        if not q:
+            return Response(
+                {"error": "Debe enviar un nombre o una cédula para buscar."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        matriculas = Matricula.objects.filter(
+            Q(cedula__icontains=q) |
+            Q(nombre__icontains=q) |
+            Q(apellido__icontains=q)
+        ).order_by('-id')[:10]
+
+        resultados = []
+
+        for matricula in matriculas:
+            resultados.append({
+                "id": matricula.id,
+                "nombre": matricula.nombre,
+                "apellido": matricula.apellido,
+                "cedula": matricula.cedula,
+                "edad": matricula.edad,
+                "sexo": matricula.sexo,
+                "nacionalidad": matricula.nacionalidad,
+                "fecha_nacimiento": matricula.fecha_nacimiento,
+                "direccion": matricula.direccion,
+                "correo_electronico": matricula.correo_electronico,
+                "telefono_movil": matricula.telefono_movil,
+                "nivel_educativo": matricula.nivel_educativo,
+                "profesion_u_oficio": matricula.profesion_u_oficio,
+                "en_caso_de_emrgencia": matricula.en_caso_de_emrgencia,
+                "telefono_emergencia": matricula.telefono_emergencia,
+            })
+
+        return Response(resultados)
+
+    @action(detail=True, methods=['patch'], url_path='aprobar')
+    def aprobar(self, request, pk=None):
+        matricula = self.get_object()
+        matricula.estado = 'aprobado'
+        matricula.save()
+
+        serializer = self.get_serializer(matricula)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['patch'], url_path='pendiente')
+    def pendiente(self, request, pk=None):
+        matricula = self.get_object()
+        matricula.estado = 'pendiente'
+        matricula.save()
+
+        serializer = self.get_serializer(matricula)
+        return Response(serializer.data)
 
 
 class ReciboViewSet(viewsets.ModelViewSet):
@@ -565,7 +636,7 @@ def dashboard_ganancias(request):
             """
         })
         .values('mes_fiscal')
-        .annotate(total=Sum('monto_pagado'))
+       .annotate(total=Sum('monto_cordobas'))
         .order_by('mes_fiscal')
     )
 
