@@ -54,24 +54,30 @@ class UserSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         matricula_id = data.get('matricula_id')
+        rol = data.get('rol') or getattr(self.instance, 'rol', None)
+        rol_nombre = rol.nombre.lower() if rol else ""
 
-        if matricula_id:
-            try:
-                matricula = Matricula.objects.select_related('estudiante').get(id=matricula_id)
-            except Matricula.DoesNotExist:
+        if rol_nombre == "estudiante":
+            if not matricula_id and not self.instance:
                 raise serializers.ValidationError({
-                    'matricula_id': 'La matrícula no existe.'
+                    'matricula_id': 'Debe seleccionar una matrícula para crear un usuario estudiante.'
                 })
 
-            if matricula.estado != 'aprobado':
-                raise serializers.ValidationError({
-                    'matricula_id': 'No se puede crear usuario porque la matrícula aún no está aprobada.'
-                })
+            if matricula_id:
+                try:
+                    matricula = Matricula.objects.select_related('estudiante').get(id=matricula_id)
+                except Matricula.DoesNotExist:
+                    raise serializers.ValidationError({
+                        'matricula_id': 'La matrícula no existe.'
+                    })
 
-            if matricula.estudiante.usuario:
-                raise serializers.ValidationError({
-                    'matricula_id': 'Este estudiante ya tiene un usuario asignado.'
-                })
+                if Usuario.objects.filter(
+                    estudiante=matricula.estudiante,
+                    rol__nombre__iexact='estudiante'
+                ).exclude(id=getattr(self.instance, 'id', None)).exists():
+                    raise serializers.ValidationError({
+                        'matricula_id': 'Este estudiante ya tiene un usuario asignado.'
+                    })
 
         return data
 
@@ -90,9 +96,8 @@ class UserSerializer(serializers.ModelSerializer):
 
         if matricula_id:
             matricula = Matricula.objects.select_related('estudiante').get(id=matricula_id)
-            estudiante = matricula.estudiante
-            estudiante.usuario = usuario
-            estudiante.save(update_fields=['usuario'])
+            usuario.estudiante = matricula.estudiante
+            usuario.save(update_fields=['estudiante'])
 
         return usuario
 
@@ -127,12 +132,26 @@ class CategoriaVehiculoSerializer(serializers.ModelSerializer):
 
 
 class EstudianteSerializer(serializers.ModelSerializer):
-    usuario_data = UserSerializer(source='usuario', read_only=True)
+    usuario_data = serializers.SerializerMethodField()
 
     class Meta:
         model = Estudiante
         fields = '__all__'
 
+    def get_usuario_data(self, obj):
+        usuario = obj.usuarios.filter(rol__nombre__iexact='estudiante').first()
+
+        if not usuario:
+            return None
+
+        return {
+            'id': usuario.id,
+            'username': usuario.username,
+            'email': usuario.email,
+            'first_name': usuario.first_name,
+            'last_name': usuario.last_name,
+            'rol': usuario.rol.nombre if usuario.rol else None,
+        }
 
 class InstructorSerializer(serializers.ModelSerializer):
     nombre = serializers.CharField(source='usuario.first_name', read_only=True)
@@ -177,7 +196,7 @@ class MatriculaSerializer(serializers.ModelSerializer):
         return f"{obj.estudiante.nombre} {obj.estudiante.apellido}"
 
     def get_tiene_usuario(self, obj):
-        return obj.estudiante.usuario is not None
+        return obj.estudiante.usuarios.exists()
 
 
 class ReciboSerializer(serializers.ModelSerializer):
@@ -211,7 +230,7 @@ class ReciboSerializer(serializers.ModelSerializer):
         valor_curso = self.obtener_valor_curso(matricula)
 
         if matricula.tipo_curso == 'Principiante':
-            return valor_curso.precio_total
+           return Decimal(valor_curso.precio_total).quantize(Decimal('1'))
 
         if matricula.tipo_curso in ['Intermedio', 'Avanzado']:
             horas = matricula.horas_reforzamiento
@@ -221,7 +240,7 @@ class ReciboSerializer(serializers.ModelSerializer):
                     f'El curso {matricula.tipo_curso} requiere horas.'
                 )
 
-            return Decimal(horas) * valor_curso.precio_hora
+            return (Decimal(horas) * valor_curso.precio_hora).quantize(Decimal('1'))
 
         return Decimal('0')
 
