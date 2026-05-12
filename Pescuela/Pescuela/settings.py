@@ -27,6 +27,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'rest_framework.authtoken',  # ✅ Token authentication
+  
     'app_escuela',  # Tu aplicación
     'django_filters',  # ✅ Para filtrado en vistas
 ]
