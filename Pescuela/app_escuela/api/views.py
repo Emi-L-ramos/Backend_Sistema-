@@ -86,12 +86,12 @@ class CategoriaVehiculoViewSet(viewsets.ModelViewSet):
 
 
 class EstudianteViewSet(viewsets.ModelViewSet):
-    queryset = Estudiante.objects.select_related('usuario').all()
+    queryset = Estudiante.objects.all()
     serializer_class = EstudianteSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = Estudiante.objects.select_related('usuario').all().order_by('-id')
+        queryset = Estudiante.objects.all().order_by('-id')
         buscar = self.request.query_params.get('buscar')
 
         if buscar:
@@ -193,7 +193,7 @@ class MatriculaViewSet(viewsets.ModelViewSet):
                 'nivel_educativo': estudiante.nivel_educativo,
                 'en_caso_de_emergencia': estudiante.en_caso_de_emergencia,
                 'telefono_emergencia': estudiante.telefono_emergencia,
-                'tiene_usuario': estudiante.usuario is not None,
+                'tiene_usuario': estudiante.usuarios.exists(),
             })
 
         return Response(resultados)
@@ -236,7 +236,6 @@ def saldo(request):
 
     total_pagado = Recibo.objects.filter(
         matricula=matricula,
-        estado='pagado'
     ).aggregate(
         total=models.Sum('monto_pagado')
     )['total'] or Decimal('0')
@@ -622,47 +621,6 @@ def login(request):
     })
 
 
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def saldo(request):
-    matricula_id = request.query_params.get('matricula')
-
-    if not matricula_id:
-        return Response({'error': 'Se requiere el ID de la matrícula.'}, status=400)
-
-    try:
-        matricula = Matricula.objects.select_related(
-            'estudiante',
-            'plan_estudio',
-        ).get(id=matricula_id)
-    except Matricula.DoesNotExist:
-        return Response({'error': 'Matrícula no encontrada.'}, status=404)
-
-    monto_total = calcular_monto_total_matricula(matricula) # type: ignore
-
-    total_pagado = matricula.recibos.filter(estado='pagado').aggregate(
-        total=Sum('monto_pagado')
-    )['total'] or Decimal('0')
-
-    saldo_pendiente = max(monto_total - total_pagado, Decimal('0'))
-
-    return Response({
-        'monto_total': float(monto_total),
-        'total_pagado': float(total_pagado),
-        'saldo_pendiente': float(saldo_pendiente),
-        'cantidad_pagos': matricula.recibos.count(),
-        'pagos_permitidos': 2,
-        'nombre': matricula.estudiante.nombre,
-        'apellido': matricula.estudiante.apellido,
-        'cedula': matricula.estudiante.cedula,
-        'plan_estudio': matricula.plan_estudio.nombre,
-        'tipo_curso': matricula.plan_estudio.tipo_curso,
-        'modalidad': matricula.plan_estudio.modalidad,
-        'horas': matricula.horas_reforzamiento or matricula.plan_estudio.cantidad_horas,
-        'precio_hora': float(matricula.plan_estudio.monto_unitario),
-        'estado': matricula.estado,
-    })
-from django.db.models.functions import TruncMonth
 from django.db.models import Sum, Count, Q
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -715,17 +673,18 @@ class DashboardGananciasView(APIView):
                 ).aggregate(total=Sum('monto_pagado'))['total'] or Decimal('0')
                 
                 # Matriculados del mes
-                total_matriculados = Matricula.objects.filter(
-                    fecha_registro__year=fecha_mes.year,
-                    fecha_registro__month=fecha_mes.month,
-                    estado='matriculado'
-                ).count()
+                total_matriculados = Recibo.objects.filter(
+                    fecha_pago__year=fecha_mes.year,
+                    fecha_pago__month=fecha_mes.month,
+                    tipo_pago__in=['completo', 'beneficio']
+                ).values('matricula').distinct().count()
                 
-                meses_resultado.append({
-                    'mes': fecha_info['mes_str'],
-                    'total': float(total_ganancias),
-                    'matriculados': total_matriculados
-                })
+                if total_ganancias > 0 or total_matriculados > 0:
+                    meses_resultado.append({
+                        'mes': fecha_info['mes_str'],
+                        'total': float(total_ganancias),
+                        'matriculados': total_matriculados
+                    })
             
             return Response(meses_resultado)
             
