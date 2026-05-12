@@ -723,8 +723,8 @@ class DashboardResumenView(APIView):
             ).count()
             
             # Estudiantes activos (mismo que matriculados para este caso)
-            estudiantes_activos = Matricula.objects.filter(
-                estado='matriculado'
+            estudiantes_activos = Estudiante.objects.filter(
+                activo=True
             ).count()
             
             # Egresados del mes actual
