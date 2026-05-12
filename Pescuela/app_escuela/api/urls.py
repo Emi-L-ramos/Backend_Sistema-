@@ -1,33 +1,50 @@
+# app_escuela/api/urls.py
+
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+
 from .views import (
-    MatriculaViewSet, ReciboViewSet, UserViewSet, dashboard_ganancias, dashboard_resumen,
-    login, saldo, exportar_egresados_excel,
-    CalendarioViewSet, InstructorViewSet,
-    listar_asistencia, marcar_asistencia, justificar_clase
+    DashboardIngresosMensualesView,
+    RolViewSet,
+    UserViewSet,
+    EstudianteViewSet,
+    InstructorViewSet,
+    CategoriaVehiculoViewSet,
+    PlanEstudioViewSet,
+    ValorCursoViewSet,
+    MatriculaViewSet,
+    ReciboViewSet,
+    CalendarioViewSet,
+    AsistenciaViewSet,
+    NotasViewSet,
+    login,
+    saldo,
+    DashboardGananciasView,
+    DashboardResumenView
 )
 
 router = DefaultRouter()
+
+router.register(r'roles', RolViewSet)
+router.register(r'usuarios', UserViewSet)
+router.register(r'estudiantes', EstudianteViewSet)
+router.register(r'instructores', InstructorViewSet)
+router.register(r'categorias', CategoriaVehiculoViewSet)
+router.register(r'planes-estudio', PlanEstudioViewSet)
+router.register(r'valores-curso', ValorCursoViewSet)
 router.register(r'matricula', MatriculaViewSet)
 router.register(r'recibo', ReciboViewSet)
-router.register(r'usuarios', UserViewSet)
 router.register(r'calendario', CalendarioViewSet)
-router.register(r'instructores', InstructorViewSet)
+router.register(r'asistencia', AsistenciaViewSet)
+router.register(r'notas', NotasViewSet)
+
+# app_escuela/api/urls.py
 
 urlpatterns = [
     path('', include(router.urls)),
     path('login/', login, name='login'),
     path('saldo/', saldo, name='saldo'),
-    path('reporte-excel/', exportar_egresados_excel, name='exporte_egresado_excel'),
-    path('asistencia/', listar_asistencia),
-    path('asistencia/marcar/', marcar_asistencia),
-    path('justificar-clase/', justificar_clase),
-    path('dashboard/ganancias/', dashboard_ganancias),
-    path('dashboard/resumen/', dashboard_resumen),
-    
-
-
-
-
-
+    path('dashboard/ganancias/', DashboardGananciasView.as_view(), name='dashboard-ganancias'),
+    path('dashboard/resumen/', DashboardResumenView.as_view(), name='dashboard-resumen'),  
+    path('dashboard/ingresos-mensuales/', DashboardIngresosMensualesView.as_view(), name='dashboard-ingresos-mensuales'),
 ]

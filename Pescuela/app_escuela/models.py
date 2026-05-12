@@ -1,27 +1,70 @@
-# app_escuela/models.py
-from django.contrib.auth.models import AbstractUser
-from django.db import transaction
-from django.db import models
 from decimal import Decimal
-from django.core.exceptions import ValidationError
-from datetime import time
-from rest_framework.exceptions import ValidationError
+
+from django.contrib.auth.models import AbstractUser
+from django.db import models
 from django.utils import timezone
 
 
-from django.contrib.auth.models import AbstractUser
-from django.db import models
-
 class Rol(models.Model):
-    nombre = models.CharField(max_length=50, unique=True) # "admin", "estudiante", etc.
+    nombre = models.CharField(max_length=50, unique=True)
 
     def __str__(self):
         return self.nombre
 
+
+class ValorCurso(models.Model):
+    TIPO_CURSO_CHOICES = [
+        ('Principiante', 'Principiante'),
+        ('Intermedio', 'Intermedio'),
+        ('Avanzado', 'Avanzado'),
+    ]
+    
+    tipo_curso = models.CharField(
+        max_length=50,
+        choices=TIPO_CURSO_CHOICES
+    )
+    precio_hora = models.DecimalField(
+        max_digits=10,
+        decimal_places=2
+    )
+    cantidad_horas = models.PositiveIntegerField(
+        default=15
+    )
+    precio_total = models.DecimalField(
+        max_digits=10,
+        decimal_places=2
+    )
+    activo = models.BooleanField(default=True)
+    fecha_creacion = models.DateTimeField(auto_now_add=True)
+    fecha_modificacion = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Valor del Curso"
+        verbose_name_plural = "Valores de Cursos"
+        ordering = ['-fecha_modificacion']
+
+    def __str__(self):
+        return f"{self.tipo_curso} - C${self.precio_total}"
+
 class Usuario(AbstractUser):
-    # Relación con el modelo Rol (creado manualmente por el admin)
     rol = models.ForeignKey(
         Rol,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='usuarios'
+    )
+
+    estudiante = models.ForeignKey(
+        'Estudiante',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='usuarios'
+    )
+
+    instructor = models.ForeignKey(
+        'Instructor',
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -32,65 +75,36 @@ class Usuario(AbstractUser):
     def rol_nombre(self):
         return self.rol.nombre.lower() if self.rol else ""
 
-    def tiene_permiso(self, permiso):
-        # Tu lógica de permisos
-        permisos = {
-            'admin': ['*'],
-            'estudiante': ['ver_matriculas', 'ver_recibos'],
-            'instructor': ['ver_matriculas', 'ver_recibos'],
-        }
-        
-        # Usamos rol_nombre para la comparación
-        rol_actual = self.rol_nombre
-        if permiso in permisos.get(rol_actual, []) or '*' in permisos.get(rol_actual, []):
-            return True
-        return False
-
     def __str__(self):
         return f"{self.username} - {self.rol_nombre}"
 
 
-class Instructor(models.Model):
-    usuario = models.OneToOneField(Usuario, on_delete=models.CASCADE, null=True, blank=True)
-    especialidad = models.CharField(max_length=100, blank=True, null=True)
+class CategoriaVehiculo(models.Model):
+    nombre = models.CharField(max_length=50, unique=True)
 
     def __str__(self):
-        return self.usuario.username if self.usuario else "Instructor sin usuario"
+        return self.nombre
 
 
-class Matricula(models.Model):
-    usuario = models.OneToOneField(
-    Usuario, 
-    on_delete=models.SET_NULL, 
-    null=True, 
-    blank=True, 
-    related_name='matricula'
+class Instructor(models.Model):
+    nombre = models.CharField(max_length=30)
+    apellido = models.CharField(max_length=30)
+    numero_telefono = models.CharField(max_length=20, blank=True, null=True)
+    direccion = models.CharField(max_length=200, blank=True, null=True)
+    categoria_vehiculo = models.ForeignKey(
+        CategoriaVehiculo,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='instructores'
     )
+    experiencia = models.TextField(blank=True, null=True)
+    edad = models.PositiveIntegerField(blank=True, null=True)
+    def __str__(self):
+        return f"{self.nombre} , {self.apellido}"
 
-    ESTADO_CHOICES = [
-    ('pendiente', 'Pendiente'),
-    ('aprobado', 'Aprobado'),
-]
 
-    TIPO_CURSO_CHOICES = [
-        ('Principiante', 'Principiante'),
-        ('Intermedio', 'Intermedio'),
-        ('Avanzado', 'Avanzado'),
-    ]
-
-    CATEGORIA_CHOICES = [
-        ('1', '1'),
-        ('2', '2'),
-        ('3', '3'),
-    ]
-
-    APARICIONIA_CHOICES = [
-        ('Redes_Sociales', 'Redes Sociales'),
-        ('Referido', 'Referido'),
-        ('Sitio_Web', 'Sitio Web'),
-        ('otro', 'Otro'),
-    ]
-
+class Estudiante(models.Model):
     SEXO_CHOICES = [
         ('M', 'Masculino'),
         ('F', 'Femenino'),
@@ -103,12 +117,31 @@ class Matricula(models.Model):
         ('Profesional', 'Profesional'),
     ]
 
-    HORARIO_CHOICES = [
-        ('06AM', '06AM'),
-        ('08AM', '08AM'),
-        ('10AM', '10AM'),
-        ('12PM', '12PM'),
-        ('04PM', '04PM'),
+    nombre = models.CharField(max_length=100)
+    apellido = models.CharField(max_length=100)
+    edad = models.PositiveIntegerField()
+    sexo = models.CharField(max_length=10, choices=SEXO_CHOICES)
+    nacionalidad = models.CharField(max_length=100)
+    cedula = models.CharField(max_length=20, unique=True)
+    fecha_nacimiento = models.DateField()
+    cedula = models.CharField(max_length=20, unique=True)
+    direccion = models.CharField(max_length=200)
+    correo_electronico = models.EmailField(max_length=254, unique=True)
+    telefono_movil = models.CharField(max_length=100)
+    nivel_educativo = models.CharField(max_length=50, choices=NIVEL_EDUCATIVO_CHOICES)
+    nombre_emergencia = models.CharField(max_length=100)
+    telefono_emergencia = models.CharField(max_length=100)
+    activo = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.nombre} {self.apellido} - {self.cedula}"
+
+
+class PlanEstudio(models.Model):
+    TIPO_CURSO_CHOICES = [
+        ('Principiante', 'Principiante'),
+        ('Intermedio', 'Intermedio'),
+        ('Avanzado', 'Avanzado'),
     ]
 
     MODALIDAD_CHOICES = [
@@ -116,56 +149,78 @@ class Matricula(models.Model):
         ('Extraordinario', 'Extraordinario'),
     ]
 
-    estado = models.CharField(max_length=20,choices=ESTADO_CHOICES,default='pendiente')
-    f_matricula          = models.DateField(default=timezone.now)
-    nombre               = models.CharField(max_length=100)
-    apellido             = models.CharField(max_length=100)
-    edad                 = models.CharField(max_length=100)
-    sexo                 = models.CharField(max_length=10, choices=SEXO_CHOICES)
-    nacionalidad         = models.CharField(max_length=100)
-    fecha_nacimiento     = models.DateField()
-    cedula               = models.CharField(max_length=20)
-    direccion            = models.CharField(max_length=200)
-    correo_electronico   = models.EmailField()
-    telefono_movil       = models.CharField(max_length=100)
-    nivel_educativo      = models.CharField(max_length=50, choices=NIVEL_EDUCATIVO_CHOICES)
-    profesion_u_oficio   = models.CharField(max_length=100)
-    en_caso_de_emrgencia = models.CharField(max_length=100)
-    telefono_emergencia  = models.CharField(max_length=100)
-    modalidad            = models.CharField(max_length=50, choices=MODALIDAD_CHOICES)
-    horario              = models.CharField(max_length=50, choices=HORARIO_CHOICES)
-    tipo_curso           = models.CharField(max_length=50, choices=TIPO_CURSO_CHOICES)
-    horas_reforzamiento  = models.IntegerField(null=True, blank=True)
-    categoria            = models.CharField(max_length=50, choices=CATEGORIA_CHOICES)
-    apariconia           = models.CharField(max_length=100, choices=APARICIONIA_CHOICES)
-    observaciones        = models.TextField(blank=True, null=True)
-
-    def obtener_rango_horario(self):
-        mapeo = {
-            '06AM': (time(6,  0), time(8,  0)),
-            '08AM': (time(8,  0), time(10, 0)),
-            '10AM': (time(10, 0), time(12, 0)),
-            '12PM': (time(12, 0), time(14, 0)),
-            '04PM': (time(16, 0), time(18, 0)),
-        }
-        return mapeo.get(self.horario)
-    
-    def actualizar_estado_pago(self):
-        total_pagado = self.recibos.filter(
-            estado='pagado'
-        ).exists()
-
-        self.estado = 'aprobado' if total_pagado else 'pendiente'
-        self.save(update_fields=['estado'])
+    nombre = models.CharField(max_length=100)
+    descripcion = models.TextField(blank=True, null=True)
+    tipo_curso = models.CharField(max_length=50, choices=TIPO_CURSO_CHOICES)
+    modalidad = models.CharField(max_length=50, choices=MODALIDAD_CHOICES)
+    categoria_vehiculo = models.ForeignKey(
+        CategoriaVehiculo,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='planes_estudio'
+    )
+    cantidad_horas = models.PositiveSmallIntegerField(default=15)
+    monto_unitario = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('433.33'))
+    costo_total = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('6500.00'))
+    activo = models.BooleanField(default=True)
 
     def __str__(self):
-        return f"{self.nombre} {self.apellido} - {self.cedula}"
+        return f"{self.nombre} - {self.tipo_curso}"
+
+class Matricula(models.Model):
+    ESTADOS = [
+        ('pendiente', 'Pendiente'),
+        ('aprobado', 'Aprobado'),
+    ]
+    
+    MODALIDADES = [
+        ('Regular', 'Regular'),
+        ('Extraordinario', 'Extraordinario'),
+    ]
+    
+    HORARIOS = [
+        ('06AM', '06:00 AM'),
+        ('08AM', '08:00 AM'),
+        ('10AM', '10:00 AM'),
+        ('12PM', '12:00 PM'),
+        ('04PM', '04:00 PM'),
+    ]
+    
+    TIPOS_CURSO = [
+        ('Principiante', 'Principiante'),
+        ('Intermedio', 'Intermedio'),
+        ('Avanzado', 'Avanzado'),
+    ]
+    
+    APARICIONES = [
+        ('Redes_Sociales', 'Redes Sociales'),
+        ('Referido', 'Referido'),
+        ('Sitio_Web', 'Sitio Web'),
+        ('otro', 'otro'),
+    ]
+    
+    estudiante = models.ForeignKey(Estudiante, on_delete=models.CASCADE, related_name='matriculas')
+    planEstudio = models.ForeignKey(PlanEstudio, on_delete=models.CASCADE, related_name='matriculas')
+    valorCurso = models.ForeignKey(ValorCurso, on_delete=models.CASCADE, related_name='matriculas')
+    categoria = models.ForeignKey(CategoriaVehiculo, on_delete=models.SET_NULL, null=True, blank=True, related_name='matriculas')
+    estado = models.CharField(max_length=20, choices=ESTADOS, default='pendiente')
+    modalidad = models.CharField(max_length=50, choices=MODALIDADES)
+    horario = models.CharField(max_length=10, choices=HORARIOS)
+    tipo_curso = models.CharField(max_length=50, choices=TIPOS_CURSO)
+    aparicion = models.CharField(max_length=50, choices=APARICIONES)
+    observaciones = models.TextField(blank=True, null=True)
+
+    
+    def __str__(self):
+        return f"Matrícula #{self.estudiante} - {self.planEstudio} {self.estudiante.apellido}"
 
 
 class Recibo(models.Model):
     ESTADO_CHOICES = [
         ('pagado', 'Pagado'),
         ('anticipo', 'Anticipo'),
+        ('anulado', 'Anulado'),
     ]
 
     TIPO_PAGO_CHOICES = [
@@ -174,224 +229,96 @@ class Recibo(models.Model):
         ('beneficio', 'Beneficio'),
     ]
 
-    METODO_PAGO_CHOICES = [
-        ('efectivo', 'Efectivo'),
-        ('transferencia', 'Transferencia Bancaria'),
-        ('tarjeta', 'Tarjeta de Crédito/Débito'),
-        ('cheque', 'Cheque'),
-    ]
 
+    matricula = models.ForeignKey(
+    Matricula,
+    on_delete=models.CASCADE,
+    related_name='recibos'
+    )
 
-    matricula           = models.ForeignKey(Matricula, on_delete=models.CASCADE, related_name='recibos')
-    numero_recibo       = models.CharField(max_length=50, unique=True)
-    monto_pagado        = models.DecimalField(max_digits=10, decimal_places=2)
-    fecha_pago          = models.DateField(default=timezone.now )
-    tipo_pago           = models.CharField(max_length=20, choices=TIPO_PAGO_CHOICES, default='anticipo')
-    cantidad            = models.PositiveSmallIntegerField(default=15)
-    monto_unitario      = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('433.33'))
-    concepto            = models.CharField(max_length=200, default='Pago de curso')
-    monto_cordobas      = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    monto_dolares       = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    tasa_cambio         = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('36.60'))
-    tipo_curso          = models.CharField(max_length=20, default='Principiante')
-    horas_reforzamiento = models.PositiveSmallIntegerField(null=True, blank=True)
-    estado              = models.CharField(max_length=20, choices=ESTADO_CHOICES)
-    metodo_pago         = models.CharField(max_length=20, choices=METODO_PAGO_CHOICES)
-    observaciones       = models.TextField(blank=True, null=True)
+    valor_curso = models.ForeignKey(
+        ValorCurso,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='recibos'
+    )
 
-    
+    numero_recibo = models.CharField(max_length=50, unique=True)
+    monto_pagado = models.DecimalField(max_digits=10, decimal_places=2)
+    fecha_pago = models.DateField(default=timezone.now)
+    tipo_pago = models.CharField(max_length=20, choices=TIPO_PAGO_CHOICES)
+    cantidad = models.PositiveSmallIntegerField(default=15)
+    monto_unitario = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('433.33'))
+    concepto = models.CharField(max_length=200, default='Pago de curso')
+    estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='anticipo')
+    observaciones = models.TextField(blank=True, null=True)
 
-    def _calcular_monto_total_curso(self):
-        """Devuelve el monto total esperado del curso para esta matrícula."""
-        tipo_matricula = str(self.matricula.tipo_curso).lower()
-
-        # Cursos por horas: intermedio, avanzado (y compatibilidad con 'reforz' anterior)
-        es_por_horas = (
-            'intermedio' in tipo_matricula or
-            'avanzado'   in tipo_matricula or
-            'reforz'     in tipo_matricula
-        )
-
-        if es_por_horas:
-            horas = int(self.horas_reforzamiento or self.cantidad or 1)
-            horas = max(1, horas)
-            return round(Decimal(horas) * Decimal('433.33'))
-
-        # Principiante: 15 horas × 433.33 = 6500
-        return round(Decimal('15') * Decimal('433.33'))
-
-    def save(self, *args, **kwargs):
-        from django.db.models import Sum
-
-        tipo_matricula = str(self.matricula.tipo_curso).lower()
-
-        # Determinar tipo de curso del recibo
-        if 'avanzado' in tipo_matricula:
-            self.tipo_curso = 'avanzado'
-        elif 'intermedio' in tipo_matricula or 'reforz' in tipo_matricula:
-            self.tipo_curso = 'intermedio'
-        else:
-            self.tipo_curso = 'principiante'
-
-        es_por_horas = self.tipo_curso in ('intermedio', 'avanzado')
-
-        if not es_por_horas:
-            # Principiante: horas fijas
-            self.cantidad = 15
-            self.horas_reforzamiento = None
-            self.monto_unitario = Decimal('433.33')
-        else:
-            # Intermedio / Avanzado: horas vienen de la matrícula
-            if not self.horas_reforzamiento:
-                # Intentar tomar las horas de la matrícula primero
-                horas_matricula = self.matricula.horas_reforzamiento
-                self.horas_reforzamiento = horas_matricula or self.cantidad or 1
-            self.horas_reforzamiento = max(1, int(self.horas_reforzamiento))
-            self.cantidad = self.horas_reforzamiento
-            self.monto_unitario = Decimal('433.33')
-
-        if self.monto_cordobas is None:
-            self.monto_cordobas = self.monto_pagado
-        if self.monto_pagado is None:
-            self.monto_pagado = self.monto_cordobas
-
-        # === VALIDACIONES (solo en creación) ===
-        is_new = self._state.adding
-
-        if is_new:
-            recibos_previos = Recibo.objects.filter(matricula=self.matricula)
-            cantidad_previos = recibos_previos.count()
-
-            if recibos_previos.filter(tipo_pago__in=['completo', 'beneficio']).exists():
-                raise ValidationError(
-                    "Esta matrícula ya tiene un recibo finalizado (Completo o Beneficio). No se pueden agregar más."
-                )
-
-            if self.tipo_pago == 'beneficio':
-                if cantidad_previos >= 2:
-                    raise ValidationError("Ya se registraron los 2 pagos máximos para esta matrícula.")
-                self.estado = 'pagado'
-
-            elif self.tipo_pago == 'anticipo':
-                if cantidad_previos >= 2:
-                    raise ValidationError(
-                        "Ya se registraron los 2 anticipos permitidos. No se puede agregar otro recibo."
-                    )
-
-                monto_total = self._calcular_monto_total_curso()
-                total_pagado_previo = recibos_previos.aggregate(t=Sum('monto_pagado'))['t'] or Decimal('0')
-                saldo_pendiente = round(monto_total - total_pagado_previo)
-
-                if cantidad_previos == 1:
-                    # Segundo anticipo → debe cubrir exactamente el saldo pendiente
-                    if round(float(self.monto_pagado)) != round(float(saldo_pendiente)):
-                        raise ValidationError(
-                            f"El segundo pago debe cubrir exactamente el saldo pendiente: C${round(float(saldo_pendiente))}"
-                        )
-                    with transaction.atomic():
-                        recibos_previos.delete()
-                        self.tipo_pago = 'completo'
-                        self.estado = 'pagado'
-                        self.monto_pagado = monto_total
-                        self.monto_cordobas = monto_total
-                        self.concepto = f"{self.concepto} (consolidado)"
-                        super().save(*args, **kwargs)
-                        self.matricula.estado = 'aprobado'
-                        self.matricula.save(update_fields=['estado'])
-                    return
-                else:
-                    # Primer anticipo: debe ser menor al total
-                    if Decimal(str(self.monto_pagado)) >= monto_total:
-                        raise ValidationError(
-                            "Si es anticipo, el monto debe ser menor al total del curso. "
-                            "Para pagar todo use 'Completo'."
-                        )
-                    self.estado = 'anticipo'
-
-            elif self.tipo_pago == 'completo':
-                if cantidad_previos > 0:
-                    raise ValidationError(
-                        "Ya existen anticipos para esta matrícula. Use otro anticipo para cerrar el saldo."
-                    )
-                self.estado = 'pagado'
-
-            super().save(*args, **kwargs)
-
-            if self.estado == 'pagado' or self.tipo_pago in ['completo', 'beneficio']:
-                self.matricula.estado = 'aprobado'
-                self.matricula.save(update_fields=['estado'])
+    class Meta:
+        ordering = ['-fecha_pago']
 
     def __str__(self):
-        return f"Recibo #{self.numero_recibo} - {self.matricula.nombre} - C${self.monto_pagado}"
+        estudiante = self.matricula.estudiante
+        return f"Recibo #{self.numero_recibo} - {estudiante.nombre} {estudiante.apellido}"
 
 
 class Calendario(models.Model):
-    matricula     = models.ForeignKey('Matricula', on_delete=models.CASCADE, related_name='citas')
-    instructor    = models.ForeignKey('Instructor', on_delete=models.CASCADE, related_name='agenda')
-    fecha         = models.DateField()
-    hora_inicio   = models.TimeField()
-    hora_fin      = models.TimeField(null=True, blank=True)
-    numero_clase  = models.PositiveSmallIntegerField(default=1)
-    asistio       = models.BooleanField(null=True, blank=True, default=None)
-    justificada   = models.BooleanField(default=False)
-    motivo_justificacion = models.TextField(blank=True, null=True)
-
-    class Meta:
-        ordering = ['fecha', 'hora_inicio']
-        indexes = [
-            models.Index(fields=['instructor', 'fecha']),
-            models.Index(fields=['matricula']),
-        ]
-
-    def clean(self):
-        if (getattr(self, 'fecha', None) and
-                getattr(self, 'numero_clase', None) != 9 and
-                getattr(self, 'matricula_id', None)):
-            es_extraordinario = (str(self.matricula.modalidad).lower() == 'extraordinario')
-            es_finde = self.fecha.weekday() >= 5
-
-            if es_extraordinario and not es_finde:
-                raise ValidationError("Curso extraordinario: las clases solo pueden ser sábado o domingo.")
-            if not es_extraordinario and es_finde:
-                raise ValidationError("Curso regular: no se permiten clases en sábado o domingo.")
-
-        # Tomar las horas del horario de la matrícula para clases regulares
-        if (self.matricula_id and self.numero_clase != 9 and
-                (not self.hora_inicio or not self.hora_fin)):
-            rango = self.matricula.obtener_rango_horario()
-            if rango:
-                self.hora_inicio = self.hora_inicio or rango[0]
-                self.hora_fin    = self.hora_fin    or rango[1]
-
-        # Validar choque de horario
-        if self.instructor_id and self.fecha and self.hora_inicio and self.hora_fin:
-            qs = Calendario.objects.filter(
-                instructor_id=self.instructor_id,
-                fecha=self.fecha,
-            ).exclude(pk=self.pk)
-            for otra in qs:
-                if not (self.hora_fin <= otra.hora_inicio or self.hora_inicio >= otra.hora_fin):
-                    if self.numero_clase == 9 and otra.numero_clase == 9:
-                        continue  # dos exámenes pueden coexistir
-                    raise ValidationError(
-                        f"El instructor ya tiene una clase de {otra.hora_inicio} a {otra.hora_fin} ese día."
-                    )
-
-        super().clean()
-
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        super().save(*args, **kwargs)
-
+    matricula = models.ForeignKey(
+        Matricula,
+        on_delete=models.CASCADE,
+        related_name='clases'
+    )
+    instructor = models.ForeignKey(
+        Instructor,
+        on_delete=models.CASCADE,
+        related_name='agenda'
+    )
+    modulo = models.ForeignKey(
+        PlanEstudio,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='clases'
+    )
+    fecha = models.DateField()
+    numero_dias= models.CharField(max_length=10)
+    
     def __str__(self):
-        return f"{self.instructor} - {self.fecha} {self.hora_inicio} (Clase {self.numero_clase}/8)"
+       
+        return f"{Calendario}"
+
+
+class Asistencia(models.Model):
+
+    As_estudiante = models.ForeignKey(Estudiante, on_delete=models.CASCADE)
+    As_calendario = models.ForeignKey(Calendario, on_delete=models.CASCADE)
+    
+    def __str__(self):
+        
+        return f"{self.As_estudiante}  {self.As_calendario}"
 
 
 class Notas(models.Model):
-    Matricula       = models.OneToOneField('Matricula', on_delete=models.CASCADE, related_name='notas')
-    user            = models.ForeignKey(Usuario, on_delete=models.CASCADE)
-    examen_practico = models.IntegerField(null=True, blank=True)
-    examen_teorico  = models.IntegerField(null=True, blank=True)
+    matricula = models.ForeignKey(
+        Matricula,
+        on_delete=models.CASCADE,
+        related_name='notas'
+    )
+
+    instructor = models.ForeignKey(
+        Instructor,
+        on_delete=models.CASCADE,
+        related_name='notas_registradas'
+    )
+
+    plan_de_estudio = models.ForeignKey(
+        PlanEstudio,
+        on_delete=models.CASCADE,
+        related_name='notas'
+    )
+
+    nota = models.CharField(max_length=10)
 
     def __str__(self):
-        return f"Notas de {self.Matricula.nombre}"
+        return f"Notas de {self.matricula.estudiante} - {self.nota}"
+
