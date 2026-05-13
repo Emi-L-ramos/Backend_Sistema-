@@ -262,16 +262,26 @@ class Recibo(models.Model):
 
 
 class Calendario(models.Model):
+
+    ESTADO_CHOICES = [
+        ('pendiente', 'Pendiente'),
+        ('completada', 'Completada'),
+        ('inasistencia', 'Inasistencia'),
+        ('reprogramada', 'Reprogramada'),
+    ]
+
     matricula = models.ForeignKey(
         Matricula,
         on_delete=models.CASCADE,
         related_name='clases'
     )
+
     instructor = models.ForeignKey(
         Instructor,
         on_delete=models.CASCADE,
         related_name='agenda'
     )
+
     modulo = models.ForeignKey(
         PlanEstudio,
         on_delete=models.SET_NULL,
@@ -279,12 +289,31 @@ class Calendario(models.Model):
         blank=True,
         related_name='clases'
     )
+
     fecha = models.DateField()
-    numero_dias= models.CharField(max_length=10)
-    
+
+    hora_inicio = models.TimeField()
+
+    hora_fin = models.TimeField()
+
+    numero_clase = models.PositiveSmallIntegerField()
+
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADO_CHOICES,
+        default='pendiente'
+    )
+
+    es_examen = models.BooleanField(default=False)
+
+    observaciones = models.TextField(blank=True, null=True)
+
+    class Meta:
+        ordering = ['fecha', 'hora_inicio']
+
     def __str__(self):
-       
-        return f"{Calendario}"
+        estudiante = self.matricula.estudiante
+        return f"{estudiante.nombre} {estudiante.apellido} - Clase {self.numero_clase}"
 
 
 class Asistencia(models.Model):

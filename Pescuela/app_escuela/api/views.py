@@ -130,7 +130,7 @@ class ValorCursoViewSet(viewsets.ModelViewSet):
         return queryset
 
 class InstructorViewSet(viewsets.ModelViewSet):
-    queryset = Instructor.objects.select_related('usuario', 'categoria_vehiculo').all()
+    queryset = Instructor.objects.select_related('categoria_vehiculo').all()
     serializer_class = InstructorSerializer
     permission_classes = [IsAuthenticated]
 
@@ -271,9 +271,24 @@ class ReciboViewSet(viewsets.ModelViewSet):
 
 
 class UserViewSet(viewsets.ModelViewSet):
-    queryset = Usuario.objects.select_related('rol').all()
+    queryset = Usuario.objects.select_related(
+        'rol',
+        'estudiante',
+        'instructor',
+    ).all()
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
+
+    def destroy(self, request, *args, **kwargs):
+        usuario = self.get_object()
+        instructor = usuario.instructor
+
+        self.perform_destroy(usuario)
+
+        if instructor:
+            instructor.delete()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=False, methods=['post'], url_path='crear-estudiante')
     def crear_usuario_estudiante(self, request):
@@ -327,9 +342,8 @@ class CalendarioViewSet(viewsets.ModelViewSet):
     queryset = Calendario.objects.select_related(
         'matricula',
         'matricula__estudiante',
-        'matricula__plan_estudio',
+        'matricula__categoria',
         'instructor',
-        'instructor__usuario',
         'modulo',
     ).all()
     serializer_class = CalendarioSerializer
@@ -388,7 +402,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
 
         matricula = Matricula.objects.select_related(
             'estudiante',
-            'plan_estudio',
+            'categoria',
         ).get(id=data['matricula_id'])
 
         instructor = Instructor.objects.get(id=data['instructor_id'])
@@ -402,54 +416,76 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             )
 
         horas_por_dia = int(data.get('horas_por_dia', 2))
+
+        if horas_por_dia <= 0:
+            return Response(
+                {'error': 'Las horas por día deben ser mayores a cero.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         hora_inicio = datetime.strptime(rango[0], '%H:%M').time()
+
         hora_fin = (
             datetime.combine(date.today(), hora_inicio) +
             timedelta(hours=horas_por_dia)
         ).time()
 
-        tipo_curso = matricula.plan_estudio.tipo_curso
-        modalidad = matricula.plan_estudio.modalidad
+        if matricula.tipo_curso in ['Intermedio', 'Avanzado']:
+            horas_totales = matricula.horas_reforzamiento
 
-        if tipo_curso in ['Intermedio', 'Avanzado']:
-            horas = matricula.horas_reforzamiento or matricula.plan_estudio.cantidad_horas
+            if not horas_totales:
+                return Response(
+                    {'error': 'La matrícula no tiene horas asignadas para este curso.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         else:
-            horas = matricula.plan_estudio.cantidad_horas
+            horas_totales = 16
 
-        num_clases = int(horas) // horas_por_dia
+        num_clases = int(horas_totales) // horas_por_dia
+
+        if int(horas_totales) % horas_por_dia != 0:
+            num_clases += 1
 
         fechas = []
         actual = data['fecha_inicio']
-        es_extraordinario = str(modalidad).lower() == 'extraordinario'
+        es_extraordinario = str(matricula.modalidad).lower() == 'extraordinario'
 
         while len(fechas) < num_clases:
-            if es_extraordinario and actual.weekday() >= 5:
+            es_fin_semana = actual.weekday() >= 5
+
+            if es_extraordinario and es_fin_semana:
                 fechas.append(actual)
 
-            if not es_extraordinario and actual.weekday() < 5:
+            if not es_extraordinario and not es_fin_semana:
                 fechas.append(actual)
 
             actual += timedelta(days=1)
+
+        for fecha_clase in fechas:
+            choque = Calendario.objects.filter(
+                instructor=instructor,
+                fecha=fecha_clase,
+                hora_inicio__lt=hora_fin,
+                hora_fin__gt=hora_inicio,
+                estado__in=['pendiente', 'reprogramada', 'inasistencia']
+            ).exists()
+
+            if choque:
+                return Response(
+                    {
+                        'error': (
+                            f'El instructor ya tiene ocupado el horario '
+                            f'{hora_inicio.strftime("%H:%M")} - {hora_fin.strftime("%H:%M")} '
+                            f'el día {fecha_clase}.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
         creadas = []
 
         with transaction.atomic():
             for i, fecha_clase in enumerate(fechas, start=1):
-                choque = Calendario.objects.filter(
-                    instructor=instructor,
-                    fecha=fecha_clase,
-                    hora_inicio__lt=hora_fin,
-                    hora_fin__gt=hora_inicio,
-                ).exists()
-
-                if choque:
-                    return Response(
-                        {
-                            'error': f'El instructor ya tiene una clase el {fecha_clase} en ese horario.'
-                        },
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-
                 clase = Calendario.objects.create(
                     matricula=matricula,
                     instructor=instructor,
@@ -457,16 +493,20 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                     hora_inicio=hora_inicio,
                     hora_fin=hora_fin,
                     numero_clase=i,
+                    estado='pendiente',
+                    es_examen=False,
                 )
 
                 creadas.append(clase)
 
         return Response(
             {
-                'message': f'Bloque de {num_clases} clases creado correctamente.',
+                'message': f'Bloque de {len(creadas)} clases creado correctamente.',
                 'fecha_inicio': fechas[0],
                 'fecha_fin': fechas[-1],
                 'clases_creadas': len(creadas),
+                'hora_inicio': hora_inicio.strftime('%H:%M'),
+                'hora_fin': hora_fin.strftime('%H:%M'),
                 'citas': CalendarioSerializer(creadas, many=True).data,
             },
             status=status.HTTP_201_CREATED
