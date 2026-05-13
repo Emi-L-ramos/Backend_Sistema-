@@ -327,6 +327,12 @@ class Asistencia(models.Model):
 
 
 class Notas(models.Model):
+
+    TIPO_NOTA_CHOICES = [
+        ('practico', 'Examen práctico'),
+        ('teorico', 'Examen teórico'),
+    ]
+       
     matricula = models.ForeignKey(
         Matricula,
         on_delete=models.CASCADE,
@@ -344,8 +350,19 @@ class Notas(models.Model):
         on_delete=models.CASCADE,
         related_name='notas'
     )
+    
 
+    tipo_nota = models.CharField(
+        max_length=20,
+        choices=TIPO_NOTA_CHOICES,
+        default='practico'
+    )
+    fecha_registro = models.DateTimeField(auto_now_add=True)
     nota = models.CharField(max_length=10)
+    comentario = models.CharField(max_length=50, default='Comentario')
+
+    class Meta:
+        ordering = ['-fecha_registro']
 
     def __str__(self):
         return f"Notas de {self.matricula.estudiante} - {self.nota}"
