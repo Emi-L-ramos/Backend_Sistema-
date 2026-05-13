@@ -99,6 +99,17 @@ class UserSerializer(serializers.ModelSerializer):
             usuario.estudiante = matricula.estudiante
             usuario.save(update_fields=['estudiante'])
 
+        rol_nombre = usuario.rol.nombre.lower() if usuario.rol else ""
+
+        if rol_nombre == "instructor":
+            instructor = Instructor.objects.create(
+                nombre=usuario.first_name or usuario.username,
+                apellido=usuario.last_name or "",
+            )
+
+            usuario.instructor = instructor
+            usuario.save(update_fields=['instructor'])
+
         return usuario
 
     def update(self, instance, validated_data):
@@ -112,8 +123,25 @@ class UserSerializer(serializers.ModelSerializer):
             instance.set_password(password)
 
         instance.save()
-        return instance
 
+        rol_nombre = instance.rol.nombre.lower() if instance.rol else ""
+
+        if rol_nombre == "instructor":
+            instructor = instance.instructor
+
+            if not instructor:
+                instructor = Instructor.objects.create(
+                    nombre=instance.first_name or instance.username,
+                    apellido=instance.last_name or "",
+                )
+                instance.instructor = instructor
+                instance.save(update_fields=['instructor'])
+
+            instructor.nombre = instance.first_name or instance.username
+            instructor.apellido = instance.last_name or ""
+            instructor.save()
+
+        return instance
 
 class PlanEstudioSerializer(serializers.ModelSerializer):
     class Meta:
@@ -154,21 +182,16 @@ class EstudianteSerializer(serializers.ModelSerializer):
         }
 
 class InstructorSerializer(serializers.ModelSerializer):
-    nombre = serializers.CharField(source='usuario.first_name', read_only=True)
-    apellido = serializers.CharField(source='usuario.last_name', read_only=True)
-    username = serializers.CharField(source='usuario.username', read_only=True)
     nombre_completo = serializers.SerializerMethodField()
+    categoria_nombre = serializers.CharField(source='categoria_vehiculo.nombre', read_only=True)
 
     class Meta:
         model = Instructor
         fields = '__all__'
 
     def get_nombre_completo(self, obj):
-        if obj.usuario:
-            nombre = f"{obj.usuario.first_name} {obj.usuario.last_name}".strip()
-            return nombre or obj.usuario.username
-
-        return f"Instructor {obj.id}"
+        nombre = f"{obj.nombre or ''} {obj.apellido or ''}".strip()
+        return nombre or f"Instructor {obj.id}"
 
 
 class MatriculaSerializer(serializers.ModelSerializer):
@@ -482,23 +505,32 @@ class CalendarioSerializer(serializers.ModelSerializer):
         return f"{estudiante.nombre} {estudiante.apellido}"
 
     def get_instructor_nombre(self, obj):
-        if obj.instructor and obj.instructor.usuario:
-            u = obj.instructor.usuario
-            nombre = f"{u.first_name} {u.last_name}".strip()
-            return nombre or u.username
+        if not obj.instructor:
+            return ""
 
-        return ""
+        nombre = f"{obj.instructor.nombre or ''} {obj.instructor.apellido or ''}".strip()
+
+        if nombre:
+            return nombre
+
+        usuario = obj.instructor.usuarios.first()
+
+        if usuario:
+            nombre_usuario = f"{usuario.first_name} {usuario.last_name}".strip()
+            return nombre_usuario or usuario.username
+
+        return f"Instructor {obj.instructor.id}"
 
     def validate(self, data):
         matricula = data.get('matricula') or getattr(self.instance, 'matricula', None)
 
         if matricula:
-            if matricula.estado != 'aprobado':
+            if matricula.estado != 'matriculado':
                 raise serializers.ValidationError(
                     'No se puede asignar horario porque la matrícula aún no está aprobada.'
                 )
 
-            if not matricula.estudiante.usuario:
+            if not matricula.estudiante.usuarios.filter(rol__nombre__iexact='estudiante').exists():
                 raise serializers.ValidationError(
                     'No se puede asignar horario porque el estudiante todavía no tiene usuario creado.'
                 )
@@ -520,12 +552,12 @@ class CrearBloqueCitasSerializer(serializers.Serializer):
         except Matricula.DoesNotExist:
             raise serializers.ValidationError('Matrícula no encontrada.')
 
-        if matricula.estado != 'aprobado':
+        if matricula.estado != 'matriculado':
             raise serializers.ValidationError(
                 'No se puede asignar horario porque la matrícula aún no está aprobada.'
             )
 
-        if not matricula.estudiante.usuario:
+        if not matricula.estudiante.usuarios.filter(rol__nombre__iexact='estudiante').exists():
             raise serializers.ValidationError(
                 'No se puede asignar horario porque el estudiante todavía no tiene usuario creado.'
             )
