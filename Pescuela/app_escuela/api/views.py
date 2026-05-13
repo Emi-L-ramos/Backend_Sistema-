@@ -634,29 +634,44 @@ class NotasViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ''
 
         queryset = Notas.objects.select_related(
             'matricula',
             'matricula__estudiante',
             'instructor',
-            'plan_de_estudio'
-        )
+        ).all()
 
-        if rol in ['admin', 'administrador']:
+        rol = user.rol.nombre.lower() if user.rol else ""
+
+        if rol == 'admin':
             return queryset
 
-        if rol == 'instructor':
-            if user.instructor:
-                return queryset.filter(instructor=user.instructor)
-            return Notas.objects.none()
+        if rol == 'instructor' and user.instructor_id:
+            return queryset.filter(instructor_id=user.instructor_id)
 
-        if rol == 'estudiante':
-            if user.estudiante:
-                return queryset.filter(matricula__estudiante=user.estudiante)
-            return Notas.objects.none()
+        if rol == 'estudiante' and user.estudiante_id:
+            return queryset.filter(matricula__estudiante_id=user.estudiante_id)
 
-        return Notas.objects.none()
+        return queryset.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        rol = user.rol.nombre.lower() if user.rol else ""
+
+        if rol != 'instructor':
+            raise serializer.ValidationError(
+                'Solo el instructor puede registrar notas.'
+            )
+
+        if not user.instructor_id:
+            raise serializer.ValidationError(
+                'Este usuario instructor no tiene un instructor relacionado.'
+            )
+
+        serializer.save(
+            instructor=user.instructor,
+            tipo_nota='practico'
+        )
 
 
 @api_view(['POST'])
