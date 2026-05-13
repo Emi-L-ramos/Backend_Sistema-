@@ -373,11 +373,11 @@ class CalendarioViewSet(viewsets.ModelViewSet):
         if user.is_superuser or getattr(user, 'rol_nombre', '') == 'admin':
             return qs.order_by('fecha', 'hora_inicio')
 
-        if hasattr(user, 'instructor'):
-            return qs.filter(instructor=user.instructor).order_by('fecha', 'hora_inicio')
+        if getattr(user, 'instructor_id', None):
+            return qs.filter(instructor_id=user.instructor_id).order_by('fecha', 'hora_inicio')
 
-        if hasattr(user, 'estudiante'):
-            return qs.filter(matricula__estudiante=user.estudiante).order_by('fecha', 'hora_inicio')
+        if getattr(user, 'estudiante_id', None):
+            return qs.filter(matricula__estudiante_id=user.estudiante_id).order_by('fecha', 'hora_inicio')
 
         return qs.none()
 
@@ -517,8 +517,8 @@ class CalendarioViewSet(viewsets.ModelViewSet):
         instructor_id = request.data.get('instructor_id')
         matricula_id = request.data.get('matricula_id')
         fecha = request.data.get('fecha')
-        hora_inicio = request.data.get('hora_inicio', '08:00')
-        hora_fin = request.data.get('hora_fin', '10:00')
+        hora_inicio = request.data.get('hora_inicio', '02:00')
+        hora_fin = request.data.get('hora_fin', '04:00')
 
         try:
             matricula = Matricula.objects.select_related('estudiante').get(id=matricula_id)
@@ -551,7 +551,9 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             fecha=fecha,
             hora_inicio=hora_inicio,
             hora_fin=hora_fin,
-            numero_clase=9,
+            numero_clase=99,
+            estado='pendiente',
+            es_examen=True,
         )
 
         return Response({
