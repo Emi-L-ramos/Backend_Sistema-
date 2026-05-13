@@ -317,6 +317,8 @@ class Notas(models.Model):
     )
 
     nota = models.CharField(max_length=10)
+    comentario = models.CharField(max_length=50, default='Comentario')
+
 
     def __str__(self):
         return f"Notas de {self.matricula.estudiante} - {self.nota}"

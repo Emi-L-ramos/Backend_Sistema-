@@ -588,9 +588,35 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
 
 
 class NotasViewSet(viewsets.ModelViewSet):
-    queryset = Notas.objects.select_related('matricula', 'matricula__estudiante').all()
+    queryset = Notas.objects.all()
     serializer_class = NotasSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ''
+
+        queryset = Notas.objects.select_related(
+            'matricula',
+            'matricula__estudiante',
+            'instructor',
+            'plan_de_estudio'
+        )
+
+        if rol in ['admin', 'administrador']:
+            return queryset
+
+        if rol == 'instructor':
+            if user.instructor:
+                return queryset.filter(instructor=user.instructor)
+            return Notas.objects.none()
+
+        if rol == 'estudiante':
+            if user.estudiante:
+                return queryset.filter(matricula__estudiante=user.estudiante)
+            return Notas.objects.none()
+
+        return Notas.objects.none()
 
 
 @api_view(['POST'])

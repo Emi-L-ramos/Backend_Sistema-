@@ -567,11 +567,41 @@ class AsistenciaSerializer(serializers.ModelSerializer):
 
 class NotasSerializer(serializers.ModelSerializer):
     estudiante_nombre = serializers.SerializerMethodField()
+    estudiante_cedula = serializers.CharField(
+        source='matricula.estudiante.cedula',
+        read_only=True
+    )
+    instructor_nombre = serializers.SerializerMethodField()
+ 
+    tipo_curso = serializers.CharField(
+        source='matricula.tipo_curso',
+        read_only=True
+    )
+    modalidad = serializers.CharField(
+        source='matricula.modalidad',
+        read_only=True
+    )
 
     class Meta:
         model = Notas
-        fields = '__all__'
+        fields = [
+            'id',
+            'matricula',
+            'instructor',
+            'plan_de_estudio',
+            'estudiante_nombre',
+            'estudiante_cedula',
+            'instructor_nombre',
+            'plan_nombre',
+            'tipo_curso',
+            'modalidad',
+            # 'nota',
+            #'comentario',
+        ]
 
     def get_estudiante_nombre(self, obj):
         estudiante = obj.matricula.estudiante
         return f"{estudiante.nombre} {estudiante.apellido}"
+
+    def get_instructor_nombre(self, obj):
+        return f"{obj.instructor.nombre} {obj.instructor.apellido}"
