@@ -4,23 +4,19 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from decimal import Decimal
 from django.db import models
-
+from rest_framework.parsers import MultiPartParser, FormParser
 import openpyxl
-
 from django.db import transaction
 from django.db.models import Q, Sum, Count
 from django.http import HttpResponse
 from django.contrib.auth import authenticate
-
 from django_filters.rest_framework import DjangoFilterBackend
-
 from rest_framework import status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
 from django.contrib.auth import authenticate
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import api_view, permission_classes
@@ -28,7 +24,6 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django.db.models.functions import TruncMonth
 from decimal import Decimal
-
 
 from ..models import (
     Rol,
@@ -133,8 +128,7 @@ class InstructorViewSet(viewsets.ModelViewSet):
     queryset = Instructor.objects.select_related('categoria_vehiculo').all()
     serializer_class = InstructorSerializer
     permission_classes = [IsAuthenticated]
-
-
+    parser_classes = [MultiPartParser, FormParser]
 
 
 class MatriculaViewSet(viewsets.ModelViewSet):
@@ -197,7 +191,55 @@ class MatriculaViewSet(viewsets.ModelViewSet):
             })
 
         return Response(resultados)
-    
+
+    @action(detail=False, methods=['get'], url_path='para-examen')
+    def para_examen(self, request):
+
+        matriculas = Matricula.objects.select_related(
+            'estudiante'
+        ).filter(
+            estado='matriculado'
+        )
+
+        resultados = []
+
+        for matricula in matriculas:
+
+            total_clases = Calendario.objects.filter(
+                matricula=matricula,
+                es_examen=False,
+            ).count()
+
+            if total_clases == 0:
+                continue
+
+            clases_completadas = Calendario.objects.filter(
+                matricula=matricula,
+                es_examen=False,
+                estado='completada',
+            ).count()
+
+            if clases_completadas < total_clases:
+                continue
+
+            tiene_examen = Calendario.objects.filter(
+                matricula=matricula,
+                es_examen=True,
+            ).exists()
+
+            if tiene_examen:
+                continue
+
+            resultados.append({
+                'id': matricula.id,
+                'estudiante_nombre': (
+                    f"{matricula.estudiante.nombre} "
+                    f"{matricula.estudiante.apellido}"
+                ).strip(),
+                'estudiante_cedula': matricula.estudiante.cedula,
+            })
+
+        return Response(resultados)        
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -308,7 +350,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        if matricula.estado != 'aprobado':
+        if matricula.estado != 'matriculado':
             return Response(
                 {'error': 'No se puede crear usuario porque la matrícula aún no está aprobada.'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -512,38 +554,156 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED
         )
 
+    def partial_update(self, request, *args, **kwargs):
+        instance = self.get_object()
+
+        aplicar_a = request.data.get('aplicar_a', 'solo')
+        instructor_id = request.data.get('instructor')
+
+        if not instructor_id:
+            return super().partial_update(request, *args, **kwargs)
+
+        if aplicar_a == 'pendientes':
+            clases = Calendario.objects.filter(
+                matricula=instance.matricula,
+                estado='pendiente',
+                es_examen=False,
+            )
+        else:
+            clases = Calendario.objects.filter(id=instance.id)
+
+        for clase in clases:
+            choque = Calendario.objects.filter(
+                instructor_id=instructor_id,
+                fecha=clase.fecha,
+                hora_inicio__lt=clase.hora_fin,
+                hora_fin__gt=clase.hora_inicio,
+                estado__in=['pendiente', 'reprogramada', 'inasistencia']
+            ).exclude(id=clase.id).exists()
+
+            if choque:
+                return Response(
+                    {
+                        'error': (
+                            f'El instructor ya tiene ocupado el horario '
+                            f'{clase.hora_inicio.strftime("%H:%M")} - {clase.hora_fin.strftime("%H:%M")} '
+                            f'el día {clase.fecha}.'
+                        )
+                    },
+                    status=400
+                )
+
+        clases.update(instructor_id=instructor_id)
+
+        instance.refresh_from_db()
+        serializer = self.get_serializer(instance)
+
+        return Response(serializer.data)
+    
     @action(detail=False, methods=['post'], url_path='crear-examen')
     def crear_examen(self, request):
-        instructor_id = request.data.get('instructor_id')
+
+        user = request.user
+
+        if not user.instructor_id:
+            return Response(
+                {'error': 'El usuario actual no tiene instructor asignado.'},
+                status=400
+            )
+
         matricula_id = request.data.get('matricula_id')
         fecha = request.data.get('fecha')
-        hora_inicio = request.data.get('hora_inicio', '02:00')
-        hora_fin = request.data.get('hora_fin', '04:00')
+
+        hora_inicio = '14:00'
+        hora_fin = '16:00'
 
         try:
-            matricula = Matricula.objects.select_related('estudiante').get(id=matricula_id)
-            instructor = Instructor.objects.get(id=instructor_id)
+            matricula = Matricula.objects.select_related(
+                'estudiante'
+            ).get(id=matricula_id)
+
+            instructor = Instructor.objects.get(id=user.instructor_id)
+
         except Matricula.DoesNotExist:
-            return Response({'error': 'Matrícula no encontrada.'}, status=404)
+            return Response(
+                {'error': 'Matrícula no encontrada.'},
+                status=404
+            )
+
         except Instructor.DoesNotExist:
-            return Response({'error': 'Instructor no encontrado.'}, status=404)
-
-        if matricula.estado != 'aprobado':
             return Response(
-                {'error': 'No se puede programar examen porque la matrícula aún no está aprobada.'},
+                {'error': 'Instructor no encontrado.'},
+                status=404
+            )
+
+        if matricula.estado != 'matriculado':
+            return Response(
+                {
+                    'error': (
+                        'No se puede programar examen porque '
+                        'la matrícula aún no está matriculada.'
+                    )
+                },
                 status=400
             )
 
-        if not matricula.estudiante.usuario:
+        tiene_usuario = matricula.estudiante.usuarios.filter(
+            rol__nombre__iexact='estudiante'
+        ).exists()
+
+        if not tiene_usuario:
             return Response(
-                {'error': 'No se puede programar examen porque el estudiante todavía no tiene usuario.'},
+                {
+                    'error': (
+                        'No se puede programar examen porque '
+                        'el estudiante todavía no tiene usuario.'
+                    )
+                },
                 status=400
             )
 
-        Calendario.objects.filter(
+        total_clases = Calendario.objects.filter(
             matricula=matricula,
-            numero_clase=9,
-        ).delete()
+            es_examen=False,
+        ).count()
+
+        if total_clases == 0:
+            return Response(
+                {
+                    'error': 'El estudiante todavía no tiene clases asignadas.'
+                },
+                status=400
+            )
+
+        clases_completadas = Calendario.objects.filter(
+            matricula=matricula,
+            es_examen=False,
+            estado='completada',
+        ).count()
+
+        if clases_completadas < total_clases:
+            return Response(
+                {
+                    'error': (
+                        'El estudiante aún no ha completado '
+                        'todas sus clases prácticas.'
+                    )
+                },
+                status=400
+            )
+
+        examen_existente = Calendario.objects.filter(
+            matricula=matricula,
+            es_examen=True,
+        ).exists()
+
+        if examen_existente:
+            return Response(
+                {
+                    'error': 'Este estudiante ya tiene examen policial asignado.'
+                },
+                status=400
+            )
 
         examen = Calendario.objects.create(
             matricula=matricula,
@@ -556,10 +716,13 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             es_examen=True,
         )
 
-        return Response({
-            'message': 'Examen programado correctamente.',
-            'examen': CalendarioSerializer(examen).data,
-        }, status=201)
+        return Response(
+            {
+                'message': 'Examen policial programado correctamente.',
+                'examen': CalendarioSerializer(examen).data,
+            },
+            status=201
+        )
 
 
 class AsistenciaViewSet(viewsets.ModelViewSet):

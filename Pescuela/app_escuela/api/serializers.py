@@ -134,6 +134,7 @@ class UserSerializer(serializers.ModelSerializer):
                     nombre=instance.first_name or instance.username,
                     apellido=instance.last_name or "",
                 )
+
                 instance.instructor = instructor
                 instance.save(update_fields=['instructor'])
 
@@ -183,7 +184,12 @@ class EstudianteSerializer(serializers.ModelSerializer):
 
 class InstructorSerializer(serializers.ModelSerializer):
     nombre_completo = serializers.SerializerMethodField()
-    categoria_nombre = serializers.CharField(source='categoria_vehiculo.nombre', read_only=True)
+    categoria_nombre = serializers.CharField(
+        source='categoria_vehiculo.nombre',
+        read_only=True
+    )
+
+    foto_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Instructor
@@ -192,6 +198,14 @@ class InstructorSerializer(serializers.ModelSerializer):
     def get_nombre_completo(self, obj):
         nombre = f"{obj.nombre or ''} {obj.apellido or ''}".strip()
         return nombre or f"Instructor {obj.id}"
+
+    def get_foto_url(self, obj):
+        request = self.context.get('request')
+
+        if obj.foto and request:
+            return request.build_absolute_uri(obj.foto.url)
+
+        return None
 
 
 class MatriculaSerializer(serializers.ModelSerializer):

@@ -89,6 +89,7 @@ class CategoriaVehiculo(models.Model):
 class Instructor(models.Model):
     nombre = models.CharField(max_length=30)
     apellido = models.CharField(max_length=30)
+    foto = models.ImageField(upload_to='instructores/', blank=True, null=True)
     numero_telefono = models.CharField(max_length=20, blank=True, null=True)
     direccion = models.CharField(max_length=200, blank=True, null=True)
     categoria_vehiculo = models.ForeignKey(
@@ -171,7 +172,7 @@ class PlanEstudio(models.Model):
 class Matricula(models.Model):
     ESTADOS = [
         ('pendiente', 'Pendiente'),
-        ('aprobado', 'Aprobado'),
+        ('matriculado', 'Matriculado'),
     ]
     
     MODALIDADES = [

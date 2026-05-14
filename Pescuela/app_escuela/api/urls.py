@@ -2,6 +2,8 @@
 
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from django.conf import settings
+from django.conf.urls.static import static
 
 from .views import (
     DashboardIngresosMensualesView,
@@ -48,3 +50,6 @@ urlpatterns = [
     path('dashboard/resumen/', DashboardResumenView.as_view(), name='dashboard-resumen'),  
     path('dashboard/ingresos-mensuales/', DashboardIngresosMensualesView.as_view(), name='dashboard-ingresos-mensuales'),
 ]
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
