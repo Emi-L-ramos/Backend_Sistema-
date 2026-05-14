@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from .models import Instructor, Rol, Usuario, Matricula, Recibo, Calendario, Estudiante, CategoriaVehiculo, PlanEstudio,Asistencia, Notas, ValorCurso 
-
+from .models import TemaPlanEstudio, SubtemaPlanEstudio, Notificacion,ProgresoTema,HistorialPlanEstudio
 # 1. Definimos cómo se verá el Usuario en el panel
 class MiUsuarioAdmin(UserAdmin):
     # Esto añade el campo 'rol' a la edición del usuario
@@ -25,6 +25,11 @@ admin.site.register(CategoriaVehiculo)
 admin.site.register(PlanEstudio)
 admin.site.register(Asistencia)
 admin.site.register(Notas)
+admin.site.register(TemaPlanEstudio)
+admin.site.register(SubtemaPlanEstudio)
+admin.site.register(Notificacion)
+admin.site.register(ProgresoTema)
+admin.site.register(HistorialPlanEstudio)
 
 # 3. Registro seguro del Usuario
 try:

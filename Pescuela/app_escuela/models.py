@@ -137,38 +137,6 @@ class Estudiante(models.Model):
     def __str__(self):
         return f"{self.nombre} {self.apellido} - {self.cedula}"
 
-
-class PlanEstudio(models.Model):
-    TIPO_CURSO_CHOICES = [
-        ('Principiante', 'Principiante'),
-        ('Intermedio', 'Intermedio'),
-        ('Avanzado', 'Avanzado'),
-    ]
-
-    MODALIDAD_CHOICES = [
-        ('Regular', 'Regular'),
-        ('Extraordinario', 'Extraordinario'),
-    ]
-
-    nombre = models.CharField(max_length=100)
-    descripcion = models.TextField(blank=True, null=True)
-    tipo_curso = models.CharField(max_length=50, choices=TIPO_CURSO_CHOICES)
-    modalidad = models.CharField(max_length=50, choices=MODALIDAD_CHOICES)
-    categoria_vehiculo = models.ForeignKey(
-        CategoriaVehiculo,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='planes_estudio'
-    )
-    cantidad_horas = models.PositiveSmallIntegerField(default=15)
-    monto_unitario = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('433.33'))
-    costo_total = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('6500.00'))
-    activo = models.BooleanField(default=True)
-
-    def __str__(self):
-        return f"{self.nombre} - {self.tipo_curso}"
-
 class Matricula(models.Model):
     ESTADOS = [
         ('pendiente', 'Pendiente'),
@@ -200,6 +168,14 @@ class Matricula(models.Model):
         ('Sitio_Web', 'Sitio Web'),
         ('otro', 'otro'),
     ]
+
+    plan_de_estudio = models.ForeignKey(
+    'PlanEstudio',
+    on_delete=models.SET_NULL,
+    null=True,
+    blank=True,
+    related_name='matriculas'
+        )
     
     estudiante = models.ForeignKey(Estudiante, on_delete=models.CASCADE, related_name='matriculas')
     fecha_registro = models.DateTimeField(auto_now_add=True)
@@ -284,7 +260,7 @@ class Calendario(models.Model):
     )
 
     modulo = models.ForeignKey(
-        PlanEstudio,
+        'PlanEstudio',
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -347,7 +323,7 @@ class Notas(models.Model):
     )
 
     plan_de_estudio = models.ForeignKey(
-        PlanEstudio,
+        'PlanEstudio',
         on_delete=models.CASCADE,
         related_name='notas'
     )
@@ -368,3 +344,167 @@ class Notas(models.Model):
     def __str__(self):
         return f"Notas de {self.matricula.estudiante} - {self.nota}"
 
+
+class PlanEstudio(models.Model):
+
+    TIPO_CURSO_CHOICES = [
+        ('Principiante', 'Principiante'),
+        ('Intermedio', 'Intermedio'),
+        ('Avanzado', 'Avanzado'),
+    ]
+
+    nombre = models.CharField(max_length=100)
+
+    tipo_curso = models.CharField(
+        max_length=50,
+        choices=TIPO_CURSO_CHOICES
+    )
+
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = "Plan de Estudio"
+        verbose_name_plural = "Planes de Estudios"
+        ordering = ['tipo_curso', 'nombre']
+
+    def __str__(self):
+        return f"{self.nombre} - {self.tipo_curso}"
+
+
+class TemaPlanEstudio(models.Model):
+
+    plan_estudio = models.ForeignKey(
+        'PlanEstudio',
+        on_delete=models.CASCADE,
+        related_name='temas'
+    )
+
+    titulo = models.CharField(max_length=150)
+
+    orden = models.PositiveSmallIntegerField(default=1)
+
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = "Tema"
+        verbose_name_plural = "Temas"
+        ordering = ['orden', 'id']
+
+    def __str__(self):
+        return f"{self.plan_estudio.tipo_curso} - {self.titulo}"
+
+
+class SubtemaPlanEstudio(models.Model):
+
+    tema = models.ForeignKey(
+        'TemaPlanEstudio',
+        on_delete=models.CASCADE,
+        related_name='subtemas'
+    )
+
+    titulo = models.CharField(max_length=150)
+
+    orden = models.PositiveSmallIntegerField(default=1)
+
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = "Subtema"
+        verbose_name_plural = "Subtemas"
+        ordering = ['orden', 'id']
+
+    def __str__(self):
+        return f"{self.tema.titulo} - {self.titulo}"
+    
+
+
+
+   # models.py
+
+
+class ProgresoTema(models.Model):
+
+    matricula = models.ForeignKey(
+        'Matricula',
+        on_delete=models.CASCADE,
+        related_name='progresos_temas',null=True, blank=True
+    )
+
+    subtema = models.ForeignKey(
+        'SubtemaPlanEstudio',
+        on_delete=models.CASCADE,
+        related_name='progresos_estudiantes'
+    )
+
+    estudiante_completado = models.BooleanField(default=False)
+
+    instructor_completado = models.BooleanField(default=False)
+
+    desbloqueado = models.BooleanField(default=False)
+
+    completado = models.BooleanField(default=False)
+
+    fecha_estudiante = models.DateTimeField(null=True, blank=True)
+
+    fecha_instructor = models.DateTimeField(null=True, blank=True)
+
+    fecha_admin_edit = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ['matricula', 'subtema']
+
+        ordering = [
+            'subtema__tema__orden',
+            'subtema__orden'
+        ]
+
+    def __str__(self):
+        return f"{self.matricula.estudiante.nombre} - {self.subtema.titulo}"
+
+    @property
+    def ambos_checks_completados(self):
+        return (
+            self.estudiante_completado and
+            self.instructor_completado
+        )
+
+
+class Notificacion(models.Model):
+    """Notificaciones para el administrador"""
+    
+    TIPOS_NOTIFICACION = (
+        ('falta_estudiante', 'El estudiante no ha marcado su tema'),
+        ('falta_instructor', 'El instructor no ha marcado la clase'),
+        ('tema_bloqueado', 'Tema bloqueado'),
+        ('intervencion_admin', 'El admin realizó una intervención'),
+        ('plan_completado', 'El estudiante completó todo el plan'),
+    )
+    
+    estudiante = models.ForeignKey('Usuario', on_delete=models.CASCADE, related_name='notificaciones')
+    tema = models.ForeignKey('TemaPlanEstudio', on_delete=models.CASCADE, null=True, blank=True)
+    tipo = models.CharField(max_length=30, choices=TIPOS_NOTIFICACION)
+    mensaje = models.TextField()
+    leida = models.BooleanField(default=False)
+    fecha_creacion = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['-fecha_creacion']
+    
+    def __str__(self):
+        return f"{self.tipo} - {self.estudiante.username}"
+
+
+class HistorialPlanEstudio(models.Model):
+    """Historial de cambios en el progreso"""
+    
+    progreso_tema = models.ForeignKey(ProgresoTema, on_delete=models.CASCADE, related_name='historial')
+    usuario = models.ForeignKey('Usuario', on_delete=models.CASCADE)
+    accion = models.CharField(max_length=50)
+    valor_anterior_estudiante = models.BooleanField(null=True)
+    valor_anterior_instructor = models.BooleanField(null=True)
+    valor_nuevo_estudiante = models.BooleanField(null=True)
+    valor_nuevo_instructor = models.BooleanField(null=True)
+    fecha = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return f"{self.fecha} - {self.usuario.username} - {self.accion}"

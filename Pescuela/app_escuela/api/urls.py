@@ -22,8 +22,13 @@ from .views import (
     login,
     saldo,
     DashboardGananciasView,
-    DashboardResumenView
+    DashboardResumenView,
+    
+    DashboardPlanViewSet
 )
+from .views import ( ProgresoTemaViewSet, NotificacionViewSet
+)
+
 
 router = DefaultRouter()
 
@@ -32,13 +37,16 @@ router.register(r'usuarios', UserViewSet)
 router.register(r'estudiantes', EstudianteViewSet)
 router.register(r'instructores', InstructorViewSet)
 router.register(r'categorias', CategoriaVehiculoViewSet)
-router.register(r'planes-estudio', PlanEstudioViewSet)
+router.register(r'plan-estudio', PlanEstudioViewSet)
 router.register(r'valores-curso', ValorCursoViewSet)
 router.register(r'matricula', MatriculaViewSet)
 router.register(r'recibo', ReciboViewSet)
 router.register(r'calendario', CalendarioViewSet)
 router.register(r'asistencia', AsistenciaViewSet)
 router.register(r'notas', NotasViewSet)
+router.register(r'progreso-tema', ProgresoTemaViewSet, basename='progreso-tema')
+router.register(r'notificaciones', NotificacionViewSet)
+router.register(r'dashboard-plan', DashboardPlanViewSet, basename='dashboard-plan')
 
 # app_escuela/api/urls.py
 
