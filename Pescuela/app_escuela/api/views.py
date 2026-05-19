@@ -27,12 +27,9 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django.db.models.functions import TruncMonth
 from decimal import Decimal
-<<<<<<< HEAD
 from rest_framework import status
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
-
-=======
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -40,8 +37,6 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.drawing.image import Image as ExcelImage
 import os
->>>>>>> 8adbd1a5ee0f891ab38c77de2cd912e16384bf13
-
 
 from ..models import (
     Rol,
@@ -1307,8 +1302,7 @@ class DashboardIngresosMensualesView(APIView):
             9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
         }
         return meses.get(mes_numero, "")
-    
-<<<<<<< HEAD
+
 # views.py
 
 from django.utils import timezone
@@ -2320,7 +2314,7 @@ class ExamenTeoricoViewSet(viewsets.ModelViewSet):
 
         return Response(serializer.data)
     
-=======
+
 class PerfilView(APIView):
     permission_classes = [IsAuthenticated]
 
