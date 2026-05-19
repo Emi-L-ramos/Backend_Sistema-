@@ -26,7 +26,10 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django.db.models.functions import TruncMonth
+<<<<<<< Updated upstream
 from decimal import Decimal
+=======
+>>>>>>> Stashed changes
 from rest_framework import status
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
@@ -37,6 +40,11 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.drawing.image import Image as ExcelImage
 import os
+<<<<<<< Updated upstream
+=======
+
+
+>>>>>>> Stashed changes
 
 from ..models import (
     Rol,
@@ -1302,6 +1310,10 @@ class DashboardIngresosMensualesView(APIView):
             9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
         }
         return meses.get(mes_numero, "")
+<<<<<<< Updated upstream
+=======
+    
+>>>>>>> Stashed changes
 
 # views.py
 
@@ -2573,3 +2585,7 @@ def exportar_reporte_instructores_policial(request):
     wb.save(response)
 
     return response
+<<<<<<< Updated upstream
+=======
+
+>>>>>>> Stashed changes
