@@ -2573,4 +2573,3 @@ def exportar_reporte_instructores_policial(request):
     wb.save(response)
 
     return response
->>>>>>> 8adbd1a5ee0f891ab38c77de2cd912e16384bf13
