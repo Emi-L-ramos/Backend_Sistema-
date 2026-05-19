@@ -273,7 +273,7 @@ class MatriculaViewSet(viewsets.ModelViewSet):
                 'correo_electronico': estudiante.correo_electronico,
                 'telefono_movil': estudiante.telefono_movil,
                 'nivel_educativo': estudiante.nivel_educativo,
-                'en_caso_de_emergencia': estudiante.en_caso_de_emergencia,
+                'nombre_emergencia': estudiante.nombre_emergencia,
                 'telefono_emergencia': estudiante.telefono_emergencia,
                 'tiene_usuario': estudiante.usuarios.exists(),
             })
