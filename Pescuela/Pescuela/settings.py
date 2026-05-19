@@ -27,12 +27,32 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'rest_framework.authtoken',  # ✅ Token authentication
-  
+    
     'app_escuela',  # Tu aplicación
     'django_filters',  # ✅ Para filtrado en vistas
 ]
 
-# ✅ Modelo de usuario personalizado
+
+# ASGI_APPLICATION = 'Pescuela.asgi.application'
+
+# # Para desarrollo (memoria)
+# CHANNEL_LAYERS = {
+#     'default': {
+#         'BACKEND': 'channels.layers.InMemoryChannelLayer',
+#     }
+# }
+# # ✅ Modelo de usuario personalizado
+
+
+# Para producción (Redis - descomentar si tienes Redis)
+# CHANNEL_LAYERS = {
+#     'default': {
+#         'BACKEND': 'channels_redis.core.RedisChannelLayer',
+#         'CONFIG': {
+#             "hosts": [('127.0.0.1', 6379)],
+#         },
+#     },
+# }
 AUTH_USER_MODEL = 'app_escuela.Usuario'
 
 MIDDLEWARE = [

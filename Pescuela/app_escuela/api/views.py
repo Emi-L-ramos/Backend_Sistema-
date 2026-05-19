@@ -4,12 +4,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from decimal import Decimal
 from django.db import models
-<<<<<<< Updated upstream
 from rest_framework.parsers import MultiPartParser, FormParser
-=======
 from rest_framework import serializers
-
->>>>>>> Stashed changes
 import openpyxl
 from django.db import transaction
 from django.db.models import Q, Sum, Count
@@ -31,13 +27,12 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django.db.models.functions import TruncMonth
 from decimal import Decimal
+from rest_framework import status
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
 
-<<<<<<< Updated upstream
-=======
 
 
-
->>>>>>> Stashed changes
 from ..models import (
     Rol,
     Usuario,
@@ -51,6 +46,10 @@ from ..models import (
     Asistencia,
     Notas,
     ValorCurso,
+    PreguntaExamenTeorico,
+    OpcionPreguntaExamenTeorico,
+    ExamenTeorico,
+    RespuestaExamenTeorico,
 )
 
 from .serializers import (
@@ -66,12 +65,46 @@ from .serializers import (
     AsistenciaSerializer,
     NotasSerializer,
     ValorCursoSerializer,
+    PreguntaExamenTeoricoSerializer,
+    ExamenTeoricoSerializer,
+    PreguntaExamenEstudianteSerializer,
+    RespuestaEnviarExamenSerializer,
+    RespuestaExamenTeoricoSerializer,
 )
 
 from .serializers import (
      PlanEstudioSerializer, ProgresoTemaSerializer, 
      NotificacionSerializer
  )
+
+from ..models import PlanEstudio, SubtemaPlanEstudio, ProgresoTema
+
+
+def generar_progreso_plan(matricula):
+    if not matricula.plan_de_estudio:
+        return
+
+    subtemas = SubtemaPlanEstudio.objects.filter(
+        tema__plan_estudio=matricula.plan_de_estudio,
+        activo=True,
+        tema__activo=True
+    ).order_by(
+        'tema__orden',
+        'orden',
+        'id'
+    )
+
+    for index, subtema in enumerate(subtemas):
+        ProgresoTema.objects.get_or_create(
+            matricula=matricula,
+            subtema=subtema,
+            defaults={
+                'desbloqueado': index == 0,
+                'estudiante_completado': False,
+                'instructor_completado': False,
+                'completado': False,
+            }
+        )
 
 def obtener_rango_horario(matricula):
     mapeo = {
@@ -123,11 +156,19 @@ class PlanEstudioViewSet(viewsets.ModelViewSet):
 
     serializer_class = PlanEstudioSerializer
 
+    @action(detail=False, methods=['get'], url_path='tipos-curso')
+    def tipos_curso(self, request):
+        return Response([
+            {'value': 'Principiante', 'label': 'Principiante'},
+            {'value': 'Intermedio', 'label': 'Intermedio'},
+            {'value': 'Avanzado', 'label': 'Avanzado'},
+        ])
+
     @action(detail=True, methods=['get'], url_path='debug-temas')
     def debug_temas(self, request, pk=None):
         plan = self.get_object()
         temas = plan.temas.all()
-        
+
         data = {
             'plan_id': plan.id,
             'plan_nombre': plan.nombre,
@@ -834,8 +875,15 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
         return Response(resultado)
 
 
+
+
 class NotasViewSet(viewsets.ModelViewSet):
-    queryset = Notas.objects.all()
+    queryset = Notas.objects.select_related(
+        'matricula',
+        'matricula__estudiante',
+        'instructor',
+        'plan_de_estudio',
+    ).all()
     serializer_class = NotasSerializer
     permission_classes = [IsAuthenticated]
 
@@ -846,11 +894,12 @@ class NotasViewSet(viewsets.ModelViewSet):
             'matricula',
             'matricula__estudiante',
             'instructor',
+            'plan_de_estudio',
         ).all()
 
-        rol = user.rol.nombre.lower() if user.rol else ""
+        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
 
-        if rol == 'admin':
+        if rol in ['admin', 'administrador']:
             return queryset
 
         if rol == 'instructor' and user.instructor_id:
@@ -861,31 +910,88 @@ class NotasViewSet(viewsets.ModelViewSet):
 
         return queryset.none()
 
-    def perform_create(self, serializer):
-        user = self.request.user
-        matricula = serializer.validated_data.get('matricula')
+    def create(self, request, *args, **kwargs):
+        """Crear nota práctica asignando instructor y plan_de_estudio automáticamente"""
 
-        if not user.instructor:
-            raise serializers.ValidationError({
-                'instructor': 'El usuario actual no tiene instructor asignado.'
-            })
+        if not request.user.instructor:
+            return Response({
+                'error': 'El usuario actual no tiene instructor asignado.'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
-        plan = PlanEstudio.objects.filter(
-            estudiante=matricula.estudiante,
-            completado=True
-        ).first()
+        data = request.data.copy()
 
-        if not plan:
-            raise serializers.ValidationError({
-                'plan_de_estudio':
-                    'No se puede registrar la nota práctica porque el estudiante aún no ha completado el plan de estudio.'
-            })
+        matricula_id = data.get('matricula')
+        if not matricula_id:
+            return Response({
+                'error': 'Debe seleccionar una matrícula.'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
-        serializer.save(
-            instructor=user.instructor,
-            plan_de_estudio=plan
-        )
+        try:
+            matricula = Matricula.objects.get(id=matricula_id)
+        except Matricula.DoesNotExist:
+            return Response({
+                'error': 'Matrícula no encontrada.'
+            }, status=status.HTTP_404_NOT_FOUND)
 
+        if Notas.objects.filter(
+            matricula=matricula,
+            tipo_nota='practico'
+        ).exists():
+            return Response({
+                'error': 'Ya existe una nota práctica registrada para este estudiante.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        progresos = ProgresoTema.objects.filter(matricula=matricula)
+        total_temas = progresos.count()
+
+        if total_temas == 0:
+            return Response({
+                'error': 'El estudiante no tiene temas asignados en su plan de estudio.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        completados = progresos.filter(
+            estudiante_completado=True,
+            instructor_completado=True
+        ).count()
+
+        plan_completado = completados == total_temas
+
+        if not plan_completado:
+            return Response({
+                'error': f'No se puede registrar la nota porque el estudiante no ha completado el plan de estudio. Progreso: {completados}/{total_temas} temas completados.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        plan_estudio = matricula.plan_de_estudio
+
+        if not plan_estudio:
+            return Response({
+                'error': 'La matrícula no tiene un plan de estudio asignado.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        data['instructor'] = request.user.instructor.id
+        data['plan_de_estudio'] = plan_estudio.id
+        data['tipo_nota'] = 'practico'
+
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+
+        nota = serializer.save()
+
+        # OJO:
+        # Si todavía falta examen teórico, NO conviene finalizar aquí.
+        # Solo finaliza si ya existe una nota teórica aprobada.
+        nota_teorica_aprobada = Notas.objects.filter(
+            matricula=matricula,
+            tipo_nota='teorico',
+            nota__gte=80
+        ).exists()
+
+        if nota_teorica_aprobada:
+            matricula.estado = 'finalizado'
+            matricula.save(update_fields=['estado'])
+
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -1135,9 +1241,10 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
     queryset = ProgresoTema.objects.select_related(
         'matricula',
         'matricula__estudiante',
-        'subtema',
-        'subtema__tema',
-        'subtema__tema__plan_estudio'
+        'tema',
+        'tema__plan_estudio'
+    ).prefetch_related(
+        'tema__subtemas'
     ).all()
 
     serializer_class = ProgresoTemaSerializer
@@ -1149,102 +1256,53 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
 
         queryset = self.queryset
 
-        if rol in ['admin', 'administrador']:
-            return queryset
-
-        if rol == 'estudiante' and user.estudiante:
-            return queryset.filter(
-                matricula__estudiante=user.estudiante
+        if rol in ['admin', 'administrador'] or user.is_staff or user.is_superuser:
+            return queryset.order_by(
+                'matricula_id',
+                'tema__orden',
+                'id'
             )
 
-        if rol == 'instructor' and user.instructor:
+        if rol == 'estudiante' and hasattr(user, 'estudiante') and user.estudiante:
+            return queryset.filter(
+                matricula__estudiante=user.estudiante
+            ).order_by(
+                '-matricula__fecha_registro',
+                'tema__orden',
+                'id'
+            )
+
+        if rol == 'instructor' and hasattr(user, 'instructor') and user.instructor:
             return queryset.filter(
                 matricula__clases__instructor=user.instructor
-            ).distinct()
+            ).distinct().order_by(
+                'matricula_id',
+                'tema__orden',
+                'id'
+            )
 
         return ProgresoTema.objects.none()
 
+    def _actualizar_progreso(self, progreso):
+        progreso.completado = (
+            progreso.estudiante_completado and
+            progreso.instructor_completado
+        )
 
+        progreso.save()
 
-    @action(detail=True, methods=['post'], url_path='marcar-estudiante')
-    def marcar_estudiante(self, request, pk=None):
-        """Estudiante marca que ya estudió el tema"""
-        try:
-            progreso = self.get_object()
-            
-            if progreso.estudiante_completado:
-                return Response({
-                    'success': False,
-                    'error': 'Ya habías marcado este tema como estudiado'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            with transaction.atomic():
-                progreso.estudiante_completado = True
-                progreso.fecha_estudiante = timezone.now()
-                progreso.save()
-                
-                if progreso.instructor_completado:
-                    mensaje = "¡Excelente! Tema completado."
-                else:
-                    mensaje = "Tema marcado como estudiado. Espera al instructor."
-            
-            serializer = self.get_serializer(progreso)
-            return Response({
-                'success': True,
-                'message': mensaje,
-                'data': serializer.data
-            })
-        except Exception as e:
-            return Response({
-                'success': False,
-                'error': str(e)
-            }, status=status.HTTP_400_BAD_REQUEST)
-    
-    @action(detail=True, methods=['post'], url_path='marcar-instructor')
-    def marcar_instructor(self, request, pk=None):
-        """Instructor marca que ya dio la clase"""
-        try:
-            progreso = self.get_object()
-            
-            if progreso.instructor_completado:
-                return Response({
-                    'success': False,
-                    'error': 'Ya habías marcado esta clase como dada'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            with transaction.atomic():
-                progreso.instructor_completado = True
-                progreso.fecha_instructor = timezone.now()
-                progreso.save()
-                
-                if progreso.estudiante_completado:
-                    mensaje = "¡Perfecto! Tema completado."
-                else:
-                    mensaje = "Clase marcada. Espera al estudiante."
-            
-            serializer = self.get_serializer(progreso)
-            return Response({
-                'success': True,
-                'message': mensaje,
-                'data': serializer.data
-            })
-        except Exception as e:
-            return Response({
-                'success': False,
-                'error': str(e)
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
+        if progreso.completado:
+            self._desbloquear_siguiente(progreso)
 
     def _desbloquear_siguiente(self, progreso_actual):
         progresos = list(
             ProgresoTema.objects.filter(
                 matricula=progreso_actual.matricula
             ).select_related(
-                'subtema',
-                'subtema__tema'
+                'tema'
             ).order_by(
-                'subtema__tema__orden',
-                'subtema__orden'
+                'tema__orden',
+                'id'
             )
         )
 
@@ -1257,149 +1315,305 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
                         siguiente.desbloqueado = True
                         siguiente.save()
 
+                        usuario_estudiante = progreso_actual.matricula.estudiante.usuarios.first()
+
+                        if usuario_estudiante:
+                            try:
+                                Notificacion.objects.create(
+                                    estudiante=usuario_estudiante,
+                                    tema=siguiente.tema,
+                                    tipo='tema_desbloqueado',
+                                    mensaje=(
+                                        f"Nuevo tema desbloqueado: "
+                                        f"'{siguiente.tema.titulo}'."
+                                    ),
+                                    leida=False
+                                )
+                            except Exception as e:
+                                print(f"Error creando notificación: {e}")
+
                 break
-        
-    def _verificar_siguiente_tema(self, progreso_actual):
-        """Método interno para verificar si puede pasar al siguiente tema"""
-        estudiante = progreso_actual.estudiante
-        tema_actual = progreso_actual.tema
-        plan = tema_actual.plan_estudio
-        
-        # Obtener todos los temas del plan en orden
-        temas_plan = list(plan.temas.all().order_by('orden'))
-        
-        # Encontrar el índice del tema actual
+
+    @action(detail=True, methods=['post'], url_path='marcar-estudiante')
+    def marcar_estudiante(self, request, pk=None):
         try:
-            indice_actual = temas_plan.index(tema_actual)
-        except ValueError:
-            return
-        
-        # Verificar si hay un siguiente tema
-        if indice_actual + 1 < len(temas_plan):
-            siguiente_tema = temas_plan[indice_actual + 1]
-            
-            # Crear progreso para el siguiente tema si no existe
-            siguiente_progreso, creado = ProgresoTema.objects.get_or_create(
-                estudiante=estudiante,
-                tema=siguiente_tema,
-                defaults={
-                    'estudiante_completado': False,
-                    'instructor_completado': False
-                }
-            )
-            
-            if creado:
-                print(f"Nuevo tema disponible para {estudiante.username}: {siguiente_tema.titulo}")
-        
-        # Verificar si completó TODO el plan
-        self._verificar_plan_completado(estudiante, plan)
-    
-    def _verificar_plan_completado(self, estudiante, plan):
-        """Método interno para verificar si completó todo el plan"""
-        todos_temas = plan.temas.all()
-        progresos = ProgresoTema.objects.filter(
-            estudiante=estudiante,
-            tema__in=todos_temas
-        )
-        
-        # Contar cuántos temas tienen ambos checks completados
-        completados = progresos.filter(
-            estudiante_completado=True,
-            instructor_completado=True
-        ).count()
-        
-        total_temas = todos_temas.count()
-        
-        if completados == total_temas and total_temas > 0:
-            # Verificar si ya notificamos antes
-            notificacion_existe = Notificacion.objects.filter(
-                estudiante=estudiante,
-                tipo='plan_completado',
-                leida=False
-            ).exists()
-            
-            if not notificacion_existe:
-                Notificacion.objects.create(
-                    estudiante=estudiante,
-                    tema=None,
-                    tipo='plan_completado',
-                    mensaje=f"🎉 ¡{estudiante.username} ha completado el plan de estudio {plan.nombre}! Ya puede presentar el examen práctico.",
-                    leida=False
-                )
-    
+            progreso = self.get_object()
+
+            if not progreso.desbloqueado:
+                return Response({
+                    'success': False,
+                    'error': 'Este tema aún no está disponible. Completa el tema anterior primero.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            if progreso.estudiante_completado:
+                return Response({
+                    'success': False,
+                    'error': 'Ya habías marcado este tema como recibido'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            with transaction.atomic():
+                progreso.estudiante_completado = True
+                progreso.fecha_estudiante = timezone.now()
+
+                self._actualizar_progreso(progreso)
+
+                if progreso.instructor_completado:
+                    mensaje = "Tema completado. El siguiente tema fue desbloqueado."
+                else:
+                    mensaje = "Tema marcado como recibido. Falta confirmación del instructor."
+
+            serializer = self.get_serializer(progreso)
+
+            return Response({
+                'success': True,
+                'message': mensaje,
+                'data': serializer.data
+            })
+
+        except Exception as e:
+            return Response({
+                'success': False,
+                'error': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='marcar-instructor')
+    def marcar_instructor(self, request, pk=None):
+        try:
+            progreso = self.get_object()
+
+            if not progreso.desbloqueado:
+                return Response({
+                    'success': False,
+                    'error': 'Este tema aún no está disponible. Completa el tema anterior primero.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            if progreso.instructor_completado:
+                return Response({
+                    'success': False,
+                    'error': 'Ya habías marcado este tema como dado'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            with transaction.atomic():
+                progreso.instructor_completado = True
+                progreso.fecha_instructor = timezone.now()
+
+                self._actualizar_progreso(progreso)
+
+                if progreso.estudiante_completado:
+                    mensaje = "Tema completado. El siguiente tema fue desbloqueado."
+                else:
+                    mensaje = "Tema marcado como dado. Falta confirmación del estudiante."
+
+            serializer = self.get_serializer(progreso)
+
+            return Response({
+                'success': True,
+                'message': mensaje,
+                'data': serializer.data
+            })
+
+        except Exception as e:
+            return Response({
+                'success': False,
+                'error': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
+
     @action(detail=True, methods=['post'], url_path='admin-forzar')
     def admin_forzar(self, request, pk=None):
-        """Administrador fuerza el check de estudiante o instructor"""
-        # Verificar que sea admin
-        if not request.user.is_staff:
+        rol = str(getattr(request.user, 'rol', '')).lower()
+
+        if (
+            rol != 'admin'
+            and rol != 'administrador'
+            and not request.user.is_staff
+            and not request.user.is_superuser
+        ):
             return Response({
                 'success': False,
                 'error': 'Solo administradores pueden realizar esta acción'
             }, status=status.HTTP_403_FORBIDDEN)
-        
+
         progreso = self.get_object()
-        tipo_check = request.data.get('tipo')  # 'estudiante' o 'instructor'
-        valor = request.data.get('valor')  # True o False
-        
+        tipo_check = request.data.get('tipo')
+        valor = request.data.get('valor')
+
+        if isinstance(valor, str):
+            valor = valor.lower() == 'true'
+
         if tipo_check not in ['estudiante', 'instructor']:
             return Response({
                 'success': False,
                 'error': 'Tipo de check inválido. Use "estudiante" o "instructor"'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
+
         if valor not in [True, False]:
             return Response({
                 'success': False,
                 'error': 'Valor inválido. Use true o false'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
+
         with transaction.atomic():
-            # Guardar valores anteriores
             old_estudiante = progreso.estudiante_completado
             old_instructor = progreso.instructor_completado
-            
-            # Actualizar según el tipo
+
             if tipo_check == 'estudiante':
                 progreso.estudiante_completado = valor
             else:
                 progreso.instructor_completado = valor
-            
+
             progreso.fecha_admin_edit = timezone.now()
-            progreso.save()
-            
-            # Registrar en historial
-            HistorialPlanEstudio.objects.create(
-                progreso_tema=progreso,
-                usuario=request.user,
-                accion='admin_forzar',
-                valor_anterior_estudiante=old_estudiante,
-                valor_anterior_instructor=old_instructor,
-                valor_nuevo_estudiante=progreso.estudiante_completado,
-                valor_nuevo_instructor=progreso.instructor_completado
-            )
-            
-            # Crear notificación de intervención
+
+            self._actualizar_progreso(progreso)
+
+            try:
+                HistorialPlanEstudio.objects.create(
+                    progreso_tema=progreso,
+                    usuario=request.user,
+                    accion='admin_forzar',
+                    valor_anterior_estudiante=old_estudiante,
+                    valor_anterior_instructor=old_instructor,
+                    valor_nuevo_estudiante=progreso.estudiante_completado,
+                    valor_nuevo_instructor=progreso.instructor_completado
+                )
+            except Exception as e:
+                print(f"Error al guardar historial: {e}")
+
             check_nombre = "estudiante" if tipo_check == 'estudiante' else "instructor"
             accion_texto = "habilitado" if valor else "deshabilitado"
-            
-            Notificacion.objects.create(
-                estudiante=progreso.estudiante,
-                tema=progreso.tema,
-                tipo='intervencion_admin',
-                mensaje=f"El administrador {request.user.username} ha {accion_texto} el check de {check_nombre} para el tema '{progreso.tema.titulo}'.",
-                leida=False
-            )
-            
-            # Verificar si ahora ambos checks están completos
-            if progreso.estudiante_completado and progreso.instructor_completado:
-                self._verificar_siguiente_tema(progreso)
-        
+
+            usuario_estudiante = progreso.matricula.estudiante.usuarios.first()
+
+            if usuario_estudiante:
+                try:
+                    Notificacion.objects.create(
+                        estudiante=usuario_estudiante,
+                        tema=progreso.tema,
+                        tipo='intervencion_admin',
+                        mensaje=(
+                            f"El administrador {request.user.username} ha {accion_texto} "
+                            f"el check de {check_nombre} para el tema "
+                            f"'{progreso.tema.titulo}'."
+                        ),
+                        leida=False
+                    )
+                except Exception as e:
+                    print(f"Error creando notificación: {e}")
+
         serializer = self.get_serializer(progreso)
+
         return Response({
             'success': True,
             'message': f'Check de {check_nombre} actualizado exitosamente',
             'data': serializer.data
         })
+
+    @action(detail=False, methods=['get'], url_path='verificar-plan-completado')
+    def verificar_plan_completado(self, request):
+        user = self.request.user
+        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ''
+
+        resultado = []
+
+        if rol in ['admin', 'administrador'] or user.is_staff or user.is_superuser:
+            matriculas = Matricula.objects.filter(estado='matriculado')
+
+        elif hasattr(user, 'instructor') and user.instructor:
+            matriculas = Matricula.objects.filter(
+                clases__instructor=user.instructor,
+                estado='matriculado'
+            ).distinct()
+
+        elif hasattr(user, 'estudiante') and user.estudiante:
+            matriculas = Matricula.objects.filter(
+                estudiante=user.estudiante,
+                estado='matriculado'
+            )
+
+        else:
+            return Response({
+                'success': False,
+                'error': 'Usuario no tiene permisos para acceder a esta información'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        for matricula in matriculas:
+            if not matricula.plan_de_estudio:
+                continue
+
+            progresos = ProgresoTema.objects.filter(matricula=matricula)
+
+            total_temas = progresos.count()
+
+            if total_temas == 0:
+                continue
+
+            completados = progresos.filter(
+                estudiante_completado=True,
+                instructor_completado=True
+            ).count()
+
+            plan_completado = completados == total_temas
+            porcentaje = round((completados / total_temas * 100))
+
+            if plan_completado:
+                resultado.append({
+                    'matricula_id': matricula.id,
+                    'plan_nombre': matricula.plan_de_estudio.nombre if matricula.plan_de_estudio else 'Sin plan',
+                    'tipo_curso': matricula.tipo_curso,
+                    'total_temas': total_temas,
+                    'temas_completados': completados,
+                    'porcentaje': porcentaje,
+                    'plan_completado': plan_completado,
+                    'puede_presentar_examen': plan_completado,
+                    'estudiante_nombre': f"{matricula.estudiante.nombre} {matricula.estudiante.apellido}",
+                    'estudiante_cedula': matricula.estudiante.cedula,
+                    'estudiante_id': matricula.estudiante.id,
+                    'fecha_inscripcion': matricula.fecha_registro,
+                })
+
+        return Response(resultado)
+
+    @action(detail=True, methods=['get'], url_path='plan-completado')
+    def plan_completado(self, request, pk=None):
+        try:
+            matricula = Matricula.objects.get(id=pk)
+
+            progresos = ProgresoTema.objects.filter(matricula=matricula)
+
+            total_temas = progresos.count()
+
+            if total_temas == 0:
+                return Response({
+                    'success': True,
+                    'matricula_id': matricula.id,
+                    'plan_completado': False,
+                    'total_temas': 0,
+                    'temas_completados': 0,
+                    'porcentaje': 0,
+                    'mensaje': 'No hay temas asignados para este plan'
+                })
+
+            completados = progresos.filter(
+                estudiante_completado=True,
+                instructor_completado=True
+            ).count()
+
+            plan_completado = completados == total_temas
+            porcentaje = round((completados / total_temas * 100))
+
+            return Response({
+                'success': True,
+                'matricula_id': matricula.id,
+                'plan_completado': plan_completado,
+                'total_temas': total_temas,
+                'temas_completados': completados,
+                'porcentaje': porcentaje
+            })
+
+        except Matricula.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Matrícula no encontrada'
+            }, status=status.HTTP_404_NOT_FOUND)
 
 
 class NotificacionViewSet(viewsets.ReadOnlyModelViewSet):
@@ -1530,3 +1744,502 @@ class DashboardPlanViewSet(viewsets.ViewSet):
                 many=True
             ).data
         })
+    
+
+class PreguntaExamenTeoricoViewSet(viewsets.ModelViewSet):
+    queryset = PreguntaExamenTeorico.objects.prefetch_related('opciones').all()
+    serializer_class = PreguntaExamenTeoricoSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
+
+        queryset = PreguntaExamenTeorico.objects.prefetch_related(
+            'opciones'
+        ).all().order_by('-fecha_creacion')
+
+        # tipo_curso = self.request.query_params.get('tipo_curso')
+        activa = self.request.query_params.get('activa')
+
+        # if tipo_curso:
+        #     queryset = queryset.filter(tipo_curso=tipo_curso)
+
+        if activa is not None:
+            if activa.lower() == 'true':
+                queryset = queryset.filter(activa=True)
+            elif activa.lower() == 'false':
+                queryset = queryset.filter(activa=False)
+
+        if rol in ['admin', 'administrador']:
+            return queryset
+
+        return queryset.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
+
+        if rol not in ['admin', 'administrador']:
+            raise serializers.ValidationError(
+                'Solo el administrador puede crear preguntas del examen teórico.'
+            )
+
+        serializer.save()
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
+
+        if rol not in ['admin', 'administrador']:
+            raise serializers.ValidationError(
+                'Solo el administrador puede editar preguntas del examen teórico.'
+            )
+
+        serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        user = request.user
+        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
+
+        if rol not in ['admin', 'administrador']:
+            return Response(
+                {'error': 'Solo el administrador puede eliminar preguntas.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return super().destroy(request, *args, **kwargs)
+    
+class ExamenTeoricoViewSet(viewsets.ModelViewSet):
+    queryset = ExamenTeorico.objects.select_related(
+        'matricula',
+        'matricula__estudiante',
+        'habilitado_por',
+    ).all()
+
+    serializer_class = ExamenTeoricoSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
+
+        queryset = ExamenTeorico.objects.select_related(
+            'matricula',
+            'matricula__estudiante',
+            'habilitado_por',
+        ).all().order_by('-id')
+
+        if rol in ['admin', 'administrador']:
+            return queryset
+
+        if rol == 'instructor' and user.instructor_id:
+            return queryset.filter(habilitado_por_id=user.instructor_id)
+
+        if rol == 'estudiante' and user.estudiante_id:
+            return queryset.filter(matricula__estudiante_id=user.estudiante_id)
+
+        return queryset.none()
+
+    def create(self, request, *args, **kwargs):
+        return Response(
+            {'error': 'Para habilitar un examen usa /api/examen-teorico/habilitar/.'},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED
+        )
+
+    @action(detail=False, methods=['post'], url_path='habilitar')
+    def habilitar(self, request):
+        user = request.user
+        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
+
+        if rol != 'instructor' or not user.instructor_id:
+            return Response(
+                {'error': 'Solo un instructor puede habilitar el examen teórico.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        matricula_id = request.data.get('matricula_id')
+
+        if not matricula_id:
+            return Response(
+                {'error': 'Debe enviar la matrícula del estudiante.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            matricula = Matricula.objects.select_related(
+                'estudiante',
+                'plan_de_estudio',
+            ).get(id=matricula_id)
+        except Matricula.DoesNotExist:
+            return Response(
+                {'error': 'Matrícula no encontrada.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if matricula.estado not in ['matriculado', 'finalizado']:
+            return Response(
+                {
+                    'error': (
+                        'El estudiante debe estar matriculado o tener el plan finalizado '
+                        'para habilitar el examen.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        tiene_clase_con_instructor = Calendario.objects.filter(
+            matricula=matricula,
+            instructor_id=user.instructor_id,
+            es_examen=False,
+        ).exists()
+
+        if not tiene_clase_con_instructor:
+            return Response(
+                {'error': 'Este estudiante no está asignado a este instructor.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        progresos = ProgresoTema.objects.filter(matricula=matricula)
+
+        total_temas = progresos.count()
+
+        if total_temas == 0:
+            return Response(
+                {'error': 'El estudiante no tiene temas asignados en su plan de estudio.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        completados = progresos.filter(
+            estudiante_completado=True,
+            instructor_completado=True,
+        ).count()
+
+        if completados < total_temas:
+            return Response(
+                {
+                    'error': (
+                        f'No se puede habilitar el examen porque el plan de estudio '
+                        f'aún no está completo. Progreso: {completados}/{total_temas}.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        preguntas_disponibles = PreguntaExamenTeorico.objects.filter(
+                activa=True,
+            ).count()
+
+        if preguntas_disponibles == 0:
+            return Response(
+                {
+                    'error': (
+                        f'No existen preguntas activas para el examen teórico. '
+                        f'{matricula.tipo_curso}.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        examen, created = ExamenTeorico.objects.get_or_create(
+            matricula=matricula,
+            defaults={
+                'habilitado_por_id': user.instructor_id,
+                'estado': 'habilitado',
+                'fecha_habilitado': timezone.now(),
+            }
+        )
+
+        if not created:
+
+                if examen.estado == 'realizado' and examen.nota is not None and examen.nota >= 80:
+                    return Response(
+                        {'error': 'El estudiante ya aprobó el examen teórico.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                if examen.estado == 'realizado' and examen.nota is not None and examen.nota < 80:
+                    RespuestaExamenTeorico.objects.filter(examen=examen).delete()
+
+                    examen.estado = 'habilitado'
+                    examen.nota = None
+                    examen.fecha_realizado = None
+                    examen.fecha_habilitado = timezone.now()
+                    examen.habilitado_por_id = user.instructor_id
+
+                    examen.save(update_fields=[
+                        'estado',
+                        'nota',
+                        'fecha_realizado',
+                        'fecha_habilitado',
+                        'habilitado_por',
+                    ])
+
+                else:
+                    examen.estado = 'habilitado'
+                    examen.fecha_habilitado = timezone.now()
+                    examen.habilitado_por_id = user.instructor_id
+
+                    examen.save(update_fields=[
+                        'estado',
+                        'fecha_habilitado',
+                        'habilitado_por',
+                    ])
+
+        serializer = self.get_serializer(examen)
+
+        return Response(
+                {
+                    'message': 'Examen teórico habilitado correctamente.',
+                    'examen': serializer.data,
+                },
+                status=status.HTTP_200_OK
+            )
+
+    @action(detail=False, methods=['get'], url_path='mi-examen')
+    def mi_examen(self, request):
+        user = request.user
+        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
+
+
+        print("ROL:", rol)
+        print("USER:", user.username)
+        print("ESTUDIANTE ID:", user.estudiante_id)
+
+        if rol != 'estudiante' or not user.estudiante_id:
+            
+            return Response(
+                {'error': 'Solo el estudiante puede consultar su examen teórico.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        examen = ExamenTeorico.objects.select_related(
+            'matricula',
+            'matricula__estudiante',
+            'habilitado_por',
+        ).filter(
+            matricula__estudiante_id=user.estudiante_id
+        ).first()
+
+        if not examen:
+            return Response(
+                {
+                    'disponible': False,
+                    'message': 'Todavía no tienes examen teórico habilitado.',
+                },
+                status=status.HTTP_200_OK
+            )
+
+        if examen.estado == 'realizado':
+            return Response(
+                {
+                    'disponible': False,
+                    'realizado': True,
+                    'message': 'Ya realizaste el examen teórico.',
+                    'examen': self.get_serializer(examen).data,
+                },
+                status=status.HTTP_200_OK
+            )
+
+        if examen.estado != 'habilitado':
+            return Response(
+                {
+                    'disponible': False,
+                    'message': 'Tu examen teórico todavía no está disponible.',
+                },
+                status=status.HTTP_200_OK
+            )
+
+        preguntas = PreguntaExamenTeorico.objects.prefetch_related(
+            'opciones'
+        ).filter(
+            activa=True,
+        ).order_by('id')
+
+        preguntas_serializer = PreguntaExamenEstudianteSerializer(
+            preguntas,
+            many=True
+        )
+
+        return Response(
+            {
+                'disponible': True,
+                'realizado': False,
+                'examen': self.get_serializer(examen).data,
+                'preguntas': preguntas_serializer.data,
+            },
+            status=status.HTTP_200_OK
+        )
+
+    @action(detail=True, methods=['post'], url_path='enviar')
+    def enviar(self, request, pk=None):
+        user = request.user
+        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
+
+        if rol != 'estudiante' or not user.estudiante_id:
+            return Response(
+                {'error': 'Solo el estudiante puede enviar el examen teórico.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        examen = self.get_object()
+
+        if examen.matricula.estudiante_id != user.estudiante_id:
+            return Response(
+                {'error': 'No puedes enviar un examen que no te pertenece.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if examen.estado != 'habilitado':
+            return Response(
+                {'error': 'Este examen no está habilitado o ya fue realizado.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = RespuestaEnviarExamenSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        respuestas = serializer.validated_data['respuestas']
+
+        preguntas = PreguntaExamenTeorico.objects.prefetch_related(
+            'opciones'
+        ).filter(
+            activa=True,
+        )
+
+        total_preguntas = preguntas.count()
+
+        if total_preguntas == 0:
+            return Response(
+                {'error': 'No hay preguntas activas para este examen.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        preguntas_ids = set(preguntas.values_list('id', flat=True))
+        respuestas_ids = set(
+            int(respuesta['pregunta_id'])
+            for respuesta in respuestas
+        )
+
+        if preguntas_ids != respuestas_ids:
+            return Response(
+                {
+                    'error': (
+                        'Debe responder todas las preguntas del examen '
+                        'antes de enviarlo.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            RespuestaExamenTeorico.objects.filter(examen=examen).delete()
+
+            correctas = 0
+
+            for respuesta in respuestas:
+                pregunta_id = respuesta['pregunta_id']
+                opcion_id = respuesta['opcion_id']
+
+                try:
+                    pregunta = preguntas.get(id=pregunta_id)
+                except PreguntaExamenTeorico.DoesNotExist:
+                    return Response(
+                        {'error': 'Una de las preguntas no pertenece a este examen.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                try:
+                    opcion = OpcionPreguntaExamenTeorico.objects.get(
+                        id=opcion_id,
+                        pregunta=pregunta,
+                    )
+                except OpcionPreguntaExamenTeorico.DoesNotExist:
+                    return Response(
+                        {'error': 'Una de las opciones no pertenece a la pregunta indicada.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                es_correcta = opcion.es_correcta
+
+                print("PREGUNTA:", pregunta.id, pregunta.texto)
+                print("OPCION SELECCIONADA:", opcion.id, opcion.texto)
+                print("ES CORRECTA:", opcion.es_correcta)
+
+                if es_correcta:
+                    correctas += 1
+                RespuestaExamenTeorico.objects.create(
+                    examen=examen,
+                    pregunta=pregunta,
+                    opcion_seleccionada=opcion,
+                    correcta=es_correcta,
+                )
+            nota_final = round((correctas / total_preguntas) * 100, 2)
+            examen.estado = 'realizado'
+            examen.nota = nota_final
+            examen.fecha_realizado = timezone.now()
+            examen.save(
+                update_fields=[
+                    'estado',
+                    'nota',
+                    'fecha_realizado',
+                ]
+            )
+
+            plan = examen.matricula.plan_de_estudio
+
+            if not plan:
+                return Response(
+                    {'error': 'La matrícula no tiene plan de estudio asignado.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            instructor = examen.habilitado_por
+
+            if not instructor:
+                return Response(
+                    {'error': 'El examen no tiene instructor asignado.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            Notas.objects.update_or_create(
+                matricula=examen.matricula,
+                tipo_nota='teorico',
+                defaults={
+                    'instructor': instructor,
+                    'plan_de_estudio': plan,
+                    'nota': str(nota_final),
+                    'comentario': (
+                        'Examen teórico aprobado automáticamente por el sistema.'
+                        if nota_final >= 80
+                        else 'Examen teórico reprobado. Puede ser habilitado nuevamente por el instructor.'
+                    ),
+                }
+            )
+
+        return Response(
+            {
+                'message': 'Examen enviado y calificado correctamente.',
+                'total_preguntas': total_preguntas,
+                'correctas': correctas,
+                'nota': nota_final,
+                'resultado': 'Aprobado' if nota_final >= 80 else 'Reprobado',
+            },
+            status=status.HTTP_200_OK
+        )
+
+    @action(detail=True, methods=['get'], url_path='respuestas')
+    def respuestas(self, request, pk=None):
+        examen = self.get_object()
+
+        respuestas = RespuestaExamenTeorico.objects.select_related(
+            'pregunta',
+            'opcion_seleccionada',
+        ).filter(
+            examen=examen
+        )
+
+        serializer = RespuestaExamenTeoricoSerializer(respuestas, many=True)
+
+        return Response(serializer.data)
+    

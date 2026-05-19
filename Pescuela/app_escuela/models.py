@@ -336,7 +336,7 @@ class Notas(models.Model):
     )
     fecha_registro = models.DateTimeField(auto_now_add=True)
     nota = models.CharField(max_length=10)
-    comentario = models.CharField(max_length=50, default='Comentario')
+    comentario = models.TextField(blank=True, null=True)
 
     class Meta:
         ordering = ['-fecha_registro']
@@ -427,11 +427,11 @@ class ProgresoTema(models.Model):
     matricula = models.ForeignKey(
         'Matricula',
         on_delete=models.CASCADE,
-        related_name='progresos_temas',null=True, blank=True
+        related_name='progresos_temas'
     )
 
-    subtema = models.ForeignKey(
-        'SubtemaPlanEstudio',
+    tema = models.ForeignKey(
+        'TemaPlanEstudio',
         on_delete=models.CASCADE,
         related_name='progresos_estudiantes'
     )
@@ -451,15 +451,15 @@ class ProgresoTema(models.Model):
     fecha_admin_edit = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        unique_together = ['matricula', 'subtema']
+        unique_together = ['matricula', 'tema']
 
         ordering = [
-            'subtema__tema__orden',
-            'subtema__orden'
+            'tema__orden',
+            'id'
         ]
 
     def __str__(self):
-        return f"{self.matricula.estudiante.nombre} - {self.subtema.titulo}"
+        return f"{self.matricula.estudiante.nombre} - {self.tema.titulo}"
 
     @property
     def ambos_checks_completados(self):
@@ -473,12 +473,13 @@ class Notificacion(models.Model):
     """Notificaciones para el administrador"""
     
     TIPOS_NOTIFICACION = (
-        ('falta_estudiante', 'El estudiante no ha marcado su tema'),
-        ('falta_instructor', 'El instructor no ha marcado la clase'),
-        ('tema_bloqueado', 'Tema bloqueado'),
-        ('intervencion_admin', 'El admin realizó una intervención'),
-        ('plan_completado', 'El estudiante completó todo el plan'),
-    )
+    ('falta_estudiante', 'El estudiante no ha marcado su tema'),
+    ('falta_instructor', 'El instructor no ha marcado la clase'),
+    ('tema_bloqueado', 'Tema bloqueado'),
+    ('tema_desbloqueado', 'Tema desbloqueado'),
+    ('intervencion_admin', 'El admin realizó una intervención'),
+    ('plan_completado', 'El estudiante completó todo el plan'),
+)
     
     estudiante = models.ForeignKey('Usuario', on_delete=models.CASCADE, related_name='notificaciones')
     tema = models.ForeignKey('TemaPlanEstudio', on_delete=models.CASCADE, null=True, blank=True)
@@ -508,3 +509,99 @@ class HistorialPlanEstudio(models.Model):
     
     def __str__(self):
         return f"{self.fecha} - {self.usuario.username} - {self.accion}"
+
+
+
+
+
+class PreguntaExamenTeorico(models.Model):
+    texto = models.TextField()
+    activa = models.BooleanField(default=True)
+    fecha_creacion = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.tipo_curso} - {self.texto[:50]}"
+
+
+class OpcionPreguntaExamenTeorico(models.Model):
+
+    pregunta = models.ForeignKey(
+        PreguntaExamenTeorico,
+        on_delete=models.CASCADE,
+        related_name='opciones'
+    )
+
+    texto = models.TextField()
+
+    es_correcta = models.BooleanField(default=False)
+
+    def __str__(self):
+        return self.texto[:50]
+
+
+class ExamenTeorico(models.Model):
+
+    ESTADO_CHOICES = [
+        ('pendiente', 'Pendiente'),
+        ('habilitado', 'Habilitado'),
+        ('realizado', 'Realizado'),
+    ]
+
+    matricula = models.OneToOneField(
+        Matricula,
+        on_delete=models.CASCADE,
+        related_name='examen_teorico'
+    )
+
+    habilitado_por = models.ForeignKey(
+        Instructor,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='examenes_teoricos_habilitados'
+    )
+
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADO_CHOICES,
+        default='pendiente'
+    )
+
+    nota = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True
+    )
+
+    fecha_habilitado = models.DateTimeField(null=True, blank=True)
+
+    fecha_realizado = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        estudiante = self.matricula.estudiante
+        return f"Examen teórico - {estudiante.nombre} {estudiante.apellido}"
+
+
+class RespuestaExamenTeorico(models.Model):
+
+    examen = models.ForeignKey(
+        ExamenTeorico,
+        on_delete=models.CASCADE,
+        related_name='respuestas'
+    )
+
+    pregunta = models.ForeignKey(
+        PreguntaExamenTeorico,
+        on_delete=models.CASCADE
+    )
+
+    opcion_seleccionada = models.ForeignKey(
+        OpcionPreguntaExamenTeorico,
+        on_delete=models.CASCADE
+    )
+
+    correcta = models.BooleanField(default=False)
+
+    def __str__(self):
+        return f"Respuesta examen #{self.examen.id}"

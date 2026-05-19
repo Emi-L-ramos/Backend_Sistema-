@@ -2,6 +2,8 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from .models import Instructor, Rol, Usuario, Matricula, Recibo, Calendario, Estudiante, CategoriaVehiculo, PlanEstudio,Asistencia, Notas, ValorCurso 
 from .models import TemaPlanEstudio, SubtemaPlanEstudio, Notificacion,ProgresoTema,HistorialPlanEstudio
+
+from .models import PreguntaExamenTeorico,ExamenTeorico,RespuestaExamenTeorico,OpcionPreguntaExamenTeorico
 # 1. Definimos cómo se verá el Usuario en el panel
 class MiUsuarioAdmin(UserAdmin):
     # Esto añade el campo 'rol' a la edición del usuario
@@ -30,6 +32,12 @@ admin.site.register(SubtemaPlanEstudio)
 admin.site.register(Notificacion)
 admin.site.register(ProgresoTema)
 admin.site.register(HistorialPlanEstudio)
+
+admin.site.register(PreguntaExamenTeorico)
+admin.site.register(OpcionPreguntaExamenTeorico)
+admin.site.register(ExamenTeorico)
+admin.site.register(RespuestaExamenTeorico)
+
 
 # 3. Registro seguro del Usuario
 try:

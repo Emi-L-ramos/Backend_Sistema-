@@ -23,8 +23,9 @@ from .views import (
     saldo,
     DashboardGananciasView,
     DashboardResumenView,
-    
-    DashboardPlanViewSet
+    DashboardPlanViewSet,
+    PreguntaExamenTeoricoViewSet,
+    ExamenTeoricoViewSet,
 )
 from .views import ( ProgresoTemaViewSet, NotificacionViewSet
 )
@@ -43,10 +44,12 @@ router.register(r'matricula', MatriculaViewSet)
 router.register(r'recibo', ReciboViewSet)
 router.register(r'calendario', CalendarioViewSet)
 router.register(r'asistencia', AsistenciaViewSet)
-router.register(r'notas', NotasViewSet)
+router.register(r'notas', NotasViewSet, basename='notas')
 router.register(r'progreso-tema', ProgresoTemaViewSet, basename='progreso-tema')
 router.register(r'notificaciones', NotificacionViewSet)
 router.register(r'dashboard-plan', DashboardPlanViewSet, basename='dashboard-plan')
+router.register(r'preguntas-examen-teorico', PreguntaExamenTeoricoViewSet)
+router.register(r'examen-teorico', ExamenTeoricoViewSet)
 
 # app_escuela/api/urls.py
 
