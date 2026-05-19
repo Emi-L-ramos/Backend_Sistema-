@@ -45,6 +45,8 @@ class UserSerializer(serializers.ModelSerializer):
 
     matricula_id = serializers.IntegerField(write_only=True, required=False)
     instructor_id = serializers.IntegerField(write_only=True, required=False)
+    estudiante_nombre = serializers.SerializerMethodField()
+    instructor_nombre = serializers.SerializerMethodField()
 
     class Meta:
         model = Usuario
@@ -58,13 +60,27 @@ class UserSerializer(serializers.ModelSerializer):
             'password',
             'matricula_id',
             'instructor_id',
+            'estudiante_nombre',
+            'instructor_nombre',
         ]
         extra_kwargs = {
             'password': {'write_only': True, 'required': False}
         }
 
+    def get_estudiante_nombre(self, obj):
+        if obj.estudiante:
+            return f"{obj.estudiante.nombre or ''} {obj.estudiante.apellido or ''}".strip()
+        return None
+
+    def get_instructor_nombre(self, obj):
+        if obj.instructor:
+            return f"{obj.instructor.nombre or ''} {obj.instructor.apellido or ''}".strip()
+        return None
+
     def validate(self, data):
         matricula_id = data.get('matricula_id')
+        instructor_id = data.get('instructor_id')
+
         rol = data.get('rol') or getattr(self.instance, 'rol', None)
         rol_nombre = rol.nombre.lower() if rol else ""
 
@@ -90,11 +106,7 @@ class UserSerializer(serializers.ModelSerializer):
                         'matricula_id': 'Este estudiante ya tiene un usuario asignado.'
                     })
 
-        return data
-    
         if rol_nombre == "instructor":
-            instructor_id = data.get('instructor_id')
-
             if not instructor_id and not self.instance:
                 raise serializers.ValidationError({
                     'instructor_id': 'Debe seleccionar un instructor para crear un usuario instructor.'
@@ -115,6 +127,8 @@ class UserSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         'instructor_id': 'Este instructor ya tiene un usuario asignado.'
                     })
+
+        return data
 
     def create(self, validated_data):
         matricula_id = validated_data.pop('matricula_id', None)
