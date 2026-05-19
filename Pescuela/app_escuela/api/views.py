@@ -2125,7 +2125,7 @@ class ExamenTeoricoViewSet(viewsets.ModelViewSet):
             'opciones'
         ).filter(
             activa=True,
-        ).order_by('id')
+        ).order_by('?')[:30]
 
         preguntas_serializer = PreguntaExamenEstudianteSerializer(
             preguntas,
