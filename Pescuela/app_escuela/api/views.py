@@ -26,10 +26,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django.db.models.functions import TruncMonth
-<<<<<<< Updated upstream
 from decimal import Decimal
-=======
->>>>>>> Stashed changes
 from rest_framework import status
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
@@ -40,11 +37,6 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.drawing.image import Image as ExcelImage
 import os
-<<<<<<< Updated upstream
-=======
-
-
->>>>>>> Stashed changes
 
 from ..models import (
     Rol,
@@ -1310,10 +1302,6 @@ class DashboardIngresosMensualesView(APIView):
             9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
         }
         return meses.get(mes_numero, "")
-<<<<<<< Updated upstream
-=======
-    
->>>>>>> Stashed changes
 
 # views.py
 
@@ -2503,20 +2491,14 @@ def exportar_reporte_instructores_policial(request):
         celda.fill = header_fill
         celda.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         celda.border = border
-
     instructores = Instructor.objects.order_by("nombre", "apellido")
-
     fila = 4
-
     for index, instructor in enumerate(instructores, start=1):
         ws.row_dimensions[fila].height = 65
-
         ws.cell(row=fila, column=1, value=index)
-
         if instructor.foto:
             try:
                 ruta_foto = instructor.foto.path
-
                 if os.path.exists(ruta_foto):
                     imagen = ExcelImage(ruta_foto)
                     imagen.width = 55
@@ -2526,7 +2508,6 @@ def exportar_reporte_instructores_policial(request):
                 pass
 
         nombre_completo = f"{instructor.nombre or ''} {instructor.apellido or ''}".strip()
-
         ws.cell(row=fila, column=3, value=nombre_completo)
         ws.cell(row=fila, column=4, value=instructor.cedula or "")
         ws.cell(row=fila, column=5, value=instructor.nacionalidad or "")
@@ -2546,14 +2527,11 @@ def exportar_reporte_instructores_policial(request):
         ws.cell(row=fila, column=15, value=instructor.fecha_salida.strftime("%d/%m/%Y") if instructor.fecha_salida else "")
         ws.cell(row=fila, column=16, value=instructor.motivo_salida or "")
         ws.cell(row=fila, column=17, value=instructor.infracciones_resoluciones or "")
-
         for col in range(1, 18):
             celda = ws.cell(row=fila, column=col)
             celda.border = border
             celda.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
         fila += 1
-
     anchos = {
         "A": 8,
         "B": 14,
@@ -2573,19 +2551,11 @@ def exportar_reporte_instructores_policial(request):
         "P": 35,
         "Q": 35,
     }
-
     for columna, ancho in anchos.items():
         ws.column_dimensions[columna].width = ancho
-
     response = HttpResponse(
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     response["Content-Disposition"] = 'attachment; filename="reporte_instructores_policial.xlsx"'
-
     wb.save(response)
-
     return response
-<<<<<<< Updated upstream
-=======
-
->>>>>>> Stashed changes
