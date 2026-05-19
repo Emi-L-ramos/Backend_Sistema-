@@ -44,6 +44,7 @@ class UserSerializer(serializers.ModelSerializer):
     )
 
     matricula_id = serializers.IntegerField(write_only=True, required=False)
+    instructor_id = serializers.IntegerField(write_only=True, required=False)
 
     class Meta:
         model = Usuario
@@ -56,6 +57,7 @@ class UserSerializer(serializers.ModelSerializer):
             'rol',
             'password',
             'matricula_id',
+            'instructor_id',
         ]
         extra_kwargs = {
             'password': {'write_only': True, 'required': False}
@@ -89,9 +91,34 @@ class UserSerializer(serializers.ModelSerializer):
                     })
 
         return data
+    
+        if rol_nombre == "instructor":
+            instructor_id = data.get('instructor_id')
+
+            if not instructor_id and not self.instance:
+                raise serializers.ValidationError({
+                    'instructor_id': 'Debe seleccionar un instructor para crear un usuario instructor.'
+                })
+
+            if instructor_id:
+                try:
+                    instructor = Instructor.objects.get(id=instructor_id)
+                except Instructor.DoesNotExist:
+                    raise serializers.ValidationError({
+                        'instructor_id': 'El instructor no existe.'
+                    })
+
+                if Usuario.objects.filter(
+                    instructor=instructor,
+                    rol__nombre__iexact='instructor'
+                ).exclude(id=getattr(self.instance, 'id', None)).exists():
+                    raise serializers.ValidationError({
+                        'instructor_id': 'Este instructor ya tiene un usuario asignado.'
+                    })
 
     def create(self, validated_data):
         matricula_id = validated_data.pop('matricula_id', None)
+        instructor_id = validated_data.pop('instructor_id', None)
         password = validated_data.pop('password', None)
 
         usuario = Usuario(**validated_data)
@@ -110,12 +137,8 @@ class UserSerializer(serializers.ModelSerializer):
 
         rol_nombre = usuario.rol.nombre.lower() if usuario.rol else ""
 
-        if rol_nombre == "instructor":
-            instructor = Instructor.objects.create(
-                nombre=usuario.first_name or usuario.username,
-                apellido=usuario.last_name or "",
-            )
-
+        if rol_nombre == "instructor" and instructor_id:
+            instructor = Instructor.objects.get(id=instructor_id)
             usuario.instructor = instructor
             usuario.save(update_fields=['instructor'])
 
@@ -123,6 +146,7 @@ class UserSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         validated_data.pop('matricula_id', None)
+        validated_data.pop('instructor_id', None)
         password = validated_data.pop('password', None)
 
         for attr, value in validated_data.items():
@@ -132,25 +156,6 @@ class UserSerializer(serializers.ModelSerializer):
             instance.set_password(password)
 
         instance.save()
-
-        rol_nombre = instance.rol.nombre.lower() if instance.rol else ""
-
-        if rol_nombre == "instructor":
-            instructor = instance.instructor
-
-            if not instructor:
-                instructor = Instructor.objects.create(
-                    nombre=instance.first_name or instance.username,
-                    apellido=instance.last_name or "",
-                )
-
-                instance.instructor = instructor
-                instance.save(update_fields=['instructor'])
-
-            instructor.nombre = instance.first_name or instance.username
-            instructor.apellido = instance.last_name or ""
-            instructor.save()
-
         return instance
 
 class SubtemaPlanEstudioSerializer(serializers.ModelSerializer):
@@ -325,9 +330,13 @@ class InstructorSerializer(serializers.ModelSerializer):
 
     def get_foto_url(self, obj):
         request = self.context.get('request')
+        foto = getattr(obj, 'foto', None)
 
-        if obj.foto and request:
-            return request.build_absolute_uri(obj.foto.url)
+        if foto and request:
+            try:
+                return request.build_absolute_uri(foto.url)
+            except Exception:
+                return None
 
         return None
 
@@ -343,7 +352,7 @@ class MatriculaSerializer(serializers.ModelSerializer):
     estudiante_fecha_nacimiento = serializers.DateField(source='estudiante.fecha_nacimiento', read_only=True)
     estudiante_direccion = serializers.CharField(source='estudiante.direccion', read_only=True)
     estudiante_nivel_educativo = serializers.CharField(source='estudiante.nivel_educativo', read_only=True)
-    estudiante_contacto_emergencia = serializers.CharField(source='estudiante.en_caso_de_emergencia', read_only=True)
+    estudiante_contacto_emergencia = serializers.CharField(source='estudiante.nombre_emergencia', read_only=True)
     estudiante_telefono_emergencia = serializers.CharField(source='estudiante.telefono_emergencia', read_only=True)
     tiene_usuario = serializers.SerializerMethodField()
     categoria_nombre = serializers.CharField(source='categoria.nombre', read_only=True)

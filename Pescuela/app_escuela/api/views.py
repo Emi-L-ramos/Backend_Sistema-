@@ -27,10 +27,20 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django.db.models.functions import TruncMonth
 from decimal import Decimal
+<<<<<<< HEAD
 from rest_framework import status
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 
+=======
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.drawing.image import Image as ExcelImage
+import os
+>>>>>>> 8adbd1a5ee0f891ab38c77de2cd912e16384bf13
 
 
 from ..models import (
@@ -208,7 +218,7 @@ class ValorCursoViewSet(viewsets.ModelViewSet):
         return queryset
 
 class InstructorViewSet(viewsets.ModelViewSet):
-    queryset = Instructor.objects.select_related('categoria_vehiculo').all()
+    queryset = Instructor.objects.all()
     serializer_class = InstructorSerializer
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
@@ -278,11 +288,31 @@ class MatriculaViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='para-examen')
     def para_examen(self, request):
 
+        user = request.user
+        rol = user.rol_nombre
+
         matriculas = Matricula.objects.select_related(
             'estudiante'
         ).filter(
             estado='matriculado'
         )
+
+        if rol == 'instructor':
+            if not user.instructor_id:
+                return Response([], status=200)
+
+            matriculas_ids = Calendario.objects.filter(
+                instructor_id=user.instructor_id,
+                es_examen=False,
+                matricula__estado='matriculado'
+            ).exclude(
+                estado='cancelada'
+            ).values_list(
+                'matricula_id',
+                flat=True
+            ).distinct()
+
+            matriculas = matriculas.filter(id__in=matriculas_ids)
 
         resultados = []
 
@@ -322,7 +352,52 @@ class MatriculaViewSet(viewsets.ModelViewSet):
                 'estudiante_cedula': matricula.estudiante.cedula,
             })
 
-        return Response(resultados)        
+        return Response(resultados)     
+    
+    @action(detail=False, methods=['get'], url_path='asignadas-instructor')
+    def asignadas_instructor(self, request):
+        user = request.user
+        rol = user.rol_nombre
+
+        matriculas = Matricula.objects.select_related(
+            'estudiante'
+        ).filter(
+            estado='matriculado'
+        )
+
+        if rol == 'instructor':
+            if not user.instructor_id:
+                return Response([], status=200)
+
+            matriculas_ids = Calendario.objects.filter(
+                instructor_id=user.instructor_id,
+                es_examen=False
+            ).values_list(
+                'matricula_id',
+                flat=True
+            ).distinct()
+
+            matriculas = matriculas.filter(id__in=matriculas_ids)
+
+        resultados = []
+
+        for matricula in matriculas:
+            tiene_examen = Calendario.objects.filter(
+                matricula=matricula,
+                es_examen=True,
+            ).exists()
+
+            resultados.append({
+                'id': matricula.id,
+                'estudiante_nombre': (
+                    f"{matricula.estudiante.nombre} "
+                    f"{matricula.estudiante.apellido}"
+                ).strip(),
+                'estudiante_cedula': matricula.estudiante.cedula,
+                'tiene_examen': tiene_examen,
+            })
+
+        return Response(resultados)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -993,6 +1068,7 @@ class NotasViewSet(viewsets.ModelViewSet):
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def login(request):
@@ -1232,6 +1308,7 @@ class DashboardIngresosMensualesView(APIView):
         }
         return meses.get(mes_numero, "")
     
+<<<<<<< HEAD
 # views.py
 
 from django.utils import timezone
@@ -2243,3 +2320,263 @@ class ExamenTeoricoViewSet(viewsets.ModelViewSet):
 
         return Response(serializer.data)
     
+=======
+class PerfilView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_foto_url(self, request, instructor):
+        foto = getattr(instructor, 'foto', None)
+
+        if foto:
+            try:
+                return request.build_absolute_uri(foto.url)
+            except Exception:
+                return None
+
+        return None
+
+    def serializar_instructor(self, request, instructor):
+        return {
+            "id": instructor.id,
+            "nombre": instructor.nombre,
+            "apellido": instructor.apellido,
+            "telefono": instructor.numero_telefono,
+            "direccion": instructor.direccion,
+            "edad": instructor.edad,
+            "experiencia": instructor.experiencia,
+            "categoria": instructor.categoria_instructor if instructor.categoria_instructor else None,
+            "foto": self.get_foto_url(request, instructor),
+            "cedula": instructor.cedula or "",
+            "nacionalidad": instructor.nacionalidad or "",
+            "nivel_escolar": instructor.nivel_escolar or "",
+            "antecedentes_penales": instructor.antecedentes_penales or "",
+            "centro_trabajo": instructor.centro_trabajo or "",
+            "cargo": instructor.cargo or "",
+            "curso_aprobado_instructor": instructor.curso_aprobado_instructor or "",
+            "fecha_ingreso": instructor.fecha_ingreso.isoformat() if instructor.fecha_ingreso else "",
+            "fecha_salida": instructor.fecha_salida.isoformat() if instructor.fecha_salida else "",
+            "motivo_salida": instructor.motivo_salida or "",
+            "infracciones_resoluciones": instructor.infracciones_resoluciones or "",
+        }
+
+    def serializar_estudiante(self, estudiante):
+        return {
+            "id": estudiante.id,
+            "nombre": estudiante.nombre,
+            "apellido": estudiante.apellido,
+            "cedula": estudiante.cedula,
+            "telefono": estudiante.telefono_movil,
+            "correo": estudiante.correo_electronico,
+            "direccion": estudiante.direccion,
+            "edad": estudiante.edad,
+            "nivel_educativo": estudiante.nivel_educativo,
+            "sexo": estudiante.sexo or "",
+            "nacionalidad": estudiante.nacionalidad or "",
+            "fecha_nacimiento": estudiante.fecha_nacimiento.isoformat() if estudiante.fecha_nacimiento else "",
+            "nombre_emergencia": estudiante.nombre_emergencia or "",
+            "telefono_emergencia": estudiante.telefono_emergencia or "",
+            "activo": estudiante.activo,
+        }
+
+    def get(self, request):
+        usuario = request.user
+        rol = usuario.rol_nombre
+
+        data = {
+            "rol": rol,
+            "mi_perfil": None,
+            "instructor": None,
+            "estudiantes": [],
+            "instructores": [],
+        }
+
+        if rol in ['admin', 'secretaria']:
+            instructores = Instructor.objects.all()
+
+            estudiantes = Estudiante.objects.all()
+
+            data["instructores"] = [
+                self.serializar_instructor(request, instructor)
+                for instructor in instructores
+            ]
+
+            data["estudiantes"] = [
+                self.serializar_estudiante(estudiante)
+                for estudiante in estudiantes
+            ]
+
+            return Response(data)
+
+        if rol == 'instructor':
+            instructor = usuario.instructor
+
+            if instructor:
+                data["mi_perfil"] = self.serializar_instructor(request, instructor)
+
+                estudiantes_ids = Calendario.objects.filter(
+                    instructor=instructor
+                ).values_list(
+                    'matricula__estudiante_id',
+                    flat=True
+                ).distinct()
+
+                estudiantes = Estudiante.objects.filter(id__in=estudiantes_ids)
+
+                data["estudiantes"] = [
+                    self.serializar_estudiante(estudiante)
+                    for estudiante in estudiantes
+                ]
+
+            return Response(data)
+
+        if rol == 'estudiante':
+            estudiante = usuario.estudiante
+
+            if estudiante:
+                data["mi_perfil"] = self.serializar_estudiante(estudiante)
+
+                clase = Calendario.objects.filter(
+                    matricula__estudiante=estudiante
+                ).select_related(
+                    'instructor'
+                ).first()
+
+                if clase and clase.instructor:
+                    data["instructor"] = self.serializar_instructor(
+                        request,
+                        clase.instructor
+                    )
+
+            return Response(data)
+
+        return Response(data)
+    
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def exportar_reporte_instructores_policial(request):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Instructores"
+
+    ws.merge_cells("A1:Q1")
+    ws["A1"] = "REPORTE DE INSTRUCTORES - TRÁNSITO POLICÍA NACIONAL"
+    ws["A1"].font = Font(size=14, bold=True, color="FFFFFF")
+    ws["A1"].fill = PatternFill("solid", fgColor="1F4E78")
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+
+    encabezados = [
+        "No.",
+        "Foto",
+        "Nombres y Apellidos",
+        "Identificación",
+        "Nacionalidad",
+        "Dirección",
+        "Teléfonos",
+        "Nivel Escolar",
+        "Antecedentes Penales",
+        "Centro de Trabajo",
+        "Cargo",
+        "Categoría Licencia",
+        "Curso Aprobado para Instructor",
+        "Fecha de Ingreso",
+        "Fecha de Salida",
+        "Motivo de la Salida",
+        "Infracciones / Resoluciones",
+    ]
+
+    fila_encabezado = 3
+
+    header_fill = PatternFill("solid", fgColor="4F81BD")
+    thin = Side(border_style="thin", color="A6A6A6")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    for col, titulo in enumerate(encabezados, start=1):
+        celda = ws.cell(row=fila_encabezado, column=col)
+        celda.value = titulo
+        celda.font = Font(bold=True, color="FFFFFF")
+        celda.fill = header_fill
+        celda.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        celda.border = border
+
+    instructores = Instructor.objects.order_by("nombre", "apellido")
+
+    fila = 4
+
+    for index, instructor in enumerate(instructores, start=1):
+        ws.row_dimensions[fila].height = 65
+
+        ws.cell(row=fila, column=1, value=index)
+
+        if instructor.foto:
+            try:
+                ruta_foto = instructor.foto.path
+
+                if os.path.exists(ruta_foto):
+                    imagen = ExcelImage(ruta_foto)
+                    imagen.width = 55
+                    imagen.height = 55
+                    ws.add_image(imagen, f"B{fila}")
+            except Exception:
+                pass
+
+        nombre_completo = f"{instructor.nombre or ''} {instructor.apellido or ''}".strip()
+
+        ws.cell(row=fila, column=3, value=nombre_completo)
+        ws.cell(row=fila, column=4, value=instructor.cedula or "")
+        ws.cell(row=fila, column=5, value=instructor.nacionalidad or "")
+        ws.cell(row=fila, column=6, value=instructor.direccion or "")
+        ws.cell(row=fila, column=7, value=instructor.numero_telefono or "")
+        ws.cell(row=fila, column=8, value=instructor.nivel_escolar or "")
+        ws.cell(row=fila, column=9, value=instructor.antecedentes_penales or "")
+        ws.cell(row=fila, column=10, value=instructor.centro_trabajo or "")
+        ws.cell(row=fila, column=11, value=instructor.cargo or "")
+        ws.cell(
+            row=fila,
+            column=12,
+            value=instructor.categoria_instructor or ""
+        )
+        ws.cell(row=fila, column=13, value=instructor.curso_aprobado_instructor or "")
+        ws.cell(row=fila, column=14, value=instructor.fecha_ingreso.strftime("%d/%m/%Y") if instructor.fecha_ingreso else "")
+        ws.cell(row=fila, column=15, value=instructor.fecha_salida.strftime("%d/%m/%Y") if instructor.fecha_salida else "")
+        ws.cell(row=fila, column=16, value=instructor.motivo_salida or "")
+        ws.cell(row=fila, column=17, value=instructor.infracciones_resoluciones or "")
+
+        for col in range(1, 18):
+            celda = ws.cell(row=fila, column=col)
+            celda.border = border
+            celda.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        fila += 1
+
+    anchos = {
+        "A": 8,
+        "B": 14,
+        "C": 28,
+        "D": 22,
+        "E": 18,
+        "F": 35,
+        "G": 18,
+        "H": 20,
+        "I": 22,
+        "J": 25,
+        "K": 18,
+        "L": 20,
+        "M": 30,
+        "N": 18,
+        "O": 18,
+        "P": 35,
+        "Q": 35,
+    }
+
+    for columna, ancho in anchos.items():
+        ws.column_dimensions[columna].width = ancho
+
+    response = HttpResponse(
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    response["Content-Disposition"] = 'attachment; filename="reporte_instructores_policial.xlsx"'
+
+    wb.save(response)
+
+    return response
+>>>>>>> 8adbd1a5ee0f891ab38c77de2cd912e16384bf13

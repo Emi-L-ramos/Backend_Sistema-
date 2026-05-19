@@ -92,15 +92,36 @@ class Instructor(models.Model):
     foto = models.ImageField(upload_to='instructores/', blank=True, null=True)
     numero_telefono = models.CharField(max_length=20, blank=True, null=True)
     direccion = models.CharField(max_length=200, blank=True, null=True)
-    categoria_vehiculo = models.ForeignKey(
-        CategoriaVehiculo,
-        on_delete=models.SET_NULL,
-        null=True,
+    categoria_instructor = models.CharField(
+        max_length=100,
         blank=True,
-        related_name='instructores'
+        null=True
     )
     experiencia = models.TextField(blank=True, null=True)
     edad = models.PositiveIntegerField(blank=True, null=True)
+    cedula = cedula = models.CharField(max_length=20, unique=True, blank=True, null=True)
+    nacionalidad = models.CharField(max_length=100, blank=True, null=True)
+    nivel_escolar = models.CharField(max_length=100, blank=True, null=True)
+    antecedentes_penales = models.CharField(
+        max_length=20,
+        choices=[
+            ('Si', 'Sí'),
+            ('No', 'No'),
+        ],
+        default='No'
+    )
+    centro_trabajo = models.CharField(max_length=150, blank=True, null=True)
+    cargo = models.CharField(max_length=100, blank=True, null=True)
+    curso_aprobado_instructor = models.CharField(
+        max_length=150,
+        blank=True,
+        null=True
+    )
+    fecha_ingreso = models.DateField(blank=True, null=True)
+    fecha_salida = models.DateField(blank=True, null=True)
+    motivo_salida = models.TextField(blank=True, null=True)
+    infracciones_resoluciones = models.TextField(blank=True, null=True)
+
     def __str__(self):
         return f"{self.nombre} , {self.apellido}"
 
