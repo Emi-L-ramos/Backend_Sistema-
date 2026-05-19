@@ -2,8 +2,6 @@
 
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from django.conf import settings
-from django.conf.urls.static import static
 
 from .views import (
     DashboardIngresosMensualesView,
@@ -22,7 +20,9 @@ from .views import (
     login,
     saldo,
     DashboardGananciasView,
-    DashboardResumenView
+    DashboardResumenView,
+    PerfilView,
+    exportar_reporte_instructores_policial,
 )
 
 router = DefaultRouter()
@@ -46,10 +46,13 @@ urlpatterns = [
     path('', include(router.urls)),
     path('login/', login, name='login'),
     path('saldo/', saldo, name='saldo'),
+    path('perfiles/', PerfilView.as_view(), name='perfiles'),
     path('dashboard/ganancias/', DashboardGananciasView.as_view(), name='dashboard-ganancias'),
     path('dashboard/resumen/', DashboardResumenView.as_view(), name='dashboard-resumen'),  
     path('dashboard/ingresos-mensuales/', DashboardIngresosMensualesView.as_view(), name='dashboard-ingresos-mensuales'),
+    path(
+        "reporte-instructores-policial/",
+        exportar_reporte_instructores_policial,
+        name="reporte_instructores_policial"
+    ),
 ]
-
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
