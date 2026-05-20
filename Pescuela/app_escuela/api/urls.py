@@ -63,8 +63,9 @@ urlpatterns = [
     path('dashboard/resumen/', DashboardResumenView.as_view(), name='dashboard-resumen'),  
     path('dashboard/ingresos-mensuales/', DashboardIngresosMensualesView.as_view(), name='dashboard-ingresos-mensuales'),
     path(
-        "reporte-instructores-policial/",
+        'reporte-instructores-policial/',
         exportar_reporte_instructores_policial,
-        name="reporte_instructores_policial"
+        name='reporte_instructores_policial'
     ),
+    
 ]

@@ -34,9 +34,11 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as ExcelImage
+from django.conf import settings
 import os
+from copy import copy
 
 from ..models import (
     Rol,
@@ -1292,7 +1294,6 @@ class DashboardIngresosMensualesView(APIView):
                 {"mes": "2025-03", "total": 15200, "nombre_mes": "Marzo"},
                 {"mes": "2025-04", "total": 22400, "nombre_mes": "Abril"},
                 {"mes": "2025-05", "total": 19800, "nombre_mes": "Mayo"},
-                {"mes": "2025-06", "total": 21000, "nombre_mes": "Junio"},
             ])
     
     def _get_nombre_mes(self, mes_numero):
@@ -2448,114 +2449,397 @@ class PerfilView(APIView):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def exportar_reporte_instructores_policial(request):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Instructores"
+    fecha_desde = request.query_params.get('desde')
+    fecha_hasta = request.query_params.get('hasta')
 
-    ws.merge_cells("A1:Q1")
-    ws["A1"] = "REPORTE DE INSTRUCTORES - TRÁNSITO POLICÍA NACIONAL"
-    ws["A1"].font = Font(size=14, bold=True, color="FFFFFF")
-    ws["A1"].fill = PatternFill("solid", fgColor="1F4E78")
-    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ruta_plantilla = os.path.join(
+        settings.BASE_DIR,
+        'app_escuela',
+        'plantilla',
+        'INFORME TRANSITO POLICIA NAC.xlsm'
+    )
 
-    encabezados = [
-        "No.",
-        "Foto",
-        "Nombres y Apellidos",
-        "Identificación",
-        "Nacionalidad",
-        "Dirección",
-        "Teléfonos",
-        "Nivel Escolar",
-        "Antecedentes Penales",
-        "Centro de Trabajo",
-        "Cargo",
-        "Categoría Licencia",
-        "Curso Aprobado para Instructor",
-        "Fecha de Ingreso",
-        "Fecha de Salida",
-        "Motivo de la Salida",
-        "Infracciones / Resoluciones",
-    ]
+    if not os.path.exists(ruta_plantilla):
+        return Response(
+            {'error': f'No existe la plantilla: {ruta_plantilla}'},
+            status=404
+        )
 
-    fila_encabezado = 3
+    wb = load_workbook(
+        ruta_plantilla,
+        keep_vba=True
+    )
 
-    header_fill = PatternFill("solid", fgColor="4F81BD")
-    thin = Side(border_style="thin", color="A6A6A6")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    def copiar_estilo_fila(ws, fila_origen, fila_destino, columnas):
+        for columna in range(1, columnas + 1):
+            origen = ws.cell(row=fila_origen, column=columna)
+            destino = ws.cell(row=fila_destino, column=columna)
 
-    for col, titulo in enumerate(encabezados, start=1):
-        celda = ws.cell(row=fila_encabezado, column=col)
-        celda.value = titulo
-        celda.font = Font(bold=True, color="FFFFFF")
-        celda.fill = header_fill
-        celda.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        celda.border = border
-    instructores = Instructor.objects.order_by("nombre", "apellido")
-    fila = 4
+            if origen.has_style:
+                destino._style = copy(origen._style)
+
+            destino.font = copy(origen.font)
+            destino.fill = copy(origen.fill)
+            destino.border = copy(origen.border)
+            destino.alignment = copy(origen.alignment)
+            destino.number_format = origen.number_format
+            destino.protection = copy(origen.protection)
+
+        ws.row_dimensions[fila_destino].height = ws.row_dimensions[fila_origen].height
+
+    nombre_hoja = 'LISTADO INSTRUCTORES'
+
+    if nombre_hoja not in wb.sheetnames:
+        return Response(
+            {'error': f'No existe la hoja {nombre_hoja}. Hojas disponibles: {wb.sheetnames}'},
+            status=400
+        )
+
+    ws = wb[nombre_hoja]
+
+    fila_inicio = 5
+
+    fila = fila_inicio
+
+    while fila <= ws.max_row:
+
+        for columna in range(1, 18):
+            if columna != 2:
+                ws.cell(row=fila, column=columna).value = None
+
+        fila += 1
+
+    instructores = Instructor.objects.order_by(
+        'nombre',
+        'apellido'
+    )
+
+    fila = fila_inicio
+
     for index, instructor in enumerate(instructores, start=1):
+        copiar_estilo_fila(
+            ws,
+            fila_inicio,
+            fila,
+            17
+        )
+
         ws.row_dimensions[fila].height = 65
+
+        nombre_completo = (
+            f"{instructor.nombre or ''} "
+            f"{instructor.apellido or ''}"
+        ).strip()
+
         ws.cell(row=fila, column=1, value=index)
+
         if instructor.foto:
+
             try:
                 ruta_foto = instructor.foto.path
+
                 if os.path.exists(ruta_foto):
+
                     imagen = ExcelImage(ruta_foto)
+
                     imagen.width = 55
                     imagen.height = 55
-                    ws.add_image(imagen, f"B{fila}")
+
+                    ws.add_image(imagen, f'B{fila}')
+
             except Exception:
                 pass
 
-        nombre_completo = f"{instructor.nombre or ''} {instructor.apellido or ''}".strip()
         ws.cell(row=fila, column=3, value=nombre_completo)
-        ws.cell(row=fila, column=4, value=instructor.cedula or "")
-        ws.cell(row=fila, column=5, value=instructor.nacionalidad or "")
-        ws.cell(row=fila, column=6, value=instructor.direccion or "")
-        ws.cell(row=fila, column=7, value=instructor.numero_telefono or "")
-        ws.cell(row=fila, column=8, value=instructor.nivel_escolar or "")
-        ws.cell(row=fila, column=9, value=instructor.antecedentes_penales or "")
-        ws.cell(row=fila, column=10, value=instructor.centro_trabajo or "")
-        ws.cell(row=fila, column=11, value=instructor.cargo or "")
+
+        ws.cell(
+            row=fila,
+            column=4,
+            value=instructor.cedula or ""
+        )
+
+        ws.cell(
+            row=fila,
+            column=5,
+            value=instructor.nacionalidad or ""
+        )
+
+        ws.cell(
+            row=fila,
+            column=6,
+            value=instructor.direccion or ""
+        )
+
+        ws.cell(
+            row=fila,
+            column=7,
+            value=instructor.numero_telefono or ""
+        )
+
+        ws.cell(
+            row=fila,
+            column=8,
+            value=instructor.nivel_escolar or ""
+        )
+
+        ws.cell(
+            row=fila,
+            column=9,
+            value=instructor.categoria_instructor or ""
+        )
+
+        ws.cell(
+            row=fila,
+            column=10,
+            value=instructor.antecedentes_penales or ""
+        )
+
+        ws.cell(
+            row=fila,
+            column=11,
+            value=instructor.centro_trabajo or ""
+        )
+
         ws.cell(
             row=fila,
             column=12,
-            value=instructor.categoria_instructor or ""
+            value=instructor.cargo or ""
         )
-        ws.cell(row=fila, column=13, value=instructor.curso_aprobado_instructor or "")
-        ws.cell(row=fila, column=14, value=instructor.fecha_ingreso.strftime("%d/%m/%Y") if instructor.fecha_ingreso else "")
-        ws.cell(row=fila, column=15, value=instructor.fecha_salida.strftime("%d/%m/%Y") if instructor.fecha_salida else "")
-        ws.cell(row=fila, column=16, value=instructor.motivo_salida or "")
-        ws.cell(row=fila, column=17, value=instructor.infracciones_resoluciones or "")
-        for col in range(1, 18):
-            celda = ws.cell(row=fila, column=col)
-            celda.border = border
-            celda.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        ws.cell(
+            row=fila,
+            column=13,
+            value=instructor.curso_aprobado_instructor or ""
+        )
+
+        ws.cell(
+            row=fila,
+            column=14,
+            value=(
+                instructor.fecha_ingreso.strftime('%d/%m/%Y')
+                if instructor.fecha_ingreso else ""
+            )
+        )
+
+        ws.cell(
+            row=fila,
+            column=15,
+            value=(
+                instructor.fecha_salida.strftime('%d/%m/%Y')
+                if instructor.fecha_salida else ""
+            )
+        )
+
+        ws.cell(
+            row=fila,
+            column=16,
+            value=instructor.motivo_salida or ""
+        )
+
+        ws.cell(
+            row=fila,
+            column=17,
+            value=instructor.infracciones_resoluciones or ""
+        )
+
         fila += 1
-    anchos = {
-        "A": 8,
-        "B": 14,
-        "C": 28,
-        "D": 22,
-        "E": 18,
-        "F": 35,
-        "G": 18,
-        "H": 20,
-        "I": 22,
-        "J": 25,
-        "K": 18,
-        "L": 20,
-        "M": 30,
-        "N": 18,
-        "O": 18,
-        "P": 35,
-        "Q": 35,
-    }
-    for columna, ancho in anchos.items():
-        ws.column_dimensions[columna].width = ancho
-    response = HttpResponse(
-        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    nombre_hoja_ingresos = 'REPORTE DE INGRESOS'
+
+    if nombre_hoja_ingresos not in wb.sheetnames:
+        return Response(
+            {'error': f'No existe la hoja {nombre_hoja_ingresos}. Hojas disponibles: {wb.sheetnames}'},
+            status=400
+        )
+
+    ws_ingresos = wb[nombre_hoja_ingresos]
+
+    texto_fecha = ""
+
+    if fecha_desde and fecha_hasta:
+        texto_fecha = (
+            f"Desde {fecha_desde} hasta {fecha_hasta}"
+        )
+
+    elif fecha_desde:
+        texto_fecha = (
+            f"Desde {fecha_desde}"
+        )
+
+    elif fecha_hasta:
+        texto_fecha = (
+            f"Hasta {fecha_hasta}"
+        )
+
+    ws_ingresos.cell(row=3, column=2, value=timezone.now().strftime('%d/%m/%Y'))
+
+    fila_modelo_ingresos = 5
+    fila_inicio_ingresos = 5
+    fila = fila_inicio_ingresos
+
+    while fila <= ws_ingresos.max_row:
+        for columna in range(1, 16):
+            ws_ingresos.cell(row=fila, column=columna).value = None
+
+        fila += 1
+
+    matriculas = Matricula.objects.select_related(
+        'estudiante',
+        'categoria',
+    ).filter(
+        estado__in=['matriculado', 'finalizado']
     )
-    response["Content-Disposition"] = 'attachment; filename="reporte_instructores_policial.xlsx"'
+
+    if fecha_desde:
+        matriculas = matriculas.filter(
+            fecha_registro__gte=fecha_desde
+        )
+
+    if fecha_hasta:
+        matriculas = matriculas.filter(
+            fecha_registro__lte=fecha_hasta
+        )
+
+    matriculas = matriculas.order_by(
+        'fecha_registro',
+        'id'
+    )
+
+    fila = fila_inicio_ingresos
+
+    for matricula in matriculas:
+        copiar_estilo_fila(
+            ws_ingresos,
+            fila_modelo_ingresos,
+            fila,
+            15
+        )
+
+        estudiante = matricula.estudiante
+
+        fecha_finalizacion = Calendario.objects.filter(
+            matricula=matricula,
+            es_examen=False
+        ).order_by(
+            '-fecha'
+        ).values_list(
+            'fecha',
+            flat=True
+        ).first()
+
+        if matricula.tipo_curso == "Principiante":
+            horas_practicas = 15
+        else:
+            horas_practicas = matricula.horas_reforzamiento or 0
+
+        horas_totales = round(float(horas_practicas) / 0.6)
+
+        horas_teoricas = round(
+            horas_totales - float(horas_practicas)
+        )
+
+        ws_ingresos.cell(row=fila, column=1, value=matricula.id)
+
+        ws_ingresos.cell(
+            row=fila,
+            column=2,
+            value=f"{estudiante.nombre or ''} {estudiante.apellido or ''}".strip()
+        )
+
+        ws_ingresos.cell(
+            row=fila,
+            column=3,
+            value=estudiante.nacionalidad or ""
+        )
+
+        ws_ingresos.cell(
+            row=fila,
+            column=4,
+            value=estudiante.cedula or ""
+        )
+
+        ws_ingresos.cell(
+            row=fila,
+            column=5,
+            value=estudiante.direccion or ""
+        )
+
+        ws_ingresos.cell(
+            row=fila,
+            column=6,
+            value=estudiante.telefono_movil or ""
+        )
+
+        ws_ingresos.cell(
+            row=fila,
+            column=7,
+            value=estudiante.nivel_educativo or ""
+        )
+
+        ws_ingresos.cell(
+            row=fila,
+            column=8,
+            value="X" if matricula.tipo_curso == "Principiante" else ""
+        )
+
+        ws_ingresos.cell(
+            row=fila,
+            column=9,
+            value="X" if matricula.tipo_curso == "Intermedio" else ""
+        )
+
+        ws_ingresos.cell(
+            row=fila,
+            column=10,
+            value="X" if matricula.tipo_curso == "Avanzado" else ""
+        )
+
+        ws_ingresos.cell(
+            row=fila,
+            column=11,
+            value=matricula.categoria.nombre if matricula.categoria else ""
+        )
+
+        ws_ingresos.cell(
+            row=fila,
+            column=12,
+            value=matricula.fecha_registro.strftime('%d/%m/%Y') if matricula.fecha_registro else ""
+        )
+
+        ws_ingresos.cell(
+            row=fila,
+            column=13,
+            value=fecha_finalizacion.strftime('%d/%m/%Y') if fecha_finalizacion else ""
+        )
+
+        ws_ingresos.cell(
+            row=fila,
+            column=14,
+            value=horas_teoricas
+        )
+
+        ws_ingresos.cell(
+            row=fila,
+            column=15,
+            value=horas_practicas
+        )
+
+        fila += 1
+
+    ultima_fila_ingresos = fila - 1
+
+    for tabla in ws_ingresos.tables.values():
+        if tabla.ref.startswith("A4:"):
+            tabla.ref = f"A4:O{ultima_fila_ingresos}"
+
+    response = HttpResponse(
+        content_type='application/vnd.ms-excel.sheet.macroEnabled.12'
+    )
+
+    response[
+        'Content-Disposition'
+    ] = 'attachment; filename="INFORME_TRANSITO_POLICIA_NAC.xlsm"'
+
     wb.save(response)
+
     return response
