@@ -173,54 +173,20 @@ class UserSerializer(serializers.ModelSerializer):
         return instance
 
 class SubtemaPlanEstudioSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(required=False)
+
     class Meta:
         model = SubtemaPlanEstudio
         fields = ['id', 'titulo', 'orden', 'activo']
 
+
 class TemaPlanEstudioSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(required=False)
     subtemas = SubtemaPlanEstudioSerializer(many=True, required=False)
 
     class Meta:
         model = TemaPlanEstudio
         fields = ['id', 'titulo', 'orden', 'activo', 'subtemas']
-
-class PlanEstudioSerializer(serializers.ModelSerializer):
-    temas = TemaPlanEstudioSerializer(many=True, required=False)
-
-    class Meta:
-        model = PlanEstudio
-        fields = [
-            'id',
-            'nombre',
-            'tipo_curso',
-            'activo',
-            'temas',
-        ]
-
-    def create(self, validated_data):
-        temas_data = validated_data.pop('temas', [])
-
-        plan = PlanEstudio.objects.create(**validated_data)
-
-        for index_tema, tema_data in enumerate(temas_data, start=1):
-            subtemas_data = tema_data.pop('subtemas', [])
-
-            tema = TemaPlanEstudio.objects.create(
-                plan_estudio=plan,
-                titulo=tema_data.get('titulo'),
-                orden=tema_data.get('orden', index_tema),
-                activo=tema_data.get('activo', True),
-            )
-
-            for index_subtema, subtema_data in enumerate(subtemas_data, start=1):
-                SubtemaPlanEstudio.objects.create(
-                    tema=tema,
-                    titulo=subtema_data.get('titulo'),
-                    orden=subtema_data.get('orden', index_subtema),
-                    activo=subtema_data.get('activo', True),
-                )
-
-        return plan
 
 class PlanEstudioSerializer(serializers.ModelSerializer):
     temas = TemaPlanEstudioSerializer(many=True, required=False)
@@ -268,29 +234,82 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
         instance.activo = validated_data.get('activo', instance.activo)
         instance.save()
 
-        instance.temas.all().delete()
+        ids_temas_recibidos = []
 
         for index_tema, tema_data in enumerate(temas_data, start=1):
             subtemas_data = tema_data.pop('subtemas', [])
+            tema_id = tema_data.get('id')
 
-            tema = TemaPlanEstudio.objects.create(
-                plan_estudio=instance,
-                titulo=tema_data.get('titulo'),
-                orden=tema_data.get('orden', index_tema),
-                activo=tema_data.get('activo', True),
-            )
+            if tema_id:
+                tema = TemaPlanEstudio.objects.filter(
+                    id=tema_id,
+                    plan_estudio=instance
+                ).first()
 
-            for index_subtema, subtema_data in enumerate(subtemas_data, start=1):
-                SubtemaPlanEstudio.objects.create(
-                    tema=tema,
-                    titulo=subtema_data.get('titulo'),
-                    orden=subtema_data.get('orden', index_subtema),
-                    activo=subtema_data.get('activo', True),
+                if tema:
+                    tema.titulo = tema_data.get('titulo', tema.titulo)
+                    tema.orden = tema_data.get('orden', index_tema)
+                    tema.activo = tema_data.get('activo', True)
+                    tema.save()
+                else:
+                    tema = TemaPlanEstudio.objects.create(
+                        plan_estudio=instance,
+                        titulo=tema_data.get('titulo'),
+                        orden=tema_data.get('orden', index_tema),
+                        activo=tema_data.get('activo', True),
+                    )
+            else:
+                tema = TemaPlanEstudio.objects.create(
+                    plan_estudio=instance,
+                    titulo=tema_data.get('titulo'),
+                    orden=tema_data.get('orden', index_tema),
+                    activo=tema_data.get('activo', True),
                 )
 
+            ids_temas_recibidos.append(tema.id)
+
+            ids_subtemas_recibidos = []
+
+            for index_subtema, subtema_data in enumerate(subtemas_data, start=1):
+                subtema_id = subtema_data.get('id')
+
+                if subtema_id:
+                    subtema = SubtemaPlanEstudio.objects.filter(
+                        id=subtema_id,
+                        tema=tema
+                    ).first()
+
+                    if subtema:
+                        subtema.titulo = subtema_data.get('titulo', subtema.titulo)
+                        subtema.orden = subtema_data.get('orden', index_subtema)
+                        subtema.activo = subtema_data.get('activo', True)
+                        subtema.save()
+                    else:
+                        subtema = SubtemaPlanEstudio.objects.create(
+                            tema=tema,
+                            titulo=subtema_data.get('titulo'),
+                            orden=subtema_data.get('orden', index_subtema),
+                            activo=subtema_data.get('activo', True),
+                        )
+                else:
+                    subtema = SubtemaPlanEstudio.objects.create(
+                        tema=tema,
+                        titulo=subtema_data.get('titulo'),
+                        orden=subtema_data.get('orden', index_subtema),
+                        activo=subtema_data.get('activo', True),
+                    )
+
+                ids_subtemas_recibidos.append(subtema.id)
+
+            tema.subtemas.exclude(id__in=ids_subtemas_recibidos).update(
+                activo=False
+            )
+
+        instance.temas.exclude(id__in=ids_temas_recibidos).update(
+            activo=False
+        )
+
         return instance
-
-
 
 class ValorCursoSerializer(serializers.ModelSerializer):
     class Meta:
@@ -400,20 +419,17 @@ class MatriculaSerializer(serializers.ModelSerializer):
             )
         )
 
+        planes.sort(
+            key=lambda plan: (
+                tipos_planes.index(plan.tipo_curso),
+                plan.id
+            )
+        )
+
         if not planes:
             raise serializers.ValidationError({
                 'plan_de_estudio': f'No existen planes de estudio activos para el curso {tipo_curso}.'
             })
-
-        orden_tipos = {
-            'Principiante': 1,
-            'Intermedio': 2,
-            'Avanzado': 3,
-        }
-
-        planes.sort(
-            key=lambda plan: orden_tipos.get(plan.tipo_curso, 99)
-        )
 
         plan_principal = next(
             (plan for plan in planes if plan.tipo_curso == tipo_curso),
@@ -424,7 +440,7 @@ class MatriculaSerializer(serializers.ModelSerializer):
 
         matricula = Matricula.objects.create(**validated_data)
 
-        orden_general = 0
+        orden_general = 1
 
         for plan in planes:
             temas = TemaPlanEstudio.objects.filter(
@@ -436,21 +452,19 @@ class MatriculaSerializer(serializers.ModelSerializer):
             )
 
             for tema in temas:
-                ProgresoTema.objects.get_or_create(
+                ProgresoTema.objects.create(
                     matricula=matricula,
                     tema=tema,
-                    defaults={
-                        'desbloqueado': orden_general == 0,
-                        'estudiante_completado': False,
-                        'instructor_completado': False,
-                        'completado': False,
-                    }
+                    orden_general=orden_general,
+                    desbloqueado=orden_general == 1,
+                    estudiante_completado=False,
+                    instructor_completado=False,
+                    completado=False,
                 )
 
                 orden_general += 1
 
         return matricula
-
 
 class ReciboSerializer(serializers.ModelSerializer):
     matricula_data = MatriculaSerializer(source='matricula', read_only=True)
@@ -815,17 +829,68 @@ class CrearBloqueCitasSerializer(serializers.Serializer):
 
 class AsistenciaSerializer(serializers.ModelSerializer):
     estudiante_nombre = serializers.SerializerMethodField()
-    fecha_clase = serializers.DateField(source='clase.fecha', read_only=True)
-    numero_clase = serializers.IntegerField(source='clase.numero_clase', read_only=True)
+    estudiante_cedula = serializers.CharField(
+        source='As_estudiante.cedula',
+        read_only=True
+    )
+
+    calendario_id = serializers.IntegerField(
+        source='As_calendario.id',
+        read_only=True
+    )
+
+    fecha = serializers.DateField(
+        source='As_calendario.fecha',
+        read_only=True
+    )
+
+    hora_inicio = serializers.TimeField(
+        source='As_calendario.hora_inicio',
+        read_only=True
+    )
+
+    hora_fin = serializers.TimeField(
+        source='As_calendario.hora_fin',
+        read_only=True
+    )
+
+    numero_clase = serializers.IntegerField(
+        source='As_calendario.numero_clase',
+        read_only=True
+    )
+
+    instructor_nombre = serializers.SerializerMethodField()
 
     class Meta:
         model = Asistencia
-        fields = '__all__'
+        fields = [
+            'id',
+            'As_estudiante',
+            'As_calendario',
+            'calendario_id',
+            'estado',
+            'observacion',
+            'justificado_por_admin',
+            'km_inicial',
+            'km_final',
+            'km_recorridos',
+            'fecha_registro',
+            'fecha_actualizacion',
+            'estudiante_nombre',
+            'estudiante_cedula',
+            'fecha',
+            'hora_inicio',
+            'hora_fin',
+            'numero_clase',
+            'instructor_nombre',
+        ]
 
     def get_estudiante_nombre(self, obj):
-        estudiante = obj.clase.matricula.estudiante
-        return f"{estudiante.nombre} {estudiante.apellido}"
+        return f"{obj.As_estudiante.nombre} {obj.As_estudiante.apellido}"
 
+    def get_instructor_nombre(self, obj):
+        instructor = obj.As_calendario.instructor
+        return f"{instructor.nombre} {instructor.apellido}"
 
 # serializers.py - Modifica el NotasSerializer
 
@@ -939,6 +1004,7 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
             'id',
             'matricula',
             'tema',
+            'orden_general', 
             'desbloqueado',
             'estudiante_completado',
             'instructor_completado',
@@ -991,10 +1057,7 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
             return None
 
     def get_tema_orden(self, obj):
-        try:
-            return obj.tema.orden
-        except Exception:
-            return 0
+        return obj.orden_general
 
     def get_plan_estudio_id(self, obj):
         try:
