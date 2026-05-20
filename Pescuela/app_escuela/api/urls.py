@@ -52,6 +52,7 @@ router.register(r'dashboard-plan', DashboardPlanViewSet, basename='dashboard-pla
 router.register(r'preguntas-examen-teorico', PreguntaExamenTeoricoViewSet)
 router.register(r'examen-teorico', ExamenTeoricoViewSet)
 
+
 # app_escuela/api/urls.py
 
 urlpatterns = [

@@ -315,9 +315,57 @@ class Calendario(models.Model):
 
 
 class Asistencia(models.Model):
+    ESTADO_CHOICES = [
+        ('asistio', 'Asistió'),
+        ('falto', 'Faltó'),
+        ('justificado', 'Justificado'),
+    ]
 
     As_estudiante = models.ForeignKey(Estudiante, on_delete=models.CASCADE)
-    As_calendario = models.ForeignKey(Calendario, on_delete=models.CASCADE)
+    As_calendario = models.OneToOneField(Calendario, on_delete=models.CASCADE)
+
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADO_CHOICES,
+        default='falto'
+    )
+
+    observacion = models.TextField(
+        blank=True,
+        null=True
+    )
+
+    justificado_por_admin = models.BooleanField(default=False)
+    km_inicial = models.DecimalField(
+    max_digits=10,
+    decimal_places=2,
+    null=True,
+    blank=True
+    )
+
+    km_final = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True
+    )
+
+    km_recorridos = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0
+    )
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+    fecha_actualizacion = models.DateTimeField(auto_now=True)
+
+
+    def save(self, *args, **kwargs):
+        if self.km_inicial is not None and self.km_final is not None:
+            self.km_recorridos = self.km_final - self.km_inicial
+        else:
+            self.km_recorridos = 0
+
+        super().save(*args, **kwargs)
     
     def __str__(self):
         
@@ -457,6 +505,8 @@ class ProgresoTema(models.Model):
         related_name='progresos_estudiantes'
     )
 
+    orden_general = models.IntegerField(default=0)
+
     estudiante_completado = models.BooleanField(default=False)
 
     instructor_completado = models.BooleanField(default=False)
@@ -469,15 +519,13 @@ class ProgresoTema(models.Model):
 
     fecha_instructor = models.DateTimeField(null=True, blank=True)
 
+    fecha_completado = models.DateTimeField(null=True, blank=True)
+
     fecha_admin_edit = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         unique_together = ['matricula', 'tema']
-
-        ordering = [
-            'tema__orden',
-            'id'
-        ]
+        ordering = ['orden_general', 'tema__orden', 'id']  # ← CAMBIAR ES
 
     def __str__(self):
         return f"{self.matricula.estudiante.nombre} - {self.tema.titulo}"
@@ -504,6 +552,7 @@ class Notificacion(models.Model):
     
     estudiante = models.ForeignKey('Usuario', on_delete=models.CASCADE, related_name='notificaciones')
     tema = models.ForeignKey('TemaPlanEstudio', on_delete=models.CASCADE, null=True, blank=True)
+
     tipo = models.CharField(max_length=30, choices=TIPOS_NOTIFICACION)
     mensaje = models.TextField()
     leida = models.BooleanField(default=False)
@@ -511,7 +560,14 @@ class Notificacion(models.Model):
     
     class Meta:
         ordering = ['-fecha_creacion']
-    
+        constraints = [
+            models.UniqueConstraint(
+                fields=['estudiante','tema','tipo'],
+                name='notificacion_unica_por_tema_tipo'
+            )
+        ]
+
+
     def __str__(self):
         return f"{self.tipo} - {self.estudiante.username}"
 
@@ -541,7 +597,7 @@ class PreguntaExamenTeorico(models.Model):
     fecha_creacion = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"{self.tipo_curso} - {self.texto[:50]}"
+        return f"{self.fecha_creacion} - {self.texto[:50]}"
 
 
 class OpcionPreguntaExamenTeorico(models.Model):
