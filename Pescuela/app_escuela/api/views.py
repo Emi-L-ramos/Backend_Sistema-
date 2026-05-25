@@ -8,6 +8,7 @@ from django.db import models
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework import serializers
 import openpyxl
+from openpyxl.styles import PatternFill, Border, Side, Alignment
 from django.db import transaction
 from django.db.models import Q, Sum, Count, Case, When, IntegerField
 from django.http import HttpResponse
@@ -3162,6 +3163,9 @@ def exportar_reporte_instructores_policial(request):
             origen = ws.cell(row=fila_origen, column=columna)
             destino = ws.cell(row=fila_destino, column=columna)
 
+            if type(destino).__name__ == 'MergedCell':
+                continue
+
             if origen.has_style:
                 destino._style = copy(origen._style)
 
@@ -3173,6 +3177,37 @@ def exportar_reporte_instructores_policial(request):
             destino.protection = copy(origen.protection)
 
         ws.row_dimensions[fila_destino].height = ws.row_dimensions[fila_origen].height
+
+    def aplicar_estilo_tabla_manual(ws, fila, columna_inicio, columna_fin, es_par):
+        azul = "B8CCE4"
+        azul_claro = "DCE6F1"
+        blanco = "FFFFFF"
+
+        fill = PatternFill(
+            fill_type="solid",
+            fgColor=azul if es_par else azul_claro
+        )
+
+        borde = Side(style="thin", color="FFFFFF")
+
+        for columna in range(columna_inicio, columna_fin + 1):
+            celda = ws.cell(row=fila, column=columna)
+
+            if type(celda).__name__ == "MergedCell":
+                continue
+
+            celda.fill = fill
+            celda.border = Border(
+                left=borde,
+                right=borde,
+                top=borde,
+                bottom=borde
+            )
+            celda.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True
+            )
 
     nombre_hoja = 'LISTADO INSTRUCTORES'
 
@@ -3187,6 +3222,23 @@ def exportar_reporte_instructores_policial(request):
     fila_inicio = 5
 
     fila = fila_inicio
+
+    imagenes_conservar = []
+
+    for imagen_excel in ws._images:
+        try:
+            columna_imagen = imagen_excel.anchor._from.col + 1
+            fila_imagen = imagen_excel.anchor._from.row + 1
+
+            if columna_imagen == 2 and fila_imagen >= fila_inicio:
+                continue
+
+            imagenes_conservar.append(imagen_excel)
+
+        except Exception:
+            imagenes_conservar.append(imagen_excel)
+
+    ws._images = imagenes_conservar
 
     while fila <= ws.max_row:
 
@@ -3229,8 +3281,11 @@ def exportar_reporte_instructores_policial(request):
 
                     imagen = ExcelImage(ruta_foto)
 
-                    imagen.width = 55
-                    imagen.height = 55
+                    imagen.width = 42
+                    imagen.height = 42
+
+                    ws.row_dimensions[fila].height = 48
+                    ws.column_dimensions['B'].width = 10
 
                     ws.add_image(imagen, f'B{fila}')
 
@@ -3360,8 +3415,9 @@ def exportar_reporte_instructores_policial(request):
 
     ws_ingresos.cell(row=3, column=2, value=timezone.now().strftime('%d/%m/%Y'))
 
-    fila_modelo_ingresos = 5
     fila_inicio_ingresos = 5
+    fila_modelo_ingresos_azul = 5
+    fila_modelo_ingresos_clara = 6
     fila = fila_inicio_ingresos
 
     while fila <= ws_ingresos.max_row:
@@ -3395,11 +3451,25 @@ def exportar_reporte_instructores_policial(request):
     fila = fila_inicio_ingresos
 
     for matricula in matriculas:
+        fila_modelo = (
+            fila_modelo_ingresos_azul
+            if (fila - fila_inicio_ingresos) % 2 == 0
+            else fila_modelo_ingresos_clara
+        )
+
         copiar_estilo_fila(
             ws_ingresos,
-            fila_modelo_ingresos,
+            fila_modelo,
             fila,
             15
+        )
+
+        aplicar_estilo_tabla_manual(
+            ws_ingresos,
+            fila,
+            1,
+            15,
+            (fila - fila_inicio_ingresos) % 2 == 0
         )
 
         estudiante = matricula.estudiante
@@ -3515,9 +3585,210 @@ def exportar_reporte_instructores_policial(request):
 
     ultima_fila_ingresos = fila - 1
 
-    for tabla in ws_ingresos.tables.values():
-        if tabla.ref.startswith("A4:"):
-            tabla.ref = f"A4:O{ultima_fila_ingresos}"
+    nombre_hoja_egresos = 'REPORTE DE EGRESOS'
+
+    if nombre_hoja_egresos not in wb.sheetnames:
+        return Response(
+            {'error': f'No existe la hoja {nombre_hoja_egresos}. Hojas disponibles: {wb.sheetnames}'},
+            status=400
+        )
+
+    ws_egresos = wb[nombre_hoja_egresos]
+
+    ws_egresos.cell(
+        row=5,
+        column=2,
+        value=timezone.now().strftime('%d/%m/%Y')
+    )
+
+    fila_inicio_egresos = 8
+    fila_estilo_egresos = 8
+    fila = fila_inicio_egresos
+
+    while fila <= ws_egresos.max_row:
+        for columna in range(1, 20):
+            ws_egresos.cell(row=fila, column=columna).value = None
+
+        fila += 1
+
+    matriculas_con_teorico = set()
+    matriculas_con_practico = set()
+
+    for nota in Notas.objects.all():
+        try:
+            valor_nota = float(nota.nota)
+        except (TypeError, ValueError):
+            continue
+
+        tipo_nota = str(nota.tipo_nota or "").strip().lower()
+
+        if tipo_nota == "teorico" and valor_nota >= 80:
+            matriculas_con_teorico.add(nota.matricula_id)
+
+        if tipo_nota == "practico" and valor_nota >= 80:
+            matriculas_con_practico.add(nota.matricula_id)
+
+    matriculas_egresadas_ids = matriculas_con_teorico.intersection(
+        matriculas_con_practico
+    )
+
+    egresados = Matricula.objects.select_related(
+        'estudiante',
+        'categoria',
+    ).filter(
+        id__in=matriculas_egresadas_ids
+    )
+
+    if fecha_desde:
+        egresados = egresados.filter(
+            fecha_registro__gte=fecha_desde
+        )
+
+    if fecha_hasta:
+        egresados = egresados.filter(
+            fecha_registro__lte=fecha_hasta
+        )
+
+    egresados = egresados.order_by(
+        'fecha_registro',
+        'id'
+    )
+
+    fila = fila_inicio_egresos
+
+    for matricula in egresados:
+        copiar_estilo_fila(
+            ws_egresos,
+            fila_estilo_egresos,
+            fila,
+            20
+        )
+
+        aplicar_estilo_tabla_manual(
+            ws_egresos,
+            fila,
+            1,
+            20,
+            (fila - fila_inicio_egresos) % 2 == 0
+        )
+
+        estudiante = matricula.estudiante
+
+        fecha_finalizacion = Calendario.objects.filter(
+            matricula=matricula,
+            es_examen=False
+        ).order_by(
+            '-fecha'
+        ).values_list(
+            'fecha',
+            flat=True
+        ).first()
+
+        nota_teorica_obj = Notas.objects.filter(
+            matricula=matricula,
+            tipo_nota='teorico'
+        ).first()
+
+        nota_practica_obj = Notas.objects.filter(
+            matricula=matricula,
+            tipo_nota='practico'
+        ).first()
+
+        nota_teorica = nota_teorica_obj.nota if nota_teorica_obj else ""
+        nota_practica = nota_practica_obj.nota if nota_practica_obj else ""
+
+        if matricula.tipo_curso == "Principiante":
+            horas_practicas = 15
+        else:
+            horas_practicas = matricula.horas_reforzamiento or 0
+
+        horas_totales = round(float(horas_practicas) / 0.6)
+        horas_teoricas = round(
+            horas_totales - float(horas_practicas)
+        )
+
+        ws_egresos.cell(row=fila, column=1, value=matricula.id)
+
+        ws_egresos.cell(
+            row=fila,
+            column=2,
+            value=f"{estudiante.nombre or ''} {estudiante.apellido or ''}".strip()
+        )
+
+        ws_egresos.cell(
+            row=fila,
+            column=3,
+            value=estudiante.nacionalidad or ""
+        )
+
+        ws_egresos.cell(
+            row=fila,
+            column=4,
+            value=estudiante.cedula or ""
+        )
+
+        ws_egresos.cell(
+            row=fila,
+            column=5,
+            value=estudiante.telefono_movil or ""
+        )
+
+        ws_egresos.cell(
+            row=fila,
+            column=6,
+            value=estudiante.nivel_educativo or ""
+        )
+
+        ws_egresos.cell(
+            row=fila,
+            column=7,
+            value="X" if matricula.tipo_curso == "Principiante" else ""
+        )
+
+        ws_egresos.cell(
+            row=fila,
+            column=8,
+            value="X" if matricula.tipo_curso == "Intermedio" else ""
+        )
+
+        ws_egresos.cell(
+            row=fila,
+            column=9,
+            value="X" if matricula.tipo_curso == "Avanzado" else ""
+        )
+
+        ws_egresos.cell(
+            row=fila,
+            column=10,
+            value=str(matricula.categoria) if matricula.categoria else ""
+        )
+
+        ws_egresos.cell(
+            row=fila,
+            column=11,
+            value=matricula.fecha_registro.strftime('%d/%m/%Y') if matricula.fecha_registro else ""
+        )
+
+        ws_egresos.cell(
+            row=fila,
+            column=12,
+            value=fecha_finalizacion.strftime('%d/%m/%Y') if fecha_finalizacion else ""
+        )
+
+        ws_egresos.cell(row=fila, column=13, value=horas_teoricas)
+        ws_egresos.cell(row=fila, column=14, value=horas_practicas)
+        ws_egresos.cell(row=fila, column=15, value=nota_teorica or "")
+        ws_egresos.cell(row=fila, column=16, value=nota_practica or "")
+
+        ws_egresos.cell(row=fila, column=17, value="")
+        ws_egresos.cell(row=fila, column=18, value="")
+        ws_egresos.cell(row=fila, column=19, value="")
+
+        ws_egresos.cell(row=fila, column=20, value="")
+
+        fila += 1
+
+    ultima_fila_egresos = fila - 1
 
     response = HttpResponse(
         content_type='application/vnd.ms-excel.sheet.macroEnabled.12'
