@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import Instructor, Rol, Usuario, Matricula, Recibo, Calendario, Estudiante, CategoriaVehiculo, PlanEstudio,Asistencia, Notas, ValorCurso 
+from .models import CargoInstitucional, Instructor, PagoInstructor, Rol, Usuario, Matricula, Recibo, Calendario, Estudiante, CategoriaVehiculo, PlanEstudio,Asistencia, Notas, ValorCurso 
 from .models import TemaPlanEstudio, SubtemaPlanEstudio, Notificacion,ProgresoTema,HistorialPlanEstudio
 
 from .models import PreguntaExamenTeorico,ExamenTeorico,RespuestaExamenTeorico,OpcionPreguntaExamenTeorico
@@ -37,7 +37,8 @@ admin.site.register(PreguntaExamenTeorico)
 admin.site.register(OpcionPreguntaExamenTeorico)
 admin.site.register(ExamenTeorico)
 admin.site.register(RespuestaExamenTeorico)
-
+admin.site.register(PagoInstructor)
+admin.site.register(CargoInstitucional)
 
 # 3. Registro seguro del Usuario
 try:

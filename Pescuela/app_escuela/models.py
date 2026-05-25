@@ -682,3 +682,32 @@ class RespuestaExamenTeorico(models.Model):
 
     def __str__(self):
         return f"Respuesta examen #{self.examen.id}"
+    
+class PagoInstructor(models.Model):
+    monto_por_alumno = models.DecimalField(
+        max_digits=10,
+        decimal_places=2
+    )
+    activo = models.BooleanField(default=True)
+    fecha_inicio = models.DateField()
+    fecha_fin = models.DateField(null=True, blank=True)
+    descripcion = models.CharField(max_length=150, blank=True, null=True)
+
+    def __str__(self):
+        return f"C$ {self.monto_por_alumno} - {'Activo' if self.activo else 'Inactivo'}"   
+
+class CargoInstitucional(models.Model):
+    TIPOS_CARGO = (
+        ('gerente', 'Gerente'),
+        ('director', 'Director'),
+        ('secretaria', 'Secretaria'),
+        ('otro', 'Otro'),
+    )
+
+    nombre = models.CharField(max_length=150)
+    cargo = models.CharField(max_length=150)
+    tipo = models.CharField(max_length=50, choices=TIPOS_CARGO)
+    activo = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.nombre} - {self.cargo}" 

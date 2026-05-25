@@ -7,8 +7,10 @@ from .views import (
     DashboardIngresosMensualesView,
     RolViewSet,
     UserViewSet,
+    CargoInstitucionalViewSet,
     EstudianteViewSet,
     InstructorViewSet,
+    PagoInstructorViewSet,
     CategoriaVehiculoViewSet,
     PlanEstudioViewSet,
     ValorCursoViewSet,
@@ -26,7 +28,7 @@ from .views import (
     ExamenTeoricoViewSet,
     PerfilView,
     exportar_reporte_instructores_policial,
-    exportar_reporte_induccion_instructores,
+    reporte_induccion_instructores,
 )
 from .views import ( ProgresoTemaViewSet, NotificacionViewSet
 )
@@ -51,6 +53,8 @@ router.register(r'notificaciones', NotificacionViewSet)
 router.register(r'dashboard-plan', DashboardPlanViewSet, basename='dashboard-plan')
 router.register(r'preguntas-examen-teorico', PreguntaExamenTeoricoViewSet)
 router.register(r'examen-teorico', ExamenTeoricoViewSet)
+router.register(r'pagos-instructor', PagoInstructorViewSet, basename='pagos-instructor')
+router.register(r'cargos-institucionales', CargoInstitucionalViewSet, basename='cargos-institucionales')
 
 
 # app_escuela/api/urls.py
@@ -70,7 +74,7 @@ urlpatterns = [
     ),
     path(
         'reporte-induccion-instructores/',
-        exportar_reporte_induccion_instructores,
+        reporte_induccion_instructores,
         name='reporte_induccion_instructores'
     ),
 ]

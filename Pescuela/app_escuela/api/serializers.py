@@ -23,6 +23,8 @@ from ..models import (
     OpcionPreguntaExamenTeorico,
     ExamenTeorico,
     RespuestaExamenTeorico,
+    PagoInstructor,
+    CargoInstitucional,
 )
 from django.db import transaction
 from ..models import ProgresoTema, HistorialPlanEstudio,Notificacion
@@ -1333,3 +1335,13 @@ class RespuestaExamenTeoricoSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'correcta',
         ]
+
+class PagoInstructorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PagoInstructor
+        fields = '__all__'
+
+class CargoInstitucionalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CargoInstitucional
+        fields = '__all__'
