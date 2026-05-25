@@ -26,7 +26,7 @@ from .views import (
     ExamenTeoricoViewSet,
     PerfilView,
     exportar_reporte_instructores_policial,
-
+    exportar_reporte_induccion_instructores,
 )
 from .views import ( ProgresoTemaViewSet, NotificacionViewSet
 )
@@ -68,5 +68,9 @@ urlpatterns = [
         exportar_reporte_instructores_policial,
         name='reporte_instructores_policial'
     ),
-    
+    path(
+        'reporte-induccion-instructores/',
+        exportar_reporte_induccion_instructores,
+        name='reporte_induccion_instructores'
+    ),
 ]

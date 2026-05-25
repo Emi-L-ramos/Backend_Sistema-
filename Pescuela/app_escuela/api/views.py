@@ -8,7 +8,7 @@ from django.db import models
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework import serializers
 import openpyxl
-from openpyxl.styles import PatternFill, Border, Side, Alignment
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 import logging
 from django.db import transaction
 from django.db.models import Q, Sum, Count, Case, When, IntegerField
@@ -3891,6 +3891,235 @@ def exportar_reporte_instructores_policial(request):
     response[
         'Content-Disposition'
     ] = 'attachment; filename="INFORME_TRANSITO_POLICIA_NAC.xlsm"'
+
+    wb.save(response)
+
+    return response
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def exportar_reporte_induccion_instructores(request):
+    fecha_desde = request.query_params.get('desde')
+    fecha_hasta = request.query_params.get('hasta')
+
+    matriculas_con_teorico = set(
+        Notas.objects.filter(
+            tipo_nota='teorico'
+        ).values_list(
+            'matricula_id',
+            flat=True
+        )
+    )
+
+    matriculas_con_practico = set(
+        Notas.objects.filter(
+            tipo_nota='practico'
+        ).values_list(
+            'matricula_id',
+            flat=True
+        )
+    )
+
+    matriculas_ids = matriculas_con_teorico.intersection(
+        matriculas_con_practico
+    )
+
+    matriculas = Matricula.objects.select_related(
+        'estudiante'
+    ).filter(
+        id__in=matriculas_ids
+    ).order_by(
+        'fecha_registro',
+        'id'
+    )
+
+    datos = []
+
+    for matricula in matriculas:
+        estudiante = matricula.estudiante
+
+        fecha_finalizacion = Calendario.objects.filter(
+            matricula=matricula,
+            es_examen=False
+        ).order_by(
+            '-fecha'
+        ).values_list(
+            'fecha',
+            flat=True
+        ).first()
+
+        if not fecha_finalizacion:
+            fecha_finalizacion = matricula.fecha_registro
+
+        if fecha_desde and fecha_finalizacion < datetime.strptime(fecha_desde, '%Y-%m-%d').date():
+            continue
+
+        if fecha_hasta and fecha_finalizacion > datetime.strptime(fecha_hasta, '%Y-%m-%d').date():
+            continue
+
+        recibo = Recibo.objects.filter(
+            matricula=matricula
+        ).order_by(
+            '-fecha_pago',
+            '-id'
+        ).first()
+
+        nota_teorica = Notas.objects.filter(
+            matricula=matricula,
+            tipo_nota='teorico'
+        ).first()
+
+        nota_practica = Notas.objects.filter(
+            matricula=matricula,
+            tipo_nota='practico'
+        ).first()
+
+        datos.append({
+            'matricula': matricula,
+            'estudiante': estudiante,
+            'fecha_finalizacion': fecha_finalizacion,
+            'recibo': recibo,
+            'nota_teorica': nota_teorica,
+            'nota_practica': nota_practica,
+        })
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'INFORME INDUCCION'
+
+    ws.merge_cells('A1:G1')
+    ws['A1'] = 'Instituto de Formación y Capacitación “Adiact”'
+    ws['A1'].alignment = Alignment(horizontal='center')
+    ws['A1'].font = Font(bold=True, size=14)
+
+    ws.merge_cells('A2:G2')
+    ws['A2'] = 'Seguro experto en Formación y Capacitación del Talento Humano'
+    ws['A2'].alignment = Alignment(horizontal='center')
+    ws['A2'].font = Font(italic=True)
+
+    ws.merge_cells('A3:G3')
+    ws['A3'] = 'Ética, Integridad, Dedicación y Solidaridad'
+    ws['A3'].alignment = Alignment(horizontal='center')
+    ws['A3'].font = Font(bold=True)
+
+    ws['A5'] = f'León, {timezone.now().strftime("%d/%m/%Y")}'
+
+    ws['A7'] = 'Licenciado'
+    ws['A8'] = 'Francisco Aguilera Ferrufino.'
+    ws['A9'] = 'Gerente General de ESESA.'
+    ws['A10'] = 'Sus Manos.'
+
+    ws['A12'] = 'Estimado Licenciado:'
+
+    texto_periodo = 'el período seleccionado'
+
+    if fecha_desde and fecha_hasta:
+        texto_periodo = f'del {fecha_desde} al {fecha_hasta}'
+    elif fecha_desde:
+        texto_periodo = f'desde el {fecha_desde}'
+    elif fecha_hasta:
+        texto_periodo = f'hasta el {fecha_hasta}'
+
+    ws.merge_cells('A14:G16')
+    ws['A14'] = (
+        f'De la manera más atenta le solicito autorizar pago por los servicios '
+        f'de inducción en la Escuela de Manejo Cacique Adiact que prestó durante '
+        f'{texto_periodo}. La inducción fue impartida a los siguientes estudiantes.'
+    )
+    ws['A14'].alignment = Alignment(wrap_text=True, vertical='top')
+
+    encabezados = [
+        'No.',
+        'Alumnos Atendidos\nNombres y Apellidos',
+        'Fecha',
+        'No. Recibo',
+        'Código de Egreso',
+        'Cobro por Alumno',
+        'Observaciones',
+    ]
+
+    fila_encabezado = 18
+
+    for columna, encabezado in enumerate(encabezados, start=1):
+        celda = ws.cell(row=fila_encabezado, column=columna, value=encabezado)
+        celda.font = Font(bold=True)
+        celda.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        celda.fill = PatternFill(fill_type='solid', fgColor='D9EAF7')
+        celda.border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+
+    fila = fila_encabezado + 1
+    total = Decimal('0')
+
+    for index, item in enumerate(datos, start=1):
+        matricula = item['matricula']
+        estudiante = item['estudiante']
+        recibo = item['recibo']
+
+        monto = Decimal('0')
+
+        if recibo:
+            monto = recibo.monto_pagado or Decimal('0')
+
+        total += monto
+
+        observacion = 'Curso completo'
+
+        if matricula.tipo_curso in ['Intermedio', 'Avanzado']:
+            observacion = f'Reforzamiento {matricula.horas_reforzamiento or 0} horas'
+
+        valores = [
+            index,
+            f'{estudiante.nombre or ""} {estudiante.apellido or ""}'.strip(),
+            item['fecha_finalizacion'].strftime('%d/%m/%Y') if item['fecha_finalizacion'] else '',
+            recibo.numero_recibo if recibo and recibo.numero_recibo else '',
+            matricula.id,
+            float(monto),
+            observacion,
+        ]
+
+        for columna, valor in enumerate(valores, start=1):
+            celda = ws.cell(row=fila, column=columna, value=valor)
+            celda.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            celda.border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
+
+        fila += 1
+
+    ws.cell(row=fila, column=2, value='TOTAL')
+    ws.cell(row=fila, column=6, value=float(total))
+
+    for columna in range(1, 8):
+        celda = ws.cell(row=fila, column=columna)
+        celda.font = Font(bold=True)
+        celda.border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+
+    ws.column_dimensions['A'].width = 8
+    ws.column_dimensions['B'].width = 35
+    ws.column_dimensions['C'].width = 15
+    ws.column_dimensions['D'].width = 15
+    ws.column_dimensions['E'].width = 18
+    ws.column_dimensions['F'].width = 18
+    ws.column_dimensions['G'].width = 28
+
+    response = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+    response['Content-Disposition'] = 'attachment; filename="informe_induccion_instructores.xlsx"'
 
     wb.save(response)
 
