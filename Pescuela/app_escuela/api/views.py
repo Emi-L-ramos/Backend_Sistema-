@@ -994,41 +994,37 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 observacion = ''
 
             resultado[matricula_id]['asistencias'][str(clase.numero_clase)] = {
-                'id': clase.id,
-                'asistencia_id': asistencia_id,
-                'fecha': clase.fecha,
-                'hora_inicio': clase.hora_inicio,
-                'hora_fin': clase.hora_fin,
-                'numero_clase': clase.numero_clase,
-                'estado': estado,
-                'justificado_por_admin': justificado_por_admin,
-                'observacion': observacion,
-            }
+            'id': clase.id,
+            'asistencia_id': asistencia_id,
+            'fecha': clase.fecha,
+            'hora_inicio': clase.hora_inicio,
+            'hora_fin': clase.hora_fin,
+            'numero_clase': clase.numero_clase,
+            'estado': estado,
+            'justificado_por_admin': justificado_por_admin,
+            'observacion': observacion,
+            'km_inicial': asistencia.km_inicial if asistencia else None,
+            'km_final': asistencia.km_final if asistencia else None,
+            'km_recorridos': asistencia.km_recorridos if asistencia else 0,
+        }
 
         for item in resultado.values():
             asistencias_estudiante = item['asistencias'].values()
 
-            total_validas = 0
+            total_clases = len(asistencias_estudiante)
             total_asistidas = 0
 
             for asistencia in asistencias_estudiante:
                 estado = asistencia.get('estado')
 
-                if estado == 'justificado':
-                    continue
-
-                if estado in ['asistio', 'falto']:
-                    total_validas += 1
-
                 if estado == 'asistio':
                     total_asistidas += 1
 
             item['porcentaje'] = (
-                round((total_asistidas / total_validas) * 100)
-                if total_validas > 0
+                round((total_asistidas / total_clases) * 100)
+                if total_clases > 0
                 else 0
             )
-
         return Response(list(resultado.values()))
 
     @action(detail=False, methods=['post'], url_path='marcar')
@@ -1040,28 +1036,21 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
         km_final = request.data.get('km_final')
 
         if estado == 'asistio':
-            if km_inicial in [None, ''] or km_final in [None, '']:
+
+            if km_inicial in [None, '']:
                 return Response(
-                    {'error': 'Debe ingresar el km inicial y el km final.'},
+                    {'error': 'Debe ingresar el km inicial.'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
             try:
                 km_inicial = Decimal(str(km_inicial))
-                km_final = Decimal(str(km_final))
             except Exception:
                 return Response(
-                    {'error': 'Los kilómetros deben ser valores numéricos.'},
+                    {'error': 'El km inicial debe ser numérico.'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            if km_final < km_inicial:
-                return Response(
-                    {'error': 'El km final no puede ser menor que el km inicial.'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        else:
-            km_inicial = None
             km_final = None
 
         if estado not in ['asistio', 'falto']:
@@ -1131,7 +1120,68 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'message': 'Asistencia registrada correctamente.',
             'data': serializer.data
         })
-    
+
+
+    @action(detail=False, methods=['post'], url_path='finalizar-km')
+    def finalizar_km(self, request):
+
+        asistencia_id = request.data.get('asistencia_id')
+        km_final = request.data.get('km_final')
+
+        try:
+            asistencia = Asistencia.objects.select_related(
+                'As_calendario'
+            ).get(id=asistencia_id)
+
+        except Asistencia.DoesNotExist:
+            return Response(
+                {'error': 'Asistencia no encontrada.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if asistencia.estado != 'asistio':
+            return Response(
+                {'error': 'Solo clases asistidas pueden finalizar kilometraje.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if km_final in [None, '']:
+            return Response(
+                {'error': 'Debe ingresar el km final.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            km_final = Decimal(str(km_final))
+        except Exception:
+            return Response(
+                {'error': 'El km final debe ser numérico.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if asistencia.km_inicial is None:
+            return Response(
+                {'error': 'La asistencia no tiene km inicial.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if km_final < asistencia.km_inicial:
+            return Response(
+                {'error': 'El km final no puede ser menor al inicial.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        asistencia.km_final = km_final
+        asistencia.save()
+
+        serializer = self.get_serializer(asistencia)
+
+        return Response({
+            'success': True,
+            'message': 'Kilometraje final registrado.',
+            'data': serializer.data
+        })   
+        
     @action(detail=True, methods=['post'], url_path='justificar')
     def justificar(self, request, pk=None):
         user = request.user
@@ -1800,19 +1850,19 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
             progreso.desbloqueado = True
             progreso.save(update_fields=['desbloqueado'])
 
-            if usuario_estudiante:
-                Notificacion.objects.update_or_create(
-                    estudiante=usuario_estudiante,
-                    tema=progreso.tema,
-                    tipo='tema_desbloqueado',
-                    defaults={
-                        'mensaje': (
-                            f"Nuevo tema desbloqueado: "
-                            f"'{progreso.tema.titulo}'."
-                        ),
-                        'leida': False
-                    }
-                )
+            # if usuario_estudiante:
+            #     Notificacion.objects.update_or_create(
+            #         estudiante=usuario_estudiante,
+            #         tema=progreso.tema,
+            #         tipo='tema_desbloqueado',
+            #         defaults={
+            #             'mensaje': (
+            #                 f"Nuevo tema desbloqueado: "
+            #                 f"'{progreso.tema.titulo}'."
+            #             ),
+            #             'leida': False
+            #         }
+            #     )
 
     def _obtener_usuario_estudiante(self, progreso):
         estudiante = progreso.matricula.estudiante
@@ -1827,21 +1877,23 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
         estudiante_nombre = f"{estudiante.nombre} {estudiante.apellido}".strip()
         usuario_estudiante = self._obtener_usuario_estudiante(progreso)
 
-        instructor_nombre = ''
-        instructor = None
-        clases = getattr(progreso.matricula, 'clases', None)
-        if clases is not None and hasattr(clases, 'first'):
-            primera_clase = clases.first()
-            instructor = getattr(primera_clase, 'instructor', None)
-
-        if instructor:
-            instructor_nombre = f"{getattr(instructor, 'nombre', '')} {getattr(instructor, 'apellido', '')}".strip()
-
-        if not instructor_nombre:
-            instructor_nombre = 'el instructor'
-
         if not usuario_estudiante:
             return
+
+        clase = Calendario.objects.filter(
+            matricula=progreso.matricula,
+            instructor__isnull=False
+        ).select_related(
+            'instructor'
+        ).first()
+
+        instructor_nombre = "Instructor no asignado"
+
+        if clase and clase.instructor:
+            instructor_nombre = (
+                f"{clase.instructor.nombre or ''} "
+                f"{clase.instructor.apellido or ''}"
+            ).strip() or "Instructor no asignado"
 
         if progreso.estudiante_completado and not progreso.instructor_completado:
             Notificacion.objects.update_or_create(
@@ -1850,29 +1902,30 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
                 tipo='falta_instructor',
                 defaults={
                     'mensaje': (
-                        f'El estudiante "{estudiante_nombre}" '
-                        f'está esperando confirmación del instructor '
-                        f'"{instructor_nombre}".'
+                        f'El instructor "{instructor_nombre}" no ha dado check '
+                        f'al tema "{progreso.tema.titulo}" del estudiante '
+                        f'"{estudiante_nombre}".'
                     ),
                     'leida': False,
+                    'fecha_creacion': timezone.now(),
                 }
             )
 
-        if progreso.instructor_completado and not progreso.estudiante_completado:
+        elif progreso.instructor_completado and not progreso.estudiante_completado:
             Notificacion.objects.update_or_create(
                 estudiante=usuario_estudiante,
                 tema=progreso.tema,
                 tipo='falta_estudiante',
                 defaults={
                     'mensaje': (
-                        f'El instructor "{instructor_nombre}" '
-                        f'está esperando confirmación del estudiante '
-                        f'"{estudiante_nombre}".'
+                        f'El estudiante "{estudiante_nombre}" no ha dado check '
+                        f'al tema "{progreso.tema.titulo}" marcado por el instructor '
+                        f'"{instructor_nombre}".'
                     ),
                     'leida': False,
+                    'fecha_creacion': timezone.now(),
                 }
             )
-
 
     def _validar_limite_temas_por_dia(self, progreso):
         ahora = timezone.now()
@@ -2341,57 +2394,95 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
 
 class NotificacionViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet para notificaciones del administrador"""
-    
-    queryset = Notificacion.objects.all()  # ← NECESARIO
+
+    queryset = Notificacion.objects.all()
     serializer_class = NotificacionSerializer
     permission_classes = [IsAuthenticated]
-    
+
     def get_queryset(self):
         return Notificacion.objects.all().order_by('-fecha_creacion')
-    
+
     @action(detail=True, methods=['post'], url_path='marcar-leida')
     def marcar_leida(self, request, pk=None):
         notificacion = self.get_object()
         notificacion.leida = True
-        notificacion.save()
-        return Response({'success': True, 'message': 'Notificación marcada como leída'})
+        notificacion.save(update_fields=['leida'])
 
+        return Response({
+            'success': True,
+            'message': 'Notificación marcada como leída'
+        })
 
     @action(detail=False, methods=['get'], url_path='admin-pendientes')
     def admin_pendientes(self, request):
-
         user = request.user
         rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
 
-        if rol != 'admin':
+        if rol not in ['admin', 'administrador'] and not user.is_staff and not user.is_superuser:
             return Response(
                 {'error': 'Solo el administrador puede ver estas notificaciones.'},
                 status=status.HTTP_403_FORBIDDEN
             )
 
+        ahora = timezone.now()
+        limite_tiempo = ahora - timedelta(hours=23)
+        # limite_tiempo = ahora - timedelta(minutes=1)
+
+        Notificacion.objects.filter(
+            leida=False,
+            fecha_creacion__lt=limite_tiempo
+        ).update(leida=True)
+
         notificaciones = Notificacion.objects.filter(
-            leida=False
-        ).order_by('-fecha_creacion')[:10]
+            leida=False,
+            tipo__in=['falta_estudiante', 'falta_instructor'],
+            fecha_creacion__gte=limite_tiempo,
+        ).select_related(
+            'estudiante',
+            'estudiante__estudiante',
+            'tema',
+        ).order_by('-fecha_creacion')
 
-        data = [
-    {
-        'id': n.id,
-        'tipo': n.tipo,
-        'tipo_texto': n.get_tipo_display(),
-        'estudiante': (
-            f"{n.estudiante.estudiante.nombre} {n.estudiante.estudiante.apellido}"
-            if n.estudiante and n.estudiante.estudiante
-            else n.estudiante.username
-        ),
-        'tema': n.tema.titulo if n.tema else '',
-        'mensaje': n.mensaje,
-        'fecha_creacion': n.fecha_creacion,
-    }
-    for n in notificaciones
-]
-        # notificaciones.update(leida=True)
+        resultado = []
+        claves_usadas = set()
 
-        return Response(data)
+        for n in notificaciones:
+            clave = f"{n.estudiante_id}-{n.tema_id}-{n.tipo}"
+
+            if clave in claves_usadas:
+                continue
+
+            claves_usadas.add(clave)
+
+            if n.estudiante and getattr(n.estudiante, 'estudiante', None):
+                estudiante_nombre = (
+                    f"{n.estudiante.estudiante.nombre} "
+                    f"{n.estudiante.estudiante.apellido}"
+                ).strip()
+            elif n.estudiante:
+                estudiante_nombre = n.estudiante.username
+            else:
+                estudiante_nombre = "Estudiante no asignado"
+
+            quien_falta = "Instructor" if n.tipo == "falta_instructor" else "Estudiante"
+            quien_espera = "Estudiante" if n.tipo == "falta_instructor" else "Instructor"
+
+            resultado.append({
+                'id': n.id,
+                'tipo': n.tipo,
+                'tipo_texto': n.get_tipo_display(),
+                'estudiante': estudiante_nombre,
+                'tema': n.tema.titulo if n.tema else '',
+                'mensaje': n.mensaje,
+                'quien_falta': quien_falta,
+                'quien_espera': quien_espera,
+                'fecha_creacion': n.fecha_creacion,
+            })
+
+            if len(resultado) >= 10:
+                break
+
+        return Response(resultado)
 
 class DashboardPlanViewSet(viewsets.ViewSet):
     """ViewSet para el dashboard con estadísticas"""
