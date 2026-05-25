@@ -993,7 +993,6 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 estado = asistencia.estado
                 asistencia_id = asistencia.id
                 justificado_por_admin = asistencia.justificado_por_admin
-                observacion = asistencia.observacion
             else:
                 estado = 'pendiente'
                 asistencia_id = None
@@ -1219,9 +1218,6 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             asistencia.estado = 'justificado'
             asistencia.justificado_por_admin = True
-
-            if observacion:
-                asistencia.observacion = observacion
 
             asistencia.save()
 
@@ -1500,9 +1496,6 @@ class NotasViewSet(viewsets.ModelViewSet):
 
         nota = serializer.save()
 
-        # OJO:
-        # Si todavía falta examen teórico, NO conviene finalizar aquí.
-        # Solo finaliza si ya existe una nota teórica aprobada.
         nota_teorica_aprobada = Notas.objects.filter(
             matricula=matricula,
             tipo_nota='teorico',
@@ -1649,11 +1642,29 @@ class DashboardResumenView(APIView):
             ).count()
             
             # Egresados del mes actual
-            egresados_mes = Matricula.objects.filter(
-                estado='finalizado',
-                fecha_registro__year=hoy.year,
-                fecha_registro__month=hoy.month
-            ).count()
+            matriculas_con_teorico = set(
+                Notas.objects.filter(
+                    tipo_nota='teorico'
+                ).values_list(
+                    'matricula_id',
+                    flat=True
+                )
+            )
+
+            matriculas_con_practico = set(
+                Notas.objects.filter(
+                    tipo_nota='practico'
+                ).values_list(
+                    'matricula_id',
+                    flat=True
+                )
+            )
+
+            matriculas_egresadas = matriculas_con_teorico.intersection(
+                matriculas_con_practico
+            )
+
+            egresados_mes = len(matriculas_egresadas)
             
             # Ingresos del mes actual
             ingresos_mes = Recibo.objects.filter(
@@ -4141,3 +4152,208 @@ def reporte_induccion_instructores(request):
             'director_cargo': director.cargo if director else '',
         },
     })
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def reporte_kilometros_instructor(request):
+    fecha_desde = request.query_params.get('desde')
+    fecha_hasta = request.query_params.get('hasta')
+    instructor_id = request.query_params.get('instructor')
+
+    if not instructor_id:
+        return Response(
+            {'error': 'Debe seleccionar un instructor.'},
+            status=400
+        )
+
+    try:
+        instructor = Instructor.objects.get(id=instructor_id)
+    except Instructor.DoesNotExist:
+        return Response(
+            {'error': 'Instructor no encontrado.'},
+            status=404
+        )
+
+    asistencias = Asistencia.objects.select_related(
+        'As_estudiante',
+        'As_calendario',
+        'As_calendario__instructor',
+        'As_calendario__matricula',
+    ).filter(
+        As_calendario__instructor_id=instructor_id,
+        estado='asistio',
+        km_inicial__isnull=False,
+        km_final__isnull=False,
+    )
+
+    if fecha_desde:
+        asistencias = asistencias.filter(
+            As_calendario__fecha__gte=fecha_desde
+        )
+
+    if fecha_hasta:
+        asistencias = asistencias.filter(
+            As_calendario__fecha__lte=fecha_hasta
+        )
+
+    asistencias = asistencias.order_by(
+        'As_calendario__fecha',
+        'As_calendario__hora_inicio',
+        'id'
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Kilómetros por Instructor'
+
+    thin = Side(style='thin', color='000000')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    header_fill = PatternFill(fill_type='solid', fgColor='D9EAF7')
+    titulo_fill = PatternFill(fill_type='solid', fgColor='FFFFFF')
+
+    ws.merge_cells('A1:J1')
+    ws['A1'] = 'Instituto de Formación y Capacitación “Adiact”'
+    ws['A1'].font = Font(bold=True, size=16)
+    ws['A1'].alignment = Alignment(horizontal='center')
+
+    ws.merge_cells('A2:J2')
+    ws['A2'] = 'Somos expertos en Formación y Capacitación del Talento Humano'
+    ws['A2'].alignment = Alignment(horizontal='center')
+
+    ws.merge_cells('A3:J3')
+    ws['A3'] = 'Ética, Integridad, Dedicación y Solidaridad'
+    ws['A3'].font = Font(bold=True)
+    ws['A3'].alignment = Alignment(horizontal='center')
+
+    ws.merge_cells('A5:J5')
+    ws['A5'] = 'REPORTE DE KILÓMETROS RECORRIDOS POR INSTRUCTOR'
+    ws['A5'].font = Font(bold=True, size=14)
+    ws['A5'].alignment = Alignment(horizontal='center')
+    ws['A5'].fill = titulo_fill
+
+    ws['A7'] = 'Instructor:'
+    ws['B7'] = f'{instructor.nombre or ""} {instructor.apellido or ""}'.strip()
+
+    ws['A8'] = 'Fecha de emisión:'
+    ws['B8'] = timezone.now().strftime('%d/%m/%Y')
+
+    ws['D8'] = 'Desde:'
+    ws['E8'] = fecha_desde or 'Inicio'
+
+    ws['F8'] = 'Hasta:'
+    ws['G8'] = fecha_hasta or 'Fin'
+
+    encabezados = [
+        'No.',
+        'Fecha',
+        'Instructor',
+        'Estudiante',
+        'Cédula',
+        'Clase No.',
+        'Hora Inicio',
+        'Hora Fin',
+        'Km Inicial',
+        'Km Final',
+        'Km Recorridos',
+    ]
+
+    fila_encabezado = 10
+
+    for col, encabezado in enumerate(encabezados, start=1):
+        celda = ws.cell(row=fila_encabezado, column=col, value=encabezado)
+        celda.font = Font(bold=True)
+        celda.fill = header_fill
+        celda.border = border
+        celda.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+    fila = fila_encabezado + 1
+    total_km = Decimal('0')
+
+    for index, asistencia in enumerate(asistencias, start=1):
+        clase = asistencia.As_calendario
+        estudiante = asistencia.As_estudiante
+
+        km_inicial = asistencia.km_inicial or Decimal('0')
+        km_final = asistencia.km_final or Decimal('0')
+        km_recorridos = asistencia.km_recorridos or Decimal('0')
+
+        total_km += km_recorridos
+
+        valores = [
+            index,
+            clase.fecha.strftime('%d/%m/%Y') if clase.fecha else '',
+            f'{instructor.nombre or ""} {instructor.apellido or ""}'.strip(),
+            f'{estudiante.nombre or ""} {estudiante.apellido or ""}'.strip(),
+            estudiante.cedula or '',
+            clase.numero_clase,
+            clase.hora_inicio.strftime('%H:%M') if clase.hora_inicio else '',
+            clase.hora_fin.strftime('%H:%M') if clase.hora_fin else '',
+            float(km_inicial),
+            float(km_final),
+            float(km_recorridos),
+        ]
+
+        for col, valor in enumerate(valores, start=1):
+            celda = ws.cell(row=fila, column=col, value=valor)
+            celda.border = border
+            celda.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+        fila += 1
+
+    ws.cell(row=fila, column=10, value='TOTAL KM:')
+    ws.cell(row=fila, column=11, value=float(total_km))
+
+    for col in range(10, 12):
+        celda = ws.cell(row=fila, column=col)
+        celda.font = Font(bold=True)
+        celda.border = border
+        celda.fill = header_fill
+        celda.alignment = Alignment(horizontal='center')
+
+    fila_footer = fila + 3
+
+    ws.merge_cells(start_row=fila_footer, start_column=1, end_row=fila_footer, end_column=12)
+    ws.cell(
+        row=fila_footer,
+        column=1,
+        value='Gasolinera Uno Sutiaba 1 cuadra al norte ½ cuadra al oeste. León, Nicaragua'
+    )
+
+    ws.merge_cells(start_row=fila_footer + 1, start_column=1, end_row=fila_footer + 1, end_column=12)
+    ws.cell(
+        row=fila_footer + 1,
+        column=1,
+        value='Teléfonos: 2311-1333 y 8966-3770. email: institutoadiact@esesa.com.ni'
+    )
+
+    ws.cell(row=fila_footer, column=1).alignment = Alignment(horizontal='center')
+    ws.cell(row=fila_footer + 1, column=1).alignment = Alignment(horizontal='center')
+
+    columnas = {
+        'A': 8,
+        'B': 15,
+        'C': 28,
+        'D': 28,
+        'E': 18,
+        'F': 12,
+        'G': 14,
+        'H': 14,
+        'I': 14,
+        'J': 14,
+        'K': 16,
+        'L': 28,
+    }
+
+    for columna, ancho in columnas.items():
+        ws.column_dimensions[columna].width = ancho
+
+    response = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+    response['Content-Disposition'] = 'attachment; filename="reporte_kilometros_instructor.xlsx"'
+
+    wb.save(response)
+
+    return response

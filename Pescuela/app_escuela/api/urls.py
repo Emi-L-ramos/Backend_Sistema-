@@ -29,6 +29,7 @@ from .views import (
     PerfilView,
     exportar_reporte_instructores_policial,
     reporte_induccion_instructores,
+    reporte_kilometros_instructor,
 )
 from .views import ( ProgresoTemaViewSet, NotificacionViewSet
 )
@@ -76,5 +77,10 @@ urlpatterns = [
         'reporte-induccion-instructores/',
         reporte_induccion_instructores,
         name='reporte_induccion_instructores'
+    ),
+    path(
+        'reporte-kilometros-instructor/',
+        reporte_kilometros_instructor,
+        name='reporte_kilometros_instructor'
     ),
 ]
