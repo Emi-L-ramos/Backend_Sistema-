@@ -1001,37 +1001,43 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 observacion = ''
 
             resultado[matricula_id]['asistencias'][str(clase.numero_clase)] = {
-            'id': clase.id,
-            'asistencia_id': asistencia_id,
-            'fecha': clase.fecha,
-            'hora_inicio': clase.hora_inicio,
-            'hora_fin': clase.hora_fin,
-            'numero_clase': clase.numero_clase,
-            'estado': estado,
-            'justificado_por_admin': justificado_por_admin,
-            'observacion': observacion,
-            'km_inicial': asistencia.km_inicial if asistencia else None,
-            'km_final': asistencia.km_final if asistencia else None,
-            'km_recorridos': asistencia.km_recorridos if asistencia else 0,
-        }
+                'id': clase.id,
+                'asistencia_id': asistencia_id,
+                'fecha': clase.fecha,
+                'hora_inicio': clase.hora_inicio,
+                'hora_fin': clase.hora_fin,
+                'numero_clase': clase.numero_clase,
+                'estado': estado,
+                'justificado_por_admin': justificado_por_admin,
+                'observacion': observacion,
+                'km_inicial': asistencia.km_inicial if asistencia else None,
+                'km_final': asistencia.km_final if asistencia else None,
+                'km_recorridos': asistencia.km_recorridos if asistencia else 0,
+            }
 
         for item in resultado.values():
             asistencias_estudiante = item['asistencias'].values()
 
-            total_clases = len(asistencias_estudiante)
+            total_clases_validas = 0
             total_asistidas = 0
 
             for asistencia in asistencias_estudiante:
                 estado = asistencia.get('estado')
 
+                if estado == 'justificado':
+                    continue
+
+                total_clases_validas += 1
+
                 if estado == 'asistio':
                     total_asistidas += 1
 
             item['porcentaje'] = (
-                round((total_asistidas / total_clases) * 100)
-                if total_clases > 0
+                round((total_asistidas / total_clases_validas) * 100)
+                if total_clases_validas > 0
                 else 0
             )
+
         return Response(list(resultado.values()))
 
     @action(detail=False, methods=['post'], url_path='marcar')
@@ -1219,58 +1225,84 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
 
             asistencia.save()
 
-            clase = asistencia.As_calendario
-            clase.estado = 'reprogramada'
-            clase.save(update_fields=['estado'])
+            clase_faltada = asistencia.As_calendario
 
-            self.reprogramar_clases_por_justificacion(clase)
+            clase_faltada.estado = 'reprogramada'
+            clase_faltada.save(update_fields=['estado'])
+
+            nueva_clase = self.reprogramar_clases_por_justificacion(clase_faltada)
 
         serializer = self.get_serializer(asistencia)
 
         return Response({
             'success': True,
-            'message': 'Inasistencia justificada. Las clases fueron reprogramadas.',
-            'data': serializer.data
+            'message': 'Inasistencia justificada. Se agregó un día adicional para recuperar la clase perdida.',
+            'data': serializer.data,
+            'nueva_clase_id': nueva_clase.id if nueva_clase else None,
         })
-    
+        
 
 
     def reprogramar_clases_por_justificacion(self, clase_faltada):
         matricula = clase_faltada.matricula
         es_extraordinario = str(matricula.modalidad).lower() == 'extraordinario'
 
-        clases = list(
-            Calendario.objects.filter(
-                matricula=matricula,
-                es_examen=False,
-                fecha__gte=clase_faltada.fecha
-            ).order_by(
-                'fecha',
-                'hora_inicio',
-                'numero_clase'
-            )
-        )
-
-        for clase in clases:
-            nueva_fecha = clase.fecha + timedelta(days=1)
+        def siguiente_fecha_valida(fecha_base):
+            nueva_fecha = fecha_base + timedelta(days=1)
 
             while True:
                 es_fin_semana = nueva_fecha.weekday() >= 5
 
                 if es_extraordinario and es_fin_semana:
-                    break
+                    return nueva_fecha
 
                 if not es_extraordinario and not es_fin_semana:
-                    break
+                    return nueva_fecha
 
                 nueva_fecha += timedelta(days=1)
 
-            clase.fecha = nueva_fecha
+        ultima_clase = Calendario.objects.filter(
+            matricula=matricula,
+            es_examen=False
+        ).order_by(
+            '-numero_clase'
+        ).first()
 
-            if clase.id == clase_faltada.id:
-                clase.estado = 'pendiente'
+        ultimo_numero = ultima_clase.numero_clase if ultima_clase else 0
 
-            clase.save(update_fields=['fecha', 'estado'])
+        ultima_fecha = Calendario.objects.filter(
+            matricula=matricula,
+            es_examen=False
+        ).order_by(
+            '-fecha',
+            '-hora_inicio'
+        ).first()
+
+        fecha_base = ultima_fecha.fecha if ultima_fecha else clase_faltada.fecha
+        fecha_recuperacion = siguiente_fecha_valida(fecha_base)
+
+        while Calendario.objects.filter(
+            instructor=clase_faltada.instructor,
+            fecha=fecha_recuperacion,
+            hora_inicio__lt=clase_faltada.hora_fin,
+            hora_fin__gt=clase_faltada.hora_inicio,
+            estado__in=['pendiente', 'reprogramada', 'inasistencia']
+        ).exists():
+            fecha_recuperacion = siguiente_fecha_valida(fecha_recuperacion)
+
+        nueva_clase = Calendario.objects.create(
+            matricula=matricula,
+            instructor=clase_faltada.instructor,
+            fecha=fecha_recuperacion,
+            hora_inicio=clase_faltada.hora_inicio,
+            hora_fin=clase_faltada.hora_fin,
+            numero_clase=ultimo_numero + 1,
+            estado='pendiente',
+            es_examen=False,
+        )
+
+        return nueva_clase
+
 
     @action(detail=False, methods=['get'], url_path='resumen')
     def resumen(self, request):
@@ -1798,7 +1830,7 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
 
         progreso.save()
 
-        self._desbloquear_siguiente(progreso)
+        self._crear_notificacion_pendiente(progreso)
         
     def _obtener_horas_clase_actual(self, progreso):
         clase = Calendario.objects.filter(
@@ -1887,12 +1919,20 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
         if not usuario_estudiante:
             return
 
+        Notificacion.objects.filter(
+            estudiante=usuario_estudiante,
+            tema=progreso.tema,
+            tipo__in=['falta_estudiante', 'falta_instructor'],
+            leida=False
+        ).update(leida=True)
+
+        if progreso.estudiante_completado and progreso.instructor_completado:
+            return
+
         clase = Calendario.objects.filter(
             matricula=progreso.matricula,
             instructor__isnull=False
-        ).select_related(
-            'instructor'
-        ).first()
+        ).select_related('instructor').first()
 
         instructor_nombre = "Instructor no asignado"
 
@@ -2015,7 +2055,6 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='marcar-estudiante')
     def marcar_estudiante(self, request, pk=None):
-        
         try:
             progreso = self.get_object()
 
@@ -2043,8 +2082,15 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
 
                 progreso.save()
 
-                self._crear_notificacion_pendiente(progreso)
-                # self.normalizar_desbloqueo(progreso.matricula)
+                if progreso.estudiante_completado and progreso.instructor_completado:
+                    Notificacion.objects.filter(
+                        estudiante=self._obtener_usuario_estudiante(progreso),
+                        tema=progreso.tema,
+                        tipo__in=['falta_estudiante', 'falta_instructor'],
+                        leida=False
+                    ).update(leida=True)
+                else:
+                    self._crear_notificacion_pendiente(progreso)
 
                 if progreso.instructor_completado:
                     mensaje = "Tema completado correctamente."
@@ -2095,8 +2141,15 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
 
                 progreso.save()
 
-                self._crear_notificacion_pendiente(progreso)
-                # self.normalizar_desbloqueo(progreso.matricula)
+                if progreso.estudiante_completado and progreso.instructor_completado:
+                    Notificacion.objects.filter(
+                        estudiante=self._obtener_usuario_estudiante(progreso),
+                        tema=progreso.tema,
+                        tipo__in=['falta_estudiante', 'falta_instructor'],
+                        leida=False
+                    ).update(leida=True)
+                else:
+                    self._crear_notificacion_pendiente(progreso)
 
                 if progreso.estudiante_completado:
                     mensaje = "Tema completado correctamente."
@@ -2116,7 +2169,7 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
                 'success': False,
                 'error': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
-        
+            
 
     @action(detail=True, methods=['post'], url_path='admin-forzar')
     def admin_forzar(self, request, pk=None):
@@ -2433,7 +2486,6 @@ class NotificacionViewSet(viewsets.ReadOnlyModelViewSet):
 
         ahora = timezone.now()
         limite_tiempo = ahora - timedelta(hours=23)
-        # limite_tiempo = ahora - timedelta(minutes=1)
 
         Notificacion.objects.filter(
             leida=False,
@@ -2454,22 +2506,44 @@ class NotificacionViewSet(viewsets.ReadOnlyModelViewSet):
         claves_usadas = set()
 
         for n in notificaciones:
-            clave = f"{n.estudiante_id}-{n.tema_id}-{n.tipo}"
+            progreso = ProgresoTema.objects.filter(
+                tema=n.tema,
+                matricula__estudiante=n.estudiante.estudiante
+            ).select_related(
+                'matricula',
+                'matricula__estudiante',
+                'tema'
+            ).first()
+
+            if not progreso:
+                n.leida = True
+                n.save(update_fields=['leida'])
+                continue
+
+            if progreso.estudiante_completado and progreso.instructor_completado:
+                n.leida = True
+                n.save(update_fields=['leida'])
+                continue
+
+            if n.tipo == 'falta_estudiante' and progreso.estudiante_completado:
+                n.leida = True
+                n.save(update_fields=['leida'])
+                continue
+
+            if n.tipo == 'falta_instructor' and progreso.instructor_completado:
+                n.leida = True
+                n.save(update_fields=['leida'])
+                continue
+
+            clave = f"{progreso.matricula_id}-{progreso.tema_id}-{n.tipo}"
 
             if clave in claves_usadas:
                 continue
 
             claves_usadas.add(clave)
 
-            if n.estudiante and getattr(n.estudiante, 'estudiante', None):
-                estudiante_nombre = (
-                    f"{n.estudiante.estudiante.nombre} "
-                    f"{n.estudiante.estudiante.apellido}"
-                ).strip()
-            elif n.estudiante:
-                estudiante_nombre = n.estudiante.username
-            else:
-                estudiante_nombre = "Estudiante no asignado"
+            estudiante = progreso.matricula.estudiante
+            estudiante_nombre = f"{estudiante.nombre} {estudiante.apellido}".strip()
 
             quien_falta = "Instructor" if n.tipo == "falta_instructor" else "Estudiante"
             quien_espera = "Estudiante" if n.tipo == "falta_instructor" else "Instructor"
@@ -2479,7 +2553,7 @@ class NotificacionViewSet(viewsets.ReadOnlyModelViewSet):
                 'tipo': n.tipo,
                 'tipo_texto': n.get_tipo_display(),
                 'estudiante': estudiante_nombre,
-                'tema': n.tema.titulo if n.tema else '',
+                'tema': progreso.tema.titulo if progreso.tema else '',
                 'mensaje': n.mensaje,
                 'quien_falta': quien_falta,
                 'quien_espera': quien_espera,
