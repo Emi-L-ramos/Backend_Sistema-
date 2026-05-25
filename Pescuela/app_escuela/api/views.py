@@ -9,6 +9,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework import serializers
 import openpyxl
 from openpyxl.styles import PatternFill, Border, Side, Alignment
+import logging
 from django.db import transaction
 from django.db.models import Q, Sum, Count, Case, When, IntegerField
 from django.http import HttpResponse
@@ -64,6 +65,8 @@ from ..models import (
     ExamenTeorico,
     RespuestaExamenTeorico,
 )
+
+logging.getLogger("PIL").setLevel(logging.WARNING)
 
 from .serializers import (
     RolSerializer,
