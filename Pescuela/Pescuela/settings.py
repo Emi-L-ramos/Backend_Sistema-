@@ -12,10 +12,15 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-5zz7xfden4ks^m$1m!ggx6%&(74o(g9#rw8dtg^*cx(-zult-!'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = False
 
 # ✅ AGREGAR localhost y 127.0.0.1 para desarrollo
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0']
+ALLOWED_HOSTS = [
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
+    "backendsistema-production.up.railway.app",
+]
 
 # Application definition
 INSTALLED_APPS = [
@@ -124,7 +129,12 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:5174", # Del incoming
-    "https://wsp11lrj-5173.use2.devtunnels.ms", # Del incoming
+    "https://frontend-sistema-dgmt.vercel.app",
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    "https://backendsistema-production.up.railway.app",
+    "https://frontend-sistema-dgmt.vercel.app",
 ]
 
 # ✅ Opcional: Permitir credenciales
