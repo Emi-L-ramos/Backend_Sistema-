@@ -678,7 +678,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 fecha=fecha_clase,
                 hora_inicio__lt=hora_fin,
                 hora_fin__gt=hora_inicio,
-                estado__in=['pendiente', 'reprogramada', 'inasistencia']
+                estado__in=['pendiente']
             ).exists()
 
             if choque:
