@@ -2,6 +2,7 @@
 Django settings for Pescuela project.
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -86,17 +87,40 @@ TEMPLATES = [
 WSGI_APPLICATION = 'Pescuela.wsgi.application'
 
 # Database
+#DATABASES = {
+#    'default': {
+#       'ENGINE': 'django.db.backends.mysql',
+#        'NAME': 'adiact_bd',
+#       'USER': 'root',
+#        'PASSWORD': '',  # XAMPP por defecto no tiene contraseña
+#         'HOST': 'localhost',
+#          'HOST': 'localhost',
+#          'PORT': '3306',
+#          'OPTIONS': {
+#              'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
+#              'charset': 'utf8mb4',
+#          }
+#      }
+#  }
+
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'adiact_bd',
-        'USER': 'root',
-        'PASSWORD': '',  # XAMPP por defecto no tiene contraseña
-        'HOST': 'localhost',
-        'PORT': '3306',
+        'NAME': os.environ.get('MYSQL_DATABASE', 'defaultdb'),
+        'USER': os.environ.get('MYSQL_USER', 'avnadmin'),
+        'PASSWORD': os.environ.get('MYSQL_PASSWORD'),
+        'HOST': os.environ.get('MYSQL_HOST'),
+        'PORT': os.environ.get('MYSQL_PORT', '3306'),
         'OPTIONS': {
             'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
             'charset': 'utf8mb4',
+            'ssl': {
+                'ca': os.environ.get(
+                    'MYSQL_SSL_CA',
+                    '/etc/secrets/ca.pem'
+                ),
+            },
         }
     }
 }
