@@ -1,4 +1,8 @@
 # app_escuela/api/views.py
+import math
+import openpyxl
+import logging
+import os
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -7,9 +11,7 @@ from urllib import request
 from django.db import models
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework import serializers
-import openpyxl
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-import logging
 from django.db import transaction
 from django.db.models import Q, Sum, Count, Case, When, IntegerField
 from django.http import HttpResponse
@@ -40,7 +42,6 @@ from openpyxl import Workbook
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as ExcelImage
 from django.conf import settings
-import os
 from copy import copy
 from datetime import timedelta
 from django.utils import timezone
@@ -1395,6 +1396,87 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             })
 
         return Response(list(resultado.values()))
+    
+    @action(detail=False, methods=['get'], url_path='resumen-estudiante')
+    def resumen_estudiante(self, request):
+        user = request.user
+
+        if not hasattr(user, 'estudiante') or not user.estudiante:
+            return Response({
+                'porcentaje': 0,
+                'asistidas': 0,
+                'total': 0,
+            })
+
+        matricula = Matricula.objects.filter(
+            estudiante=user.estudiante,
+            estado='matriculado'
+        ).order_by('-id').first()
+
+        if not matricula:
+            return Response({
+                'porcentaje': 0,
+                'asistidas': 0,
+                'total': 0,
+            })
+
+        clases_todas = Calendario.objects.filter(
+            matricula=matricula,
+            es_examen=False
+        ).order_by(
+            'numero_clase',
+            'fecha',
+            'hora_inicio'
+        )
+
+        primera_clase = clases_todas.first()
+
+        if not primera_clase:
+            return Response({
+                'porcentaje': 0,
+                'asistidas': 0,
+                'total': 0,
+            })
+
+        inicio = datetime.combine(date.today(), primera_clase.hora_inicio)
+        fin = datetime.combine(date.today(), primera_clase.hora_fin)
+
+        horas_por_dia = int((fin - inicio).total_seconds() // 3600)
+
+        if horas_por_dia <= 0:
+            horas_por_dia = 1
+
+        if matricula.tipo_curso == 'Principiante':
+            horas_totales = 15
+        else:
+            horas_totales = matricula.horas_reforzamiento or 0
+
+        total_encuentros_oficiales = math.ceil(
+            float(horas_totales) / horas_por_dia
+        ) if horas_totales else 0
+
+        clases_oficiales = clases_todas.filter(
+            numero_clase__lte=total_encuentros_oficiales
+        )
+
+        total = clases_oficiales.count()
+
+        asistidas = Asistencia.objects.filter(
+            As_calendario__in=clases_oficiales,
+            estado='asistio'
+        ).count()
+
+        porcentaje = (
+            round((asistidas / total) * 100)
+            if total > 0
+            else 0
+        )
+
+        return Response({
+            'porcentaje': porcentaje,
+            'asistidas': asistidas,
+            'total': total,
+        })
 
 class NotasViewSet(viewsets.ModelViewSet):
     queryset = Notas.objects.select_related(
@@ -2738,6 +2820,52 @@ class DashboardPlanViewSet(viewsets.ViewSet):
                 Notificacion.objects.filter(leida=False)[:10], 
                 many=True
             ).data
+        })
+
+    @action(detail=False, methods=['get'], url_path='mi-progreso')
+    def mi_progreso(self, request):
+        user = request.user
+
+        if not hasattr(user, 'estudiante') or not user.estudiante:
+            return Response({
+                'porcentaje': 0,
+                'temas_completados': 0,
+                'total_temas': 0,
+            })
+
+        matricula = Matricula.objects.filter(
+            estudiante=user.estudiante,
+            estado='matriculado'
+        ).order_by('-id').first()
+
+        if not matricula:
+            return Response({
+                'porcentaje': 0,
+                'temas_completados': 0,
+                'total_temas': 0,
+            })
+
+        progresos = ProgresoTema.objects.filter(
+            matricula=matricula
+        )
+
+        total_temas = progresos.count()
+
+        temas_completados = progresos.filter(
+            estudiante_completado=True,
+            instructor_completado=True
+        ).count()
+
+        porcentaje = (
+            round((temas_completados / total_temas) * 100)
+            if total_temas > 0
+            else 0
+        )
+
+        return Response({
+            'porcentaje': porcentaje,
+            'temas_completados': temas_completados,
+            'total_temas': total_temas,
         })
     
 
