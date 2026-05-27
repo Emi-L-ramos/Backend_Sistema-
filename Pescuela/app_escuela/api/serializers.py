@@ -348,10 +348,7 @@ class EstudianteSerializer(serializers.ModelSerializer):
 
 class InstructorSerializer(serializers.ModelSerializer):
     nombre_completo = serializers.SerializerMethodField()
-    categoria_nombre = serializers.CharField(
-        source='categoria_vehiculo.nombre',
-        read_only=True
-    )
+    categoria_nombre = serializers.SerializerMethodField()
 
     foto_url = serializers.SerializerMethodField()
 
@@ -362,6 +359,9 @@ class InstructorSerializer(serializers.ModelSerializer):
     def get_nombre_completo(self, obj):
         nombre = f"{obj.nombre or ''} {obj.apellido or ''}".strip()
         return nombre or f"Instructor {obj.id}"
+    
+    def get_categoria_nombre(self, obj):
+        return obj.categoria_instructor or ""
 
     def get_foto_url(self, obj):
         request = self.context.get('request')
