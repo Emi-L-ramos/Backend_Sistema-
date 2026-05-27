@@ -115,11 +115,14 @@ DATABASES = {
         'NAME': os.environ.get('MYSQL_DATABASE', 'defaultdb'),
         'USER': os.environ.get('MYSQL_USER', 'avnadmin'),
         'PASSWORD': os.environ.get('MYSQL_PASSWORD', ''),
-        'HOST': os.environ.get('MYSQL_HOST', 'mysql-33e5b4cc-emiliesmaz-adiact.h.aivencloud.com'),
+        'HOST': os.environ.get('MYSQL_HOST'),
         'PORT': os.environ.get('MYSQL_PORT', '22815'),
         'OPTIONS': {
             'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
             'charset': 'utf8mb4',
+            'ssl': {
+                'ca': '/etc/ssl/certs/ca-certificates.crt',
+            },
         }
     }
 }
