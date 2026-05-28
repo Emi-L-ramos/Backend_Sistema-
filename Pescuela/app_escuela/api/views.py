@@ -92,12 +92,10 @@ from .serializers import (
     RespuestaExamenTeoricoSerializer,
     PagoInstructorSerializer,
 )
-
 from .serializers import (
      PlanEstudioSerializer, ProgresoTemaSerializer, 
      NotificacionSerializer
  )
-
 from ..models import PlanEstudio, SubtemaPlanEstudio, ProgresoTema
 
 
@@ -1157,6 +1155,9 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             )
 
         return Response(list(resultado.values()))
+    
+
+
 
     @action(detail=False, methods=['post'], url_path='marcar')
     def marcar(self, request):
@@ -1223,6 +1224,26 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             return Response(
                 {'error': 'No puedes marcar asistencia de una clase que no te pertenece.'},
                 status=status.HTTP_403_FORBIDDEN
+            )
+
+    #Nuew funcionalidad ------------------------->
+
+        hoy = timezone.localdate()
+
+        if clase.fecha != hoy:
+            return Response(
+                {
+                    'error': 'Solo se puede marcar asistencia el día exacto de la clase.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if clase.estado not in ['pendiente', 'reprogramada']:
+            return Response(
+                {
+                    'error': 'Esta clase ya no está disponible para marcar asistencia.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
             )
 
         asistencia, created = Asistencia.objects.update_or_create(
@@ -1595,6 +1616,10 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'asistidas': asistidas,
             'total': total,
         })
+    
+        
+
+    
 
 class NotasViewSet(viewsets.ModelViewSet):
     queryset = Notas.objects.select_related(
@@ -2000,6 +2025,8 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
     
     # El resto de tus métodos (marcar_estudiante, marcar_instructor, etc.) se mantienen igual
     def normalizar_desbloqueo(self, matricula):
+        hoy = timezone.localdate()
+
         progresos = list(
             ProgresoTema.objects.filter(
                 matricula=matricula
@@ -2009,37 +2036,67 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
             )
         )
 
-        primera_clase = Calendario.objects.filter(
+        if not progresos:
+            return
+
+        clases = Calendario.objects.filter(
             matricula=matricula,
             es_examen=False
+        ).exclude(
+            estado='cancelada'
         ).order_by(
             'fecha',
             'hora_inicio'
-        ).first()
+        )
 
-        horas_por_dia = 1
+        primera_clase = clases.first()
 
-        if primera_clase and primera_clase.hora_inicio and primera_clase.hora_fin:
-            inicio = datetime.combine(date.today(), primera_clase.hora_inicio)
-            fin = datetime.combine(date.today(), primera_clase.hora_fin)
+        for progreso in progresos:
+            progreso.desbloqueado = False
+            progreso.save(update_fields=['desbloqueado'])
+
+        if not primera_clase:
+            return
+
+        if primera_clase.fecha > hoy:
+            return
+
+        if primera_clase.hora_inicio and primera_clase.hora_fin:
+            inicio = datetime.combine(primera_clase.fecha, primera_clase.hora_inicio)
+            fin = datetime.combine(primera_clase.fecha, primera_clase.hora_fin)
 
             horas_por_dia = int((fin - inicio).total_seconds() // 3600)
 
             if horas_por_dia <= 0:
                 horas_por_dia = 1
+        else:
+            horas_por_dia = 1
 
-        for progreso in progresos:
-            progreso.desbloqueado = False
-            progreso.save(update_fields=['desbloqueado'])
+        clases_hasta_hoy = clases.filter(
+            fecha__lte=hoy
+        ).count()
+
+        limite_temas = clases_hasta_hoy * horas_por_dia
 
         pendientes = [
             progreso for progreso in progresos
             if not progreso.completado
         ]
 
-        for progreso in pendientes[:horas_por_dia]:
-            progreso.desbloqueado = True
-            progreso.save(update_fields=['desbloqueado'])
+        completados = [
+            progreso for progreso in progresos
+            if progreso.completado
+        ]
+
+        cantidad_completados = len(completados)
+
+        inicio_bloque = cantidad_completados
+        fin_bloque = min(limite_temas, len(progresos))
+
+        for progreso in progresos[inicio_bloque:fin_bloque]:
+            if not progreso.completado:
+                progreso.desbloqueado = True
+                progreso.save(update_fields=['desbloqueado'])
 
 
     def _actualizar_progreso(self, progreso):
@@ -2267,36 +2324,13 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
 
         matricula = get_object_or_404(Matricula, id=matricula_id)
 
-        ultimo_completado = ProgresoTema.objects.filter(
-            matricula=matricula,
-            completado=True,
-            fecha_completado__isnull=False,
-        ).order_by(
-            '-fecha_completado'
-        ).first()
-
-        if not ultimo_completado:
-            self.normalizar_desbloqueo(matricula)
-
-            return Response({
-                'success': True,
-                'message': 'Desbloqueos actualizados.'
-            })
-
-        ahora = timezone.now()
-
-        if ahora - ultimo_completado.fecha_completado >= timedelta(hours=24):
-            self.normalizar_desbloqueo(matricula)
-
-            return Response({
-                'success': True,
-                'message': 'Nuevos temas desbloqueados.'
-            })
+        self.normalizar_desbloqueo(matricula)
 
         return Response({
             'success': True,
-            'message': 'Aún no corresponde desbloquear nuevos temas.'
+            'message': 'Desbloqueos actualizados correctamente.'
         })
+
 
 
 

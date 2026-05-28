@@ -4,6 +4,8 @@ Django settings for Pescuela project.
 
 import os
 from pathlib import Path
+from dotenv import load_dotenv  # 1. Importa la función
+load_dotenv()  # 2. Carga las variables del archivo .env
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -11,10 +13,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-5zz7xfden4ks^m$1m!ggx6%&(74o(g9#rw8dtg^*cx(-zult-!'
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
+# SECRET_KEY = os.environ.get('SECRET_KEY')
 
+# SECURITY WARNING: don't run with debug turned on in production!
+DEBUG = os.environ.get('DEBUG') == 'True'
 # ✅ AGREGAR localhost y 127.0.0.1 para desarrollo
+
+
 ALLOWED_HOSTS = [
     "localhost",
     "127.0.0.1",
