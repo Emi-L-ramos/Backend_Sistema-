@@ -689,6 +689,39 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             'count': citas.count(),
             'fecha': hoy.isoformat(),
         })
+    
+    @action(detail=True, methods=['post'], url_path='completar-examen')
+    def completar_examen(self, request, pk=None):
+        calendario = self.get_object()
+
+        if not calendario.es_examen:
+            return Response(
+                {'error': 'Esta cita no corresponde a un examen policial.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if calendario.estado == 'completada':
+            return Response(
+                {'error': 'Este examen ya fue marcado como completado.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            calendario.estado = 'completada'
+            calendario.save(update_fields=['estado'])
+
+            matricula = calendario.matricula
+            estudiante = matricula.estudiante
+
+            matricula.estado = 'finalizado'
+            matricula.save(update_fields=['estado'])
+
+            desactivar_usuarios_estudiante(estudiante)
+
+        return Response({
+            'message': 'Examen policial completado. El estudiante fue desactivado correctamente.',
+            'calendario': CalendarioSerializer(calendario).data,
+        })
 
     @action(detail=False, methods=['post'], url_path='crear-bloque')
     def crear_bloque_citas(self, request):
