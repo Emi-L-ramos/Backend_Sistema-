@@ -92,12 +92,10 @@ from .serializers import (
     RespuestaExamenTeoricoSerializer,
     PagoInstructorSerializer,
 )
-
 from .serializers import (
      PlanEstudioSerializer, ProgresoTemaSerializer, 
      NotificacionSerializer
  )
-
 from ..models import PlanEstudio, SubtemaPlanEstudio, ProgresoTema
 
 

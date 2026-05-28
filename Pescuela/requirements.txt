@@ -16,6 +16,7 @@ pillow==12.2.0
 pydotplus==2.0.2
 PyJWT==2.12.1
 pyparsing==3.3.2
+python-decouple==3.8
 python-dotenv==1.2.2
 redis==7.4.0
 sqlparse==0.5.5
