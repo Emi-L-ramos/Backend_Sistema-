@@ -464,7 +464,7 @@ class MatriculaSerializer(serializers.ModelSerializer):
                     matricula=matricula,
                     tema=tema,
                     orden_general=orden_general,
-                    desbloqueado=orden_general == 1,
+                    desbloqueado=False,
                     estudiante_completado=False,
                     instructor_completado=False,
                     completado=False,
