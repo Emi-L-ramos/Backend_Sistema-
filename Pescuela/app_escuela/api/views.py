@@ -1631,67 +1631,46 @@ class DashboardGananciasView(APIView):
     def get(self, request):
         try:
             hoy = datetime.now().date()
-            
-            # Generar últimos 6 meses (desde hace 5 meses hasta el actual)
+
+            anio_param = request.query_params.get('anio')
+
+            try:
+                anio = int(anio_param) if anio_param else hoy.year
+            except ValueError:
+                anio = hoy.year
+
             meses_resultado = []
-            fechas_meses = []
-            
-            for i in range(5, -1, -1):
-                # Calcular fecha del mes
-                if i == 0:
-                    fecha_mes = hoy.replace(day=1)
-                else:
-                    mes_anterior = hoy.month - i
-                    año_anterior = hoy.year
-                    if mes_anterior <= 0:
-                        mes_anterior += 12
-                        año_anterior -= 1
-                    fecha_mes = datetime(año_anterior, mes_anterior, 1).date()
-                
-                mes_str = fecha_mes.strftime('%Y-%m')
-                fechas_meses.append({
-                    'fecha': fecha_mes,
-                    'mes_str': mes_str,
-                    'nombre_mes': self._get_nombre_mes(fecha_mes.month)
-                })
-            
-            # Para cada mes, calcular ganancias y matriculados
-            for fecha_info in fechas_meses:
-                fecha_mes = fecha_info['fecha']
-                # Calcular fin del mes
-                if fecha_mes.month == 12:
-                    fecha_fin = datetime(fecha_mes.year + 1, 1, 1).date()
-                else:
-                    fecha_fin = datetime(fecha_mes.year, fecha_mes.month + 1, 1).date()
-                
-                # Ganancias del mes
+
+            for mes in range(1, 13):
                 total_ganancias = Recibo.objects.filter(
-                    fecha_pago__year=fecha_mes.year,
-                    fecha_pago__month=fecha_mes.month,
+                    fecha_pago__year=anio,
+                    fecha_pago__month=mes,
                     tipo_pago__in=['completo', 'anticipo']
-                ).aggregate(total=Sum('monto_pagado'))['total'] or Decimal('0')
-                
-                # Matriculados del mes
+                ).aggregate(
+                    total=Sum('monto_pagado')
+                )['total'] or Decimal('0')
+
                 total_matriculados = Recibo.objects.filter(
-                    fecha_pago__year=fecha_mes.year,
-                    fecha_pago__month=fecha_mes.month,
+                    fecha_pago__year=anio,
+                    fecha_pago__month=mes,
                     tipo_pago__in=['completo', 'beneficio']
-                ).values('matricula').distinct().count()
-                
-                if total_ganancias > 0 or total_matriculados > 0:
-                    meses_resultado.append({
-                        'mes': fecha_info['mes_str'],
-                        'total': float(total_ganancias),
-                        'matriculados': total_matriculados
-                    })
-            
+                ).values(
+                    'matricula'
+                ).distinct().count()
+
+                meses_resultado.append({
+                    'mes': f'{anio}-{mes:02d}',
+                    'total': float(total_ganancias),
+                    'matriculados': total_matriculados,
+                })
+
             return Response(meses_resultado)
-            
+
         except Exception as e:
             print(f"Error en DashboardGananciasView: {str(e)}")
             import traceback
             traceback.print_exc()
-            # Retornar error detallado para depuración
+
             return Response(
                 {'error': str(e), 'tipo': type(e).__name__},
                 status=500
