@@ -1039,6 +1039,9 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             )
 
         return Response(list(resultado.values()))
+    
+
+
 
     @action(detail=False, methods=['post'], url_path='marcar')
     def marcar(self, request):
@@ -1105,6 +1108,26 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             return Response(
                 {'error': 'No puedes marcar asistencia de una clase que no te pertenece.'},
                 status=status.HTTP_403_FORBIDDEN
+            )
+
+    #Nuew funcionalidad ------------------------->
+
+        hoy = timezone.localdate()
+
+        if clase.fecha != hoy:
+            return Response(
+                {
+                    'error': 'Solo se puede marcar asistencia el día exacto de la clase.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if clase.estado not in ['pendiente', 'reprogramada']:
+            return Response(
+                {
+                    'error': 'Esta clase ya no está disponible para marcar asistencia.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
             )
 
         asistencia, created = Asistencia.objects.update_or_create(
@@ -1477,6 +1500,10 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'asistidas': asistidas,
             'total': total,
         })
+    
+        
+
+    
 
 class NotasViewSet(viewsets.ModelViewSet):
     queryset = Notas.objects.select_related(
