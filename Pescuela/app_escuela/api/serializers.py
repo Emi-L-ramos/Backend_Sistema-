@@ -367,13 +367,19 @@ class InstructorSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         foto = getattr(obj, 'foto', None)
 
-        if foto and request:
-            try:
-                return request.build_absolute_uri(foto.url)
-            except Exception:
-                return None
+        if not foto:
+            return None
 
-        return None
+        try:
+            url = foto.url
+
+            if request:
+                url = request.build_absolute_uri(url)
+
+            return url.replace("http://", "https://")
+
+        except Exception:
+            return None
 
 
 class MatriculaSerializer(serializers.ModelSerializer):
