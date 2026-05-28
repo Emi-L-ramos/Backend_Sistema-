@@ -23,7 +23,6 @@ DEBUG = os.environ.get('DEBUG') == 'True'
 ALLOWED_HOSTS = [
     "localhost",
     "127.0.0.1",
-    "0.0.0.0",
     "backendsistema-production.up.railway.app",
 ]
 
@@ -132,10 +131,10 @@ DATABASES = {
 
 # ✅ CORS - Permitir frontend
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
+    "https://frontend-sistema-dgmt.vercel.app",
     "http://127.0.0.1:5173",
     "http://localhost:5174", # Del incoming
-    "https://frontend-sistema-dgmt.vercel.app",
+    
 ]
 
 CSRF_TRUSTED_ORIGINS = [
