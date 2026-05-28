@@ -138,6 +138,31 @@ def obtener_rango_horario(matricula):
 
     return mapeo.get(matricula.horario)
 
+def desactivar_usuario(usuario):
+    if not usuario:
+        return
+
+    usuario.is_active = False
+    usuario.save(update_fields=['is_active'])
+
+    Token.objects.filter(user=usuario).delete()
+
+
+def desactivar_usuarios_estudiante(estudiante):
+    usuarios = estudiante.usuarios.all()
+
+    for usuario in usuarios:
+        desactivar_usuario(usuario)
+
+    estudiante.activo = False
+    estudiante.save(update_fields=['activo'])
+
+
+def desactivar_usuarios_instructor(instructor):
+    usuarios = instructor.usuarios.all()
+
+    for usuario in usuarios:
+        desactivar_usuario(usuario)
 
 class RolViewSet(viewsets.ModelViewSet):
     queryset = Rol.objects.all()
@@ -168,6 +193,18 @@ class EstudianteViewSet(viewsets.ModelViewSet):
             )
 
         return queryset
+    
+    @action(detail=False, methods=['get'], url_path='resumen')
+    def resumen(self, request):
+        total = Estudiante.objects.count()
+        activos = Estudiante.objects.filter(activo=True).count()
+        inactivos = Estudiante.objects.filter(activo=False).count()
+
+        return Response({
+            'total': total,
+            'activos': activos,
+            'inactivos': inactivos,
+        })
 
 class PlanEstudioViewSet(viewsets.ModelViewSet):
     queryset = PlanEstudio.objects.prefetch_related(
@@ -233,6 +270,37 @@ class InstructorViewSet(viewsets.ModelViewSet):
     serializer_class = InstructorSerializer
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        queryset = Instructor.objects.all().order_by('-id')
+        activo = self.request.query_params.get('activo')
+
+        if activo == 'true':
+            queryset = queryset.filter(activo=True)
+
+        if activo == 'false':
+            queryset = queryset.filter(activo=False)
+
+        return queryset
+
+    @action(detail=True, methods=['post'], url_path='despedir')
+    def despedir(self, request, pk=None):
+        instructor = self.get_object()
+
+        fecha_salida = request.data.get('fecha_salida') or timezone.now().date()
+        motivo_salida = request.data.get('motivo_salida') or 'Instructor desactivado por administración.'
+
+        instructor.fecha_salida = fecha_salida
+        instructor.motivo_salida = motivo_salida
+        instructor.activo = False
+        instructor.save(update_fields=['fecha_salida', 'motivo_salida', 'activo'])
+
+        desactivar_usuarios_instructor(instructor)
+
+        return Response({
+            'message': 'Instructor desactivado correctamente. Su usuario ya no puede acceder.',
+            'instructor': self.get_serializer(instructor).data
+        })
 
 
 class MatriculaViewSet(viewsets.ModelViewSet):
@@ -562,6 +630,23 @@ class CalendarioViewSet(viewsets.ModelViewSet):
     filterset_fields = ['instructor', 'fecha']
     permission_classes = [IsAuthenticated]
 
+    def perform_update(self, serializer):
+        instancia_anterior = self.get_object()
+        calendario = serializer.save()
+
+        if (
+            calendario.es_examen
+            and calendario.estado == 'completada'
+            and instancia_anterior.estado != 'completada'
+        ):
+            matricula = calendario.matricula
+            estudiante = matricula.estudiante
+
+            matricula.estado = 'finalizado'
+            matricula.save(update_fields=['estado'])
+
+            desactivar_usuarios_estudiante(estudiante)
+
     def get_queryset(self):
         user = self.request.user
         qs = self.queryset
@@ -886,15 +971,15 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 status=400
             )
 
-        examen_existente = Calendario.objects.filter(
+        cantidad_examenes = Calendario.objects.filter(
             matricula=matricula,
             es_examen=True,
-        ).exists()
+        ).count()
 
-        if examen_existente:
+        if cantidad_examenes >= 3:
             return Response(
                 {
-                    'error': 'Este estudiante ya tiene examen policial asignado.'
+                    'error': 'Este estudiante ya tiene el máximo de 3 exámenes policiales asignados.'
                 },
                 status=400
             )
@@ -1625,6 +1710,13 @@ def login(request):
     username = request.data.get('username')
     password = request.data.get('password')
 
+    usuario_existente = Usuario.objects.filter(username=username).first()
+
+    if usuario_existente and not usuario_existente.is_active:
+        return Response({
+            'error': 'Este usuario está desactivado. Contacte al administrador.'
+        }, status=403)
+
     user = authenticate(username=username, password=password)
 
     if not user:
@@ -1632,20 +1724,22 @@ def login(request):
             'error': 'Credenciales inválidas'
         }, status=401)
 
+    if not user.is_active:
+        return Response({
+            'error': 'Este usuario está desactivado. Contacte al administrador.'
+        }, status=403)
+
     token, created = Token.objects.get_or_create(user=user)
 
     return Response({
         'token': token.key,
-        'user': {
-            'id': user.id,
-            'username': user.username,
-            'email': user.email,
-            'first_name': user.first_name,
-            'last_name': user.last_name,
-            'rol': user.rol.nombre if user.rol else 'sin rol',
-        }
+        'user_id': user.id,
+        'username': user.username,
+        'email': user.email,
+        'first_name': user.first_name,
+        'last_name': user.last_name,
+        'rol': user.rol.nombre if user.rol else 'sin rol',
     })
-
 
 from django.db.models import Sum, Count, Q
 from datetime import datetime, timedelta
@@ -1658,67 +1752,46 @@ class DashboardGananciasView(APIView):
     def get(self, request):
         try:
             hoy = datetime.now().date()
-            
-            # Generar últimos 6 meses (desde hace 5 meses hasta el actual)
+
+            anio_param = request.query_params.get('anio')
+
+            try:
+                anio = int(anio_param) if anio_param else hoy.year
+            except ValueError:
+                anio = hoy.year
+
             meses_resultado = []
-            fechas_meses = []
-            
-            for i in range(5, -1, -1):
-                # Calcular fecha del mes
-                if i == 0:
-                    fecha_mes = hoy.replace(day=1)
-                else:
-                    mes_anterior = hoy.month - i
-                    año_anterior = hoy.year
-                    if mes_anterior <= 0:
-                        mes_anterior += 12
-                        año_anterior -= 1
-                    fecha_mes = datetime(año_anterior, mes_anterior, 1).date()
-                
-                mes_str = fecha_mes.strftime('%Y-%m')
-                fechas_meses.append({
-                    'fecha': fecha_mes,
-                    'mes_str': mes_str,
-                    'nombre_mes': self._get_nombre_mes(fecha_mes.month)
-                })
-            
-            # Para cada mes, calcular ganancias y matriculados
-            for fecha_info in fechas_meses:
-                fecha_mes = fecha_info['fecha']
-                # Calcular fin del mes
-                if fecha_mes.month == 12:
-                    fecha_fin = datetime(fecha_mes.year + 1, 1, 1).date()
-                else:
-                    fecha_fin = datetime(fecha_mes.year, fecha_mes.month + 1, 1).date()
-                
-                # Ganancias del mes
+
+            for mes in range(1, 13):
                 total_ganancias = Recibo.objects.filter(
-                    fecha_pago__year=fecha_mes.year,
-                    fecha_pago__month=fecha_mes.month,
+                    fecha_pago__year=anio,
+                    fecha_pago__month=mes,
                     tipo_pago__in=['completo', 'anticipo']
-                ).aggregate(total=Sum('monto_pagado'))['total'] or Decimal('0')
-                
-                # Matriculados del mes
+                ).aggregate(
+                    total=Sum('monto_pagado')
+                )['total'] or Decimal('0')
+
                 total_matriculados = Recibo.objects.filter(
-                    fecha_pago__year=fecha_mes.year,
-                    fecha_pago__month=fecha_mes.month,
+                    fecha_pago__year=anio,
+                    fecha_pago__month=mes,
                     tipo_pago__in=['completo', 'beneficio']
-                ).values('matricula').distinct().count()
-                
-                if total_ganancias > 0 or total_matriculados > 0:
-                    meses_resultado.append({
-                        'mes': fecha_info['mes_str'],
-                        'total': float(total_ganancias),
-                        'matriculados': total_matriculados
-                    })
-            
+                ).values(
+                    'matricula'
+                ).distinct().count()
+
+                meses_resultado.append({
+                    'mes': f'{anio}-{mes:02d}',
+                    'total': float(total_ganancias),
+                    'matriculados': total_matriculados,
+                })
+
             return Response(meses_resultado)
-            
+
         except Exception as e:
             print(f"Error en DashboardGananciasView: {str(e)}")
             import traceback
             traceback.print_exc()
-            # Retornar error detallado para depuración
+
             return Response(
                 {'error': str(e), 'tipo': type(e).__name__},
                 status=500

@@ -120,6 +120,7 @@ class Instructor(models.Model):
     fecha_ingreso = models.DateField(blank=True, null=True)
     fecha_salida = models.DateField(blank=True, null=True)
     motivo_salida = models.TextField(blank=True, null=True)
+    activo = models.BooleanField(default=True)
     infracciones_resoluciones = models.TextField(blank=True, null=True)
 
     def __str__(self):
@@ -162,6 +163,7 @@ class Matricula(models.Model):
     ESTADOS = [
         ('pendiente', 'Pendiente'),
         ('matriculado', 'Matriculado'),
+        ('finalizado', 'Finalizado'),
     ]
     
     MODALIDADES = [
@@ -430,6 +432,7 @@ class PlanEstudio(models.Model):
     )
 
     activo = models.BooleanField(default=True)
+    fecha_creacion = models.DateTimeField(auto_now_add=True, null=True, blank=True)
 
     class Meta:
         verbose_name = "Plan de Estudio"
