@@ -7,6 +7,8 @@ from pathlib import Path
 from dotenv import load_dotenv  # 1. Importa la función
 load_dotenv()  # 2. Carga las variables del archivo .env
 
+DEBUG = True
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
