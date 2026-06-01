@@ -490,7 +490,6 @@ class SubtemaPlanEstudio(models.Model):
     
 
 
-
    # models.py
 
 
@@ -501,13 +500,11 @@ class ProgresoTema(models.Model):
         on_delete=models.CASCADE,
         related_name='progresos_temas'
     )
-
     tema = models.ForeignKey(
         'TemaPlanEstudio',
         on_delete=models.CASCADE,
         related_name='progresos_estudiantes'
     )
-
     orden_general = models.IntegerField(default=0)
 
     estudiante_completado = models.BooleanField(default=False)
