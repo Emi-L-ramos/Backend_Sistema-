@@ -4247,8 +4247,6 @@ class PerfilView(APIView):
 
             data["instructores"] = [
                 self.serializar_instructor(request, instructor)
-                archivos_temporales = []
-
                 for instructor in instructores
             ]
 
