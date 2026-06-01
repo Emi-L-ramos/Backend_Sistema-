@@ -90,6 +90,7 @@ class Instructor(models.Model):
     nombre = models.CharField(max_length=30)
     apellido = models.CharField(max_length=30)
     foto = models.ImageField(upload_to='instructores/', blank=True, null=True)
+    foto_base64 = models.TextField(blank=True, null=True)
     numero_telefono = models.CharField(max_length=20, blank=True, null=True)
     direccion = models.CharField(max_length=200, blank=True, null=True)
     categoria_instructor = models.CharField(
