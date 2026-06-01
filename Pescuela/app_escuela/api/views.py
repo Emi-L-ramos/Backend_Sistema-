@@ -9,7 +9,7 @@ from decimal import Decimal
 from decimal import Decimal
 from urllib import request
 from django.db import models
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework import serializers
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from django.db import transaction
@@ -473,7 +473,7 @@ class InstructorViewSet(viewsets.ModelViewSet):
     queryset = Instructor.objects.all()
     serializer_class = InstructorSerializer
     permission_classes = [IsAuthenticated]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
