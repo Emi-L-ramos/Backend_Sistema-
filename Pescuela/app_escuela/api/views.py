@@ -1533,7 +1533,7 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        clases = Calendario.objects.select_related(
+        clases_base = Calendario.objects.select_related(
             'matricula',
             'matricula__estudiante',
             'instructor'
