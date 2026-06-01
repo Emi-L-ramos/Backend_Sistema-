@@ -4391,6 +4391,7 @@ def exportar_reporte_instructores_policial(request):
     fila = fila_inicio
 
     imagenes_conservar = []
+    archivos_temporales = []
 
     for imagen_excel in ws._images:
         try:
