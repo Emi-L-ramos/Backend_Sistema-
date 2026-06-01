@@ -232,7 +232,7 @@ class CategoriaVehiculoViewSet(viewsets.ModelViewSet):
     queryset = CategoriaVehiculo.objects.all()
     serializer_class = CategoriaVehiculoSerializer
     permission_classes = [IsAuthenticated]
-     def create(self, request, *args, **kwargs):
+    def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
                 {'error': 'No tienes permiso para crear este registro.'},
@@ -474,7 +474,7 @@ class InstructorViewSet(viewsets.ModelViewSet):
     serializer_class = InstructorSerializer
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
-     def create(self, request, *args, **kwargs):
+    def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
                 {'error': 'No tienes permiso para crear este registro.'},
@@ -859,7 +859,7 @@ class ReciboViewSet(viewsets.ModelViewSet):
     ).all()
     serializer_class = ReciboSerializer
     permission_classes = [IsAuthenticated]
-     def get_queryset(self):
+    def get_queryset(self):
         user = self.request.user
 
         queryset = self.queryset
