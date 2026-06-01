@@ -3,6 +3,8 @@ import math
 import openpyxl
 import logging
 import os
+import base64
+import tempfile
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -181,8 +183,41 @@ def desactivar_usuarios_instructor(instructor):
     for usuario in usuarios:
         desactivar_usuario(usuario)
 
+def obtener_foto_instructor(instructor):
+    if not instructor:
+        return None
+
+    return getattr(instructor, "foto_base64", None)
 
 
+def crear_archivo_temporal_desde_base64(foto_base64):
+    if not foto_base64:
+        return None
+
+    try:
+        formato, imgstr = foto_base64.split(";base64,")
+        extension = formato.split("/")[-1]
+
+        archivo = tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=f".{extension}"
+        )
+
+        archivo.write(base64.b64decode(imgstr))
+        archivo.close()
+
+        return archivo.name
+
+    except Exception:
+        return None
+    
+def obtener_ruta_foto_instructor_para_excel(instructor):
+    if not instructor:
+        return None
+
+    return crear_archivo_temporal_desde_base64(
+        getattr(instructor, "foto_base64", None)
+    )
 
 class RolViewSet(viewsets.ModelViewSet):
     queryset = Rol.objects.all()
@@ -4148,15 +4183,7 @@ class PerfilView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get_foto_url(self, request, instructor):
-        foto = getattr(instructor, 'foto', None)
-
-        if foto:
-            try:
-                return request.build_absolute_uri(foto.url)
-            except Exception:
-                return None
-
-        return None
+        return obtener_foto_instructor(instructor)
 
     def serializar_instructor(self, request, instructor):
         return {
@@ -4220,6 +4247,8 @@ class PerfilView(APIView):
 
             data["instructores"] = [
                 self.serializar_instructor(request, instructor)
+                archivos_temporales = []
+
                 for instructor in instructores
             ]
 
@@ -4412,22 +4441,21 @@ def exportar_reporte_instructores_policial(request):
 
         ws.cell(row=fila, column=1, value=index)
 
-        if instructor.foto:
+        ruta_foto = obtener_ruta_foto_instructor_para_excel(instructor)
+
+        if ruta_foto:
+            archivos_temporales.append(ruta_foto)
 
             try:
-                ruta_foto = instructor.foto.path
+                imagen = ExcelImage(ruta_foto)
 
-                if os.path.exists(ruta_foto):
+                imagen.width = 42
+                imagen.height = 42
 
-                    imagen = ExcelImage(ruta_foto)
+                ws.row_dimensions[fila].height = 48
+                ws.column_dimensions['B'].width = 10
 
-                    imagen.width = 42
-                    imagen.height = 42
-
-                    ws.row_dimensions[fila].height = 48
-                    ws.column_dimensions['B'].width = 10
-
-                    ws.add_image(imagen, f'B{fila}')
+                ws.add_image(imagen, f'B{fila}')
 
             except Exception:
                 pass
@@ -4938,7 +4966,15 @@ def exportar_reporte_instructores_policial(request):
         'Content-Disposition'
     ] = 'attachment; filename="INFORME_TRANSITO_POLICIA_NAC.xlsm"'
 
-    wb.save(response)
+    try:
+        wb.save(response)
+    finally:
+        for ruta in archivos_temporales:
+            try:
+                if ruta and os.path.exists(ruta):
+                    os.remove(ruta)
+            except Exception:
+                pass
 
     return response
 

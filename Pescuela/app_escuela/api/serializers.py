@@ -350,8 +350,6 @@ class InstructorSerializer(serializers.ModelSerializer):
     nombre_completo = serializers.SerializerMethodField()
     categoria_nombre = serializers.SerializerMethodField()
 
-    foto_url = serializers.SerializerMethodField()
-
     class Meta:
         model = Instructor
         fields = '__all__'
@@ -359,27 +357,9 @@ class InstructorSerializer(serializers.ModelSerializer):
     def get_nombre_completo(self, obj):
         nombre = f"{obj.nombre or ''} {obj.apellido or ''}".strip()
         return nombre or f"Instructor {obj.id}"
-    
+
     def get_categoria_nombre(self, obj):
         return obj.categoria_instructor or ""
-
-    def get_foto_url(self, obj):
-        request = self.context.get('request')
-        foto = getattr(obj, 'foto', None)
-
-        if not foto:
-            return None
-
-        try:
-            url = foto.url
-
-            if request:
-                url = request.build_absolute_uri(url)
-
-            return url.replace("http://", "https://")
-
-        except Exception:
-            return None
 
 
 class MatriculaSerializer(serializers.ModelSerializer):
