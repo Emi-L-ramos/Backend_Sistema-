@@ -880,17 +880,18 @@ def saldo(request):
     })
 
 class ReciboViewSet(viewsets.ModelViewSet):
-    queryset = Recibo.objects.select_related(
-        'matricula',
-        'matricula__estudiante',
-     
-    ).all()
+    queryset = Recibo.objects.all()
     serializer_class = ReciboSerializer
     permission_classes = [IsAuthenticated]
+
     def get_queryset(self):
         user = self.request.user
 
-        queryset = self.queryset
+        queryset = Recibo.objects.select_related(
+            'matricula',
+            'matricula__estudiante',
+            'valor_curso',
+        ).all().order_by('-id')
 
         if es_admin(user):
             return queryset
@@ -937,10 +938,6 @@ class ReciboViewSet(viewsets.ModelViewSet):
             )
 
         return super().destroy(request, *args, **kwargs)
-    
-
-   
-
 
 class UserViewSet(viewsets.ModelViewSet):
     queryset = Usuario.objects.select_related(
