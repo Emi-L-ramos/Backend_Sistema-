@@ -444,64 +444,57 @@ class ValorCursoViewSet(viewsets.ModelViewSet):
     serializer_class = ValorCursoSerializer
     permission_classes = [IsAuthenticated]
 
+    def create(self, request, *args, **kwargs):
+        if not es_admin(request.user):
+            return Response(
+                {'error': 'No tienes permiso para crear este registro.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        if not es_admin(request.user):
+            return Response(
+                {'error': 'No tienes permiso para editar este registro.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        if not es_admin(request.user):
+            return Response(
+                {'error': 'No tienes permiso para editar este registro.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if not es_admin(request.user):
+            return Response(
+                {'error': 'No tienes permiso para eliminar este registro.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return super().destroy(request, *args, **kwargs)
+
     def get_queryset(self):
         queryset = ValorCurso.objects.all().order_by('-fecha_modificacion')
         activo = self.request.query_params.get('activo')
         tipo_curso = self.request.query_params.get('tipo_curso')
 
-        def create(self, request, *args, **kwargs):
-            if not es_admin(request.user):
-                return Response(
-                    {'error': 'No tienes permiso para crear este registro.'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+        if activo is not None:
+            if activo.lower() == 'true':
+                queryset = queryset.filter(activo=True)
+            elif activo.lower() == 'false':
+                queryset = queryset.filter(activo=False)
 
-            return super().create(request, *args, **kwargs)
-    
-        def update(self, request, *args, **kwargs):
-            if not es_admin(request.user):
-                return Response(
-                    {'error': 'No tienes permiso para editar este registro.'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+        if tipo_curso:
+            queryset = queryset.filter(tipo_curso=tipo_curso)
 
-            return super().update(request, *args, **kwargs)
-
-
-        def partial_update(self, request, *args, **kwargs):
-            if not es_admin(request.user):
-                return Response(
-                    {'error': 'No tienes permiso para editar este registro.'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-
-            return super().partial_update(request, *args, **kwargs)
-
-
-        def destroy(self, request, *args, **kwargs):
-            if not es_admin(request.user):
-                return Response(
-                    {'error': 'No tienes permiso para eliminar este registro.'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-
-            return super().destroy(request, *args, **kwargs)
-    
-        def get_queryset(self):
-            queryset = ValorCurso.objects.all().order_by('-fecha_modificacion')
-            activo = self.request.query_params.get('activo')
-            tipo_curso = self.request.query_params.get('tipo_curso')
-
-            if activo is not None:
-                if activo.lower() == 'true':
-                    queryset = queryset.filter(activo=True)
-                elif activo.lower() == 'false':
-                    queryset = queryset.filter(activo=False)
-
-            if tipo_curso:
-                queryset = queryset.filter(tipo_curso=tipo_curso)
-
-            return queryset
+        return queryset
 
 
 class InstructorViewSet(viewsets.ModelViewSet):
