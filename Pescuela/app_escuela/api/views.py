@@ -174,14 +174,11 @@ def desactivar_usuarios_estudiante(estudiante):
     estudiante.activo = False
     estudiante.save(update_fields=['activo'])
 
-
 def desactivar_usuarios_instructor(instructor):
     usuarios = instructor.usuarios.all()
 
     for usuario in usuarios:
         desactivar_usuario(usuario)
-
-
 
 
 class RolViewSet(viewsets.ModelViewSet):
@@ -227,12 +224,11 @@ class RolViewSet(viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
 
-
 class CategoriaVehiculoViewSet(viewsets.ModelViewSet):
     queryset = CategoriaVehiculo.objects.all()
     serializer_class = CategoriaVehiculoSerializer
     permission_classes = [IsAuthenticated]
-     def create(self, request, *args, **kwargs):
+    def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
                 {'error': 'No tienes permiso para crear este registro.'},
@@ -269,7 +265,6 @@ class CategoriaVehiculoViewSet(viewsets.ModelViewSet):
             )
 
         return super().destroy(request, *args, **kwargs)
-
 
 class EstudianteViewSet(viewsets.ModelViewSet):
     queryset = Estudiante.objects.all()
@@ -312,6 +307,7 @@ class EstudianteViewSet(viewsets.ModelViewSet):
 
         return queryset
     
+     
     @action(detail=False, methods=['get'], url_path='resumen')
     def resumen(self, request):
         total = Estudiante.objects.count()
@@ -408,73 +404,68 @@ class ValorCursoViewSet(viewsets.ModelViewSet):
     queryset = ValorCurso.objects.all().order_by('-fecha_modificacion')
     serializer_class = ValorCursoSerializer
     permission_classes = [IsAuthenticated]
+    def create(self, request, *args, **kwargs):
+        if not es_admin(request.user):
+            return Response(
+                {'error': 'No tienes permiso para crear este registro.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return super().create(request, *args, **kwargs)
+    
+    def update(self, request, *args, **kwargs):
+        if not es_admin(request.user):
+            return Response(
+                {'error': 'No tienes permiso para editar este registro.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return super().update(request, *args, **kwargs)
+
+
+    def partial_update(self, request, *args, **kwargs):
+        if not es_admin(request.user):
+            return Response(
+                {'error': 'No tienes permiso para editar este registro.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return super().partial_update(request, *args, **kwargs)
+
+
+    def destroy(self, request, *args, **kwargs):
+        if not es_admin(request.user):
+            return Response(
+                {'error': 'No tienes permiso para eliminar este registro.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return super().destroy(request, *args, **kwargs)
+
+        
 
     def get_queryset(self):
         queryset = ValorCurso.objects.all().order_by('-fecha_modificacion')
         activo = self.request.query_params.get('activo')
         tipo_curso = self.request.query_params.get('tipo_curso')
 
-        def create(self, request, *args, **kwargs):
-            if not es_admin(request.user):
-                return Response(
-                    {'error': 'No tienes permiso para crear este registro.'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+        if activo is not None:
+            if activo.lower() == 'true':
+                queryset = queryset.filter(activo=True)
+            elif activo.lower() == 'false':
+                queryset = queryset.filter(activo=False)
 
-            return super().create(request, *args, **kwargs)
-    
-        def update(self, request, *args, **kwargs):
-            if not es_admin(request.user):
-                return Response(
-                    {'error': 'No tienes permiso para editar este registro.'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+        if tipo_curso:
+            queryset = queryset.filter(tipo_curso=tipo_curso)
 
-            return super().update(request, *args, **kwargs)
-
-
-        def partial_update(self, request, *args, **kwargs):
-            if not es_admin(request.user):
-                return Response(
-                    {'error': 'No tienes permiso para editar este registro.'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-
-            return super().partial_update(request, *args, **kwargs)
-
-
-        def destroy(self, request, *args, **kwargs):
-            if not es_admin(request.user):
-                return Response(
-                    {'error': 'No tienes permiso para eliminar este registro.'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-
-            return super().destroy(request, *args, **kwargs)
-    
-        def get_queryset(self):
-            queryset = ValorCurso.objects.all().order_by('-fecha_modificacion')
-            activo = self.request.query_params.get('activo')
-            tipo_curso = self.request.query_params.get('tipo_curso')
-
-            if activo is not None:
-                if activo.lower() == 'true':
-                    queryset = queryset.filter(activo=True)
-                elif activo.lower() == 'false':
-                    queryset = queryset.filter(activo=False)
-
-            if tipo_curso:
-                queryset = queryset.filter(tipo_curso=tipo_curso)
-
-            return queryset
-
+        return queryset
 
 class InstructorViewSet(viewsets.ModelViewSet):
     queryset = Instructor.objects.all()
     serializer_class = InstructorSerializer
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
-     def create(self, request, *args, **kwargs):
+    def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
                 {'error': 'No tienes permiso para crear este registro.'},
@@ -523,7 +514,7 @@ class InstructorViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(activo=False)
 
         return queryset
-
+    
     @action(detail=True, methods=['post'], url_path='despedir')
     def despedir(self, request, pk=None):
         instructor = self.get_object()
@@ -542,6 +533,8 @@ class InstructorViewSet(viewsets.ModelViewSet):
             'message': 'Instructor desactivado correctamente. Su usuario ya no puede acceder.',
             'instructor': self.get_serializer(instructor).data
         })
+
+
 
 
 class MatriculaViewSet(viewsets.ModelViewSet):
@@ -631,11 +624,10 @@ class MatriculaViewSet(viewsets.ModelViewSet):
             )
 
         return super().destroy(request, *args, **kwargs)
-    
-
 
     @action(detail=False, methods=['get'], url_path='buscar-estudiante')
     def buscar_estudiante(self, request):
+
         if not es_admin(request.user):
             return Response(
                 {'error': 'No tienes permiso para buscar estudiantes.'},
@@ -855,11 +847,11 @@ class ReciboViewSet(viewsets.ModelViewSet):
     queryset = Recibo.objects.select_related(
         'matricula',
         'matricula__estudiante',
-     
     ).all()
     serializer_class = ReciboSerializer
     permission_classes = [IsAuthenticated]
-     def get_queryset(self):
+
+    def get_queryset(self):
         user = self.request.user
 
         queryset = self.queryset
@@ -913,8 +905,8 @@ class ReciboViewSet(viewsets.ModelViewSet):
 
    
 
-
 class UserViewSet(viewsets.ModelViewSet):
+    
     queryset = Usuario.objects.select_related(
         'rol',
         'estudiante',
@@ -978,6 +970,7 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='crear-estudiante')
     def crear_usuario_estudiante(self, request):
         matricula_id = request.data.get('matricula_id')
+
         if not es_admin(request.user):
             return Response(
                 {'error': 'Solo el administrador puede crear usuarios de estudiantes.'},
@@ -985,6 +978,7 @@ class UserViewSet(viewsets.ModelViewSet):
             )
         
         matricula_id = request.data.get('matricula_id')
+
 
         if not matricula_id:
             return Response(
@@ -1090,6 +1084,8 @@ class CalendarioViewSet(viewsets.ModelViewSet):
 
         return qs.none()
     
+
+    
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
@@ -1098,7 +1094,6 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             )
 
         return super().create(request, *args, **kwargs)
-
 
     @action(detail=False, methods=['get'], url_path='hoy')
     def citas_hoy(self, request):
@@ -1111,41 +1106,6 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             'results': serializer.data,
             'count': citas.count(),
             'fecha': hoy.isoformat(),
-        })
-    
- ## En la copia no me sale esta funcion
-    
-    @action(detail=True, methods=['post'], url_path='completar-examen')
-    def completar_examen(self, request, pk=None):
-        calendario = self.get_object()
-
-        if not calendario.es_examen:
-            return Response(
-                {'error': 'Esta cita no corresponde a un examen policial.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        if calendario.estado == 'completada':
-            return Response(
-                {'error': 'Este examen ya fue marcado como completado.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        with transaction.atomic():
-            calendario.estado = 'completada'
-            calendario.save(update_fields=['estado'])
-
-            matricula = calendario.matricula
-            estudiante = matricula.estudiante
-
-            matricula.estado = 'finalizado'
-            matricula.save(update_fields=['estado'])
-
-            desactivar_usuarios_estudiante(estudiante)
-
-        return Response({
-            'message': 'Examen policial completado. El estudiante fue desactivado correctamente.',
-            'calendario': CalendarioSerializer(calendario).data,
         })
 
     @action(detail=False, methods=['post'], url_path='crear-bloque')
@@ -1165,10 +1125,9 @@ class CalendarioViewSet(viewsets.ModelViewSet):
 
         if not es_admin(request.user):
             return Response(
-                {'error': 'Solo el administrador puede crear bloques de citas.'},
+                {'error': 'Solo el administrador puede crear bloques de clases.'},
                 status=status.HTTP_403_FORBIDDEN
             )
-
 
         if not rango:
             return Response(
@@ -1442,15 +1401,15 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 status=400
             )
 
-        cantidad_examenes = Calendario.objects.filter(
+        examen_existente = Calendario.objects.filter(
             matricula=matricula,
             es_examen=True,
-        ).count()
+        ).exists()
 
-        if cantidad_examenes:
+        if examen_existente:
             return Response(
                 {
-                    'error': 'Este estudiante ya tiene el máximo de 3 exámenes policiales asignados.'
+                    'error': 'Este estudiante ya tiene examen policial asignado.'
                 },
                 status=400
             )
@@ -1532,8 +1491,8 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        clases = Calendario.objects.select_related(
+
+        clases_base = Calendario.objects.select_related(
             'matricula',
             'matricula__estudiante',
             'instructor'
@@ -1547,11 +1506,12 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'hora_inicio'
         )
 
+
         if rol == 'instructor':
             if not user.instructor_id:
                 return Response([])
 
-            clases = clases.filter(
+            clases_base = clases_base.filter(
                 instructor_id=user.instructor_id
             )
 
@@ -1562,10 +1522,10 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             clases_base = clases_base.filter(
                 matricula__estudiante_id=user.estudiante_id
             )
-        
+
         elif rol not in ['admin', 'administrador'] and not user.is_staff and not user.is_superuser:
             return Response([])
-        
+
         matriculas_en_rango = clases_base.filter(
             fecha__gte=fecha_inicio,
             fecha__lte=fecha_fin
@@ -1582,7 +1542,6 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'fecha',
             'hora_inicio'
         )
-
 
         asistencias = Asistencia.objects.select_related(
             'As_estudiante',
@@ -1622,7 +1581,7 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 estado = 'pendiente'
                 asistencia_id = None
                 justificado_por_admin = False
-            
+
             en_rango = fecha_inicio <= clase.fecha <= fecha_fin
             es_hoy = clase.fecha == hoy
             es_pasado = clase.fecha < hoy
@@ -1637,8 +1596,6 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 and clase.instructor_id == user.instructor_id
             )
 
-              
-
             resultado[matricula_id]['asistencias'][str(clase.numero_clase)] = {
                 'id': clase.id,
                 'asistencia_id': asistencia_id,
@@ -1648,7 +1605,6 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 'numero_clase': clase.numero_clase,
                 'estado': estado,
                 'justificado_por_admin': justificado_por_admin,
-                #'observacion': observacion,
                 'km_inicial': asistencia.km_inicial if asistencia else None,
                 'km_final': asistencia.km_final if asistencia else None,
                 'km_recorridos': asistencia.km_recorridos if asistencia else 0,
@@ -1659,9 +1615,7 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 'es_futuro': es_futuro,
                 'puede_marcar': puede_marcar,
                 'bloqueado': not puede_marcar,
-
             }
-
 
         for item in resultado.values():
             asistencias_estudiante = item['asistencias'].values()
@@ -1687,9 +1641,6 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             )
 
         return Response(list(resultado.values()))
-    
-
-
 
     @action(detail=False, methods=['post'], url_path='marcar')
     def marcar(self, request):
@@ -1827,7 +1778,7 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 {'error': 'El usuario actual no tiene instructor asignado.'},
                 status=status.HTTP_403_FORBIDDEN
             )
-        
+
         if not asistencia_id:
             return Response(
                 {'error': 'Debe enviar la asistencia.'},
@@ -1845,7 +1796,7 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 {'error': 'Asistencia no encontrada.'},
                 status=status.HTTP_404_NOT_FOUND
             )
-        
+
         if asistencia.As_calendario.instructor_id != instructor_usuario.id:
             return Response(
                 {'error': 'No puedes finalizar kilometraje de una clase que no te pertenece.'},
@@ -1893,7 +1844,10 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'success': True,
             'message': 'Kilometraje final registrado.',
             'data': serializer.data
-        })   
+        })
+        
+
+
         
     @action(detail=True, methods=['post'], url_path='justificar')
     def justificar(self, request, pk=None):
@@ -2053,10 +2007,12 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
         user = request.user
         if es_admin(user):
             pass
+
         elif es_instructor(user):
             asistencias = asistencias.filter(
                 As_calendario__instructor_id=user.instructor_id
             )
+
         elif es_estudiante(user):
             asistencias = asistencias.filter(
                 As_estudiante_id=user.estudiante_id
@@ -2191,7 +2147,7 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'asistidas': asistidas,
             'total': total,
         })
-    
+
     @action(detail=False, methods=['get'], url_path='fechas-disponibles')
     def fechas_disponibles(self, request):
         user = request.user
@@ -2232,7 +2188,7 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             fecha.isoformat()
             for fecha in fechas
         ])
-    
+
 class NotasViewSet(viewsets.ModelViewSet):
     queryset = Notas.objects.select_related(
         'matricula',
@@ -2268,6 +2224,7 @@ class NotasViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         """Crear nota práctica asignando instructor y plan_de_estudio automáticamente"""
+
         if not Calendario.objects.filter(
             matricula=matricula,
             instructor=request.user.instructor,
@@ -2354,6 +2311,7 @@ class NotasViewSet(viewsets.ModelViewSet):
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def login(request):
@@ -2405,6 +2363,7 @@ class DashboardGananciasView(APIView):
                 {'error': 'No tienes permiso para ver información del dashboard.'},
                 status=status.HTTP_403_FORBIDDEN
             )
+        
         try:
             hoy = datetime.now().date()
 
@@ -2465,7 +2424,6 @@ class DashboardResumenView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-
 
         if not es_admin(request.user):
             return Response(
@@ -2966,7 +2924,6 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
             'success': True,
             'message': 'Desbloqueos actualizados correctamente.'
         })
-
 
 
 
@@ -4957,6 +4914,7 @@ class PagoInstructorViewSet(viewsets.ModelViewSet):
             )
 
         serializer.save()
+    
 
 class CargoInstitucionalViewSet(viewsets.ModelViewSet):
     queryset = CargoInstitucional.objects.all().order_by('tipo', 'nombre')
