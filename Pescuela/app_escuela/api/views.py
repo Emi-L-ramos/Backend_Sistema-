@@ -940,21 +940,22 @@ class ReciboViewSet(viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
 class UserViewSet(viewsets.ModelViewSet):
-    queryset = Usuario.objects.select_related(
-        'rol',
-        'estudiante',
-        'instructor',
-    ).all()
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
 
-        if es_admin(user):
-            return self.queryset
+        queryset = Usuario.objects.select_related(
+            'rol',
+            'estudiante',
+            'instructor',
+        ).all().order_by('id')
 
-        return self.queryset.filter(id=user.id)
+        if es_admin(user):
+            return queryset
+
+        return queryset.filter(id=user.id)
 
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
@@ -991,25 +992,34 @@ class UserViewSet(viewsets.ModelViewSet):
             )
 
         usuario = self.get_object()
-        instructor = getattr(usuario, 'instructor', None)
 
-        self.perform_destroy(usuario)
+        if usuario.id == request.user.id:
+            return Response(
+                {'error': 'No puedes eliminar tu propio usuario.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        if instructor:
+        instructor = usuario.instructor
+
+        usuario.delete()
+
+        if instructor and not instructor.usuarios.exists():
             instructor.delete()
 
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response(
+            {'message': 'Usuario eliminado correctamente.'},
+            status=status.HTTP_200_OK
+        )
 
     @action(detail=False, methods=['post'], url_path='crear-estudiante')
     def crear_usuario_estudiante(self, request):
         matricula_id = request.data.get('matricula_id')
+
         if not es_admin(request.user):
             return Response(
                 {'error': 'Solo el administrador puede crear usuarios de estudiantes.'},
                 status=status.HTTP_403_FORBIDDEN
             )
-        
-        matricula_id = request.data.get('matricula_id')
 
         if not matricula_id:
             return Response(
@@ -1031,7 +1041,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if matricula.estudiante.usuario:
+        if matricula.estudiante.usuarios.filter(rol__nombre__iexact='estudiante').exists():
             return Response(
                 {'error': 'Este estudiante ya tiene usuario.'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -1045,9 +1055,6 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
         usuario = serializer.save()
-
-        matricula.estudiante.usuario = usuario
-        matricula.estudiante.save(update_fields=['usuario'])
 
         return Response(
             self.get_serializer(usuario).data,
