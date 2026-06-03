@@ -38,7 +38,7 @@ from .views import ( ProgresoTemaViewSet, NotificacionViewSet
 router = DefaultRouter()
 
 router.register(r'roles', RolViewSet)
-router.register(r'usuarios', UserViewSet)
+router.register(r'usuarios', UserViewSet, basename='usuarios')
 router.register(r'estudiantes', EstudianteViewSet)
 router.register(r'instructores', InstructorViewSet)
 router.register(r'categorias', CategoriaVehiculoViewSet)
