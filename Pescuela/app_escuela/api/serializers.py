@@ -190,6 +190,24 @@ class TemaPlanEstudioSerializer(serializers.ModelSerializer):
         model = TemaPlanEstudio
         fields = ['id', 'titulo', 'orden', 'activo', 'subtemas']
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+
+        subtemas_activos = instance.subtemas.filter(
+            activo=True
+        ).order_by(
+            'orden',
+            'id'
+        )
+
+        data['subtemas'] = SubtemaPlanEstudioSerializer(
+            subtemas_activos,
+            many=True
+        ).data
+
+        return data
+
+
 class PlanEstudioSerializer(serializers.ModelSerializer):
     temas = TemaPlanEstudioSerializer(many=True, required=False)
 
@@ -203,6 +221,122 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
             'temas',
         ]
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+
+        temas_activos = instance.temas.filter(
+            activo=True
+        ).order_by(
+            'orden',
+            'id'
+        )
+
+        data['temas'] = TemaPlanEstudioSerializer(
+            temas_activos,
+            many=True
+        ).data
+
+        return data
+
+    def limpiar_texto(self, valor):
+        return str(valor or '').strip()
+
+    def obtener_o_crear_tema(self, plan, tema_data, index_tema):
+        tema_id = tema_data.get('id')
+        titulo_tema = self.limpiar_texto(tema_data.get('titulo'))
+
+        if not titulo_tema:
+            return None
+
+        tema = None
+
+        if tema_id:
+            tema = TemaPlanEstudio.objects.filter(
+                id=tema_id,
+                plan_estudio=plan
+            ).first()
+
+        if not tema:
+            tema = TemaPlanEstudio.objects.filter(
+                plan_estudio=plan,
+                titulo__iexact=titulo_tema
+            ).order_by(
+                '-activo',
+                'id'
+            ).first()
+
+        if tema:
+            tema.titulo = titulo_tema
+            tema.orden = tema_data.get('orden', index_tema)
+            tema.activo = True
+            tema.save()
+            return tema
+
+        return TemaPlanEstudio.objects.create(
+            plan_estudio=plan,
+            titulo=titulo_tema,
+            orden=tema_data.get('orden', index_tema),
+            activo=True,
+        )
+
+    def obtener_o_crear_subtema(self, tema, subtema_data, index_subtema):
+        subtema_id = subtema_data.get('id')
+        titulo_subtema = self.limpiar_texto(subtema_data.get('titulo'))
+
+        if not titulo_subtema:
+            return None
+
+        subtema = None
+
+        if subtema_id:
+            subtema = SubtemaPlanEstudio.objects.filter(
+                id=subtema_id,
+                tema=tema
+            ).first()
+
+        if not subtema:
+            subtema = SubtemaPlanEstudio.objects.filter(
+                tema=tema,
+                titulo__iexact=titulo_subtema
+            ).order_by(
+                '-activo',
+                'id'
+            ).first()
+
+        if subtema:
+            subtema.titulo = titulo_subtema
+            subtema.orden = subtema_data.get('orden', index_subtema)
+            subtema.activo = True
+            subtema.save()
+            return subtema
+
+        return SubtemaPlanEstudio.objects.create(
+            tema=tema,
+            titulo=titulo_subtema,
+            orden=subtema_data.get('orden', index_subtema),
+            activo=True,
+        )
+
+    def guardar_subtemas(self, tema, subtemas_data):
+        ids_subtemas_recibidos = []
+
+        for index_subtema, subtema_data in enumerate(subtemas_data, start=1):
+            subtema = self.obtener_o_crear_subtema(
+                tema,
+                subtema_data,
+                index_subtema
+            )
+
+            if subtema:
+                ids_subtemas_recibidos.append(subtema.id)
+
+        tema.subtemas.exclude(
+            id__in=ids_subtemas_recibidos
+        ).update(
+            activo=False
+        )
+
+    @transaction.atomic
     def create(self, validated_data):
         temas_data = validated_data.pop('temas', [])
 
@@ -211,103 +345,56 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
         for index_tema, tema_data in enumerate(temas_data, start=1):
             subtemas_data = tema_data.pop('subtemas', [])
 
-            tema = TemaPlanEstudio.objects.create(
-                plan_estudio=plan,
-                titulo=tema_data.get('titulo'),
-                orden=tema_data.get('orden', index_tema),
-                activo=tema_data.get('activo', True),
+            tema = self.obtener_o_crear_tema(
+                plan,
+                tema_data,
+                index_tema
             )
 
-            for index_subtema, subtema_data in enumerate(subtemas_data, start=1):
-                SubtemaPlanEstudio.objects.create(
-                    tema=tema,
-                    titulo=subtema_data.get('titulo'),
-                    orden=subtema_data.get('orden', index_subtema),
-                    activo=subtema_data.get('activo', True),
+            if tema:
+                self.guardar_subtemas(
+                    tema,
+                    subtemas_data
                 )
 
         return plan
 
+    @transaction.atomic
     def update(self, instance, validated_data):
-        temas_data = validated_data.pop('temas', [])
+        temas_data = validated_data.pop('temas', None)
 
         instance.nombre = validated_data.get('nombre', instance.nombre)
         instance.tipo_curso = validated_data.get('tipo_curso', instance.tipo_curso)
         instance.activo = validated_data.get('activo', instance.activo)
         instance.save()
 
+        if temas_data is None:
+            return instance
+
         ids_temas_recibidos = []
 
         for index_tema, tema_data in enumerate(temas_data, start=1):
             subtemas_data = tema_data.pop('subtemas', [])
-            tema_id = tema_data.get('id')
 
-            if tema_id:
-                tema = TemaPlanEstudio.objects.filter(
-                    id=tema_id,
-                    plan_estudio=instance
-                ).first()
+            tema = self.obtener_o_crear_tema(
+                instance,
+                tema_data,
+                index_tema
+            )
 
-                if tema:
-                    tema.titulo = tema_data.get('titulo', tema.titulo)
-                    tema.orden = tema_data.get('orden', index_tema)
-                    tema.activo = tema_data.get('activo', True)
-                    tema.save()
-                else:
-                    tema = TemaPlanEstudio.objects.create(
-                        plan_estudio=instance,
-                        titulo=tema_data.get('titulo'),
-                        orden=tema_data.get('orden', index_tema),
-                        activo=tema_data.get('activo', True),
-                    )
-            else:
-                tema = TemaPlanEstudio.objects.create(
-                    plan_estudio=instance,
-                    titulo=tema_data.get('titulo'),
-                    orden=tema_data.get('orden', index_tema),
-                    activo=tema_data.get('activo', True),
-                )
+            if not tema:
+                continue
 
             ids_temas_recibidos.append(tema.id)
 
-            ids_subtemas_recibidos = []
-
-            for index_subtema, subtema_data in enumerate(subtemas_data, start=1):
-                subtema_id = subtema_data.get('id')
-
-                if subtema_id:
-                    subtema = SubtemaPlanEstudio.objects.filter(
-                        id=subtema_id,
-                        tema=tema
-                    ).first()
-
-                    if subtema:
-                        subtema.titulo = subtema_data.get('titulo', subtema.titulo)
-                        subtema.orden = subtema_data.get('orden', index_subtema)
-                        subtema.activo = subtema_data.get('activo', True)
-                        subtema.save()
-                    else:
-                        subtema = SubtemaPlanEstudio.objects.create(
-                            tema=tema,
-                            titulo=subtema_data.get('titulo'),
-                            orden=subtema_data.get('orden', index_subtema),
-                            activo=subtema_data.get('activo', True),
-                        )
-                else:
-                    subtema = SubtemaPlanEstudio.objects.create(
-                        tema=tema,
-                        titulo=subtema_data.get('titulo'),
-                        orden=subtema_data.get('orden', index_subtema),
-                        activo=subtema_data.get('activo', True),
-                    )
-
-                ids_subtemas_recibidos.append(subtema.id)
-
-            tema.subtemas.exclude(id__in=ids_subtemas_recibidos).update(
-                activo=False
+            self.guardar_subtemas(
+                tema,
+                subtemas_data
             )
 
-        instance.temas.exclude(id__in=ids_temas_recibidos).update(
+        instance.temas.exclude(
+            id__in=ids_temas_recibidos
+        ).update(
             activo=False
         )
 
@@ -962,24 +1049,56 @@ class NotasSerializer(serializers.ModelSerializer):
 
 # serializers.py
 
-# serializers.py
-
 class ProgresoTemaSerializer(serializers.ModelSerializer):
     estudiante_nombre = serializers.SerializerMethodField()
-    estudiante_cedula = serializers.SerializerMethodField()
-    tipo_curso = serializers.SerializerMethodField()
 
-    tema_titulo = serializers.SerializerMethodField()
-    tema_orden = serializers.SerializerMethodField()
+    estudiante_cedula = serializers.CharField(
+        source='matricula.estudiante.cedula',
+        read_only=True
+    )
 
-    plan_estudio_id = serializers.SerializerMethodField()
-    plan_estudio_nombre = serializers.SerializerMethodField()
+    tipo_curso = serializers.CharField(
+        source='matricula.tipo_curso',
+        read_only=True
+    )
 
-    matricula_id = serializers.SerializerMethodField()
-    matricula_fecha = serializers.SerializerMethodField()
-    matricula_estado = serializers.SerializerMethodField()
+    tema_titulo = serializers.CharField(
+        source='tema.titulo',
+        read_only=True
+    )
 
     subtemas = serializers.SerializerMethodField()
+    subtemas_count = serializers.SerializerMethodField()
+
+    tema_orden = serializers.IntegerField(
+        source='orden_general',
+        read_only=True
+    )
+
+    plan_estudio_id = serializers.IntegerField(
+        source='tema.plan_estudio.id',
+        read_only=True
+    )
+
+    plan_estudio_nombre = serializers.CharField(
+        source='tema.plan_estudio.nombre',
+        read_only=True
+    )
+
+    matricula_id = serializers.IntegerField(
+        source='matricula.id',
+        read_only=True
+    )
+
+    matricula_fecha = serializers.DateTimeField(
+        source='matricula.fecha_registro',
+        read_only=True
+    )
+
+    matricula_estado = serializers.CharField(
+        source='matricula.estado',
+        read_only=True
+    )
 
     ambos_checks = serializers.BooleanField(
         source='ambos_checks_completados',
@@ -992,7 +1111,7 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
             'id',
             'matricula',
             'tema',
-            'orden_general', 
+            'orden_general',
             'desbloqueado',
             'estudiante_completado',
             'instructor_completado',
@@ -1005,13 +1124,14 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
             'estudiante_cedula',
             'tipo_curso',
             'tema_titulo',
+            'subtemas',
+            'subtemas_count',
             'tema_orden',
             'plan_estudio_id',
             'plan_estudio_nombre',
             'matricula_id',
             'matricula_fecha',
             'matricula_estado',
-            'subtemas',
         ]
 
         read_only_fields = [
@@ -1021,81 +1141,37 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
         ]
 
     def get_estudiante_nombre(self, obj):
-        try:
-            return f"{obj.matricula.estudiante.nombre} {obj.matricula.estudiante.apellido}"
-        except Exception:
-            return None
-
-    def get_estudiante_cedula(self, obj):
-        try:
-            return obj.matricula.estudiante.cedula
-        except Exception:
-            return None
-
-    def get_tipo_curso(self, obj):
-        try:
-            return obj.matricula.tipo_curso
-        except Exception:
-            return None
-
-    def get_tema_titulo(self, obj):
-        try:
-            return obj.tema.titulo
-        except Exception:
-            return None
-
-    def get_tema_orden(self, obj):
-        return obj.orden_general
-
-    def get_plan_estudio_id(self, obj):
-        try:
-            return obj.tema.plan_estudio.id
-        except Exception:
-            return None
-
-    def get_plan_estudio_nombre(self, obj):
-        try:
-            return obj.tema.plan_estudio.nombre
-        except Exception:
-            return None
-
-    def get_matricula_id(self, obj):
-        try:
-            return obj.matricula.id
-        except Exception:
-            return None
-
-    def get_matricula_fecha(self, obj):
-        try:
-            return obj.matricula.fecha_registro
-        except Exception:
-            return None
-
-    def get_matricula_estado(self, obj):
-        try:
-            return obj.matricula.estado
-        except Exception:
-            return None
+        estudiante = obj.matricula.estudiante
+        return f"{estudiante.nombre or ''} {estudiante.apellido or ''}".strip()
 
     def get_subtemas(self, obj):
-        try:
-            subtemas = obj.tema.subtemas.filter(
-                activo=True
-            ).order_by(
-                'orden',
-                'id'
-            )
-
-            return [
-                {
-                    'id': subtema.id,
-                    'titulo': subtema.titulo,
-                    'orden': subtema.orden,
-                }
-                for subtema in subtemas
-            ]
-        except Exception:
+        if not obj.tema:
             return []
+
+        subtemas = obj.tema.subtemas.filter(
+            activo=True
+        ).order_by(
+            'orden',
+            'id'
+        )
+
+        return [
+            {
+                'id': subtema.id,
+                'orden': subtema.orden,
+                'titulo': subtema.titulo,
+                'activo': subtema.activo,
+            }
+            for subtema in subtemas
+        ]
+
+    def get_subtemas_count(self, obj):
+        if not obj.tema:
+            return 0
+
+        return obj.tema.subtemas.filter(
+            activo=True
+        ).count()
 
 
 class NotificacionSerializer(serializers.ModelSerializer):
