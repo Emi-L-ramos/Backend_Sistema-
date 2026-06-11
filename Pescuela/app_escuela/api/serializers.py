@@ -813,7 +813,7 @@ class CalendarioSerializer(serializers.ModelSerializer):
     horario = serializers.CharField(source='matricula.horario', read_only=True)
     tipo_curso = serializers.CharField(source='matricula.tipo_curso', read_only=True)
     modalidad = serializers.CharField(source='matricula.modalidad', read_only=True)
-    categoria = serializers.CharField(source='matricula.categoria.nombres', read_only=True)
+    categoria = serializers.CharField(source='matricula.categoria.nombre', read_only=True)
 
     class Meta:
         model = Calendario
