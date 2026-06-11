@@ -99,7 +99,7 @@ class Instructor(models.Model):
     )
     experiencia = models.TextField(blank=True, null=True)
     edad = models.PositiveIntegerField(blank=True, null=True)
-    cedula = cedula = models.CharField(max_length=20, unique=True, blank=True, null=True)
+    cedula = models.CharField(max_length=20, unique=True, blank=True, null=True)
     nacionalidad = models.CharField(max_length=100, blank=True, null=True)
     nivel_escolar = models.CharField(max_length=100, blank=True, null=True)
     antecedentes_penales = models.CharField(
