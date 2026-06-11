@@ -175,7 +175,7 @@ class UserSerializer(serializers.ModelSerializer):
         return instance
 
 class SubtemaPlanEstudioSerializer(serializers.ModelSerializer):
-    id = serializers.IntegerField(required=False)
+    id = serializers.IntegerField(required=False, allow_null=True)
 
     class Meta:
         model = SubtemaPlanEstudio
@@ -183,7 +183,7 @@ class SubtemaPlanEstudioSerializer(serializers.ModelSerializer):
 
 
 class TemaPlanEstudioSerializer(serializers.ModelSerializer):
-    id = serializers.IntegerField(required=False)
+    id = serializers.IntegerField(required=False, allow_null=True)
     subtemas = SubtemaPlanEstudioSerializer(many=True, required=False)
 
     class Meta:
@@ -240,10 +240,45 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
 
     def limpiar_texto(self, valor):
         return str(valor or '').strip()
+    
+    def limpiar_id(self, valor):
+        if valor in [None, '', 'null', 'undefined']:
+            return None
+
+        try:
+            return int(valor)
+        except (TypeError, ValueError):
+            return None
+
+
+    def limpiar_orden(self, valor, defecto):
+        if valor in [None, '', 'null', 'undefined']:
+            return defecto
+
+        try:
+            numero = int(valor)
+
+            if numero <= 0:
+                return defecto
+
+            return numero
+        except (TypeError, ValueError):
+            return defecto
+
+
+    def normalizar_lista(self, valor):
+        if isinstance(valor, list):
+            return valor
+
+        return []
 
     def obtener_o_crear_tema(self, plan, tema_data, index_tema):
-        tema_id = tema_data.get('id')
+        tema_id = self.limpiar_id(tema_data.get('id'))
         titulo_tema = self.limpiar_texto(tema_data.get('titulo'))
+        orden_tema = self.limpiar_orden(
+            tema_data.get('orden'),
+            index_tema
+        )
 
         if not titulo_tema:
             return None
@@ -267,7 +302,7 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
 
         if tema:
             tema.titulo = titulo_tema
-            tema.orden = tema_data.get('orden', index_tema)
+            tema.orden = orden_tema
             tema.activo = True
             tema.save()
             return tema
@@ -275,13 +310,17 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
         return TemaPlanEstudio.objects.create(
             plan_estudio=plan,
             titulo=titulo_tema,
-            orden=tema_data.get('orden', index_tema),
+            orden=orden_tema,
             activo=True,
         )
 
     def obtener_o_crear_subtema(self, tema, subtema_data, index_subtema):
-        subtema_id = subtema_data.get('id')
+        subtema_id = self.limpiar_id(subtema_data.get('id'))
         titulo_subtema = self.limpiar_texto(subtema_data.get('titulo'))
+        orden_subtema = self.limpiar_orden(
+            subtema_data.get('orden'),
+            index_subtema
+        )
 
         if not titulo_subtema:
             return None
@@ -305,7 +344,7 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
 
         if subtema:
             subtema.titulo = titulo_subtema
-            subtema.orden = subtema_data.get('orden', index_subtema)
+            subtema.orden = orden_subtema
             subtema.activo = True
             subtema.save()
             return subtema
@@ -313,14 +352,18 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
         return SubtemaPlanEstudio.objects.create(
             tema=tema,
             titulo=titulo_subtema,
-            orden=subtema_data.get('orden', index_subtema),
+            orden=orden_subtema,
             activo=True,
         )
 
     def guardar_subtemas(self, tema, subtemas_data):
+        subtemas_data = self.normalizar_lista(subtemas_data)
+
         ids_subtemas_recibidos = []
 
         for index_subtema, subtema_data in enumerate(subtemas_data, start=1):
+            if not isinstance(subtema_data, dict):
+                continue
             subtema = self.obtener_o_crear_subtema(
                 tema,
                 subtema_data,
@@ -339,10 +382,13 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def create(self, validated_data):
         temas_data = validated_data.pop('temas', [])
+        temas_data = self.normalizar_lista(temas_data)
 
         plan = PlanEstudio.objects.create(**validated_data)
 
         for index_tema, tema_data in enumerate(temas_data, start=1):
+            if not isinstance(tema_data, dict):
+                continue
             subtemas_data = tema_data.pop('subtemas', [])
 
             tema = self.obtener_o_crear_tema(
@@ -371,9 +417,13 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
         if temas_data is None:
             return instance
 
+        temas_data = self.normalizar_lista(temas_data)
+
         ids_temas_recibidos = []
 
         for index_tema, tema_data in enumerate(temas_data, start=1):
+            if not isinstance(tema_data, dict):
+                continue
             subtemas_data = tema_data.pop('subtemas', [])
 
             tema = self.obtener_o_crear_tema(
@@ -1204,9 +1254,6 @@ class HistorialPlanEstudioSerializer(serializers.ModelSerializer):
 class MarcarTemaSerializer(serializers.Serializer):
     progreso_id = serializers.IntegerField()
     tipo = serializers.ChoiceField(choices=['estudiante', 'instructor', 'admin_estudiante', 'admin_instructor'])
-
-
-
 
 class OpcionPreguntaExamenTeoricoSerializer(serializers.ModelSerializer):
     class Meta:
