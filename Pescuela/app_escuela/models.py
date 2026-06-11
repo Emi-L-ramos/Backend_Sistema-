@@ -451,7 +451,7 @@ class TemaPlanEstudio(models.Model):
         related_name='temas'
     )
 
-    titulo = models.CharField(max_length=150)
+    titulo = models.CharField(max_length=300)
 
     orden = models.PositiveSmallIntegerField(default=1)
 
