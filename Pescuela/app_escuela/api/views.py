@@ -4219,14 +4219,18 @@ class PerfilView(APIView):
         return obtener_foto_instructor(instructor)
 
     def serializar_instructor(self, request, instructor):
+        categoria = instructor.categoria_instructor or ""
+
         return {
             "id": instructor.id,
             "nombre": instructor.nombre,
             "apellido": instructor.apellido,
-            "telefono": instructor.numero_telefono,
-            "direccion": instructor.direccion,
+            "telefono": instructor.numero_telefono or "",
+            "direccion": instructor.direccion or "",
             "edad": instructor.edad,
-            "experiencia": instructor.experiencia,
+            "experiencia": instructor.experiencia or "",
+            "categoria": categoria,
+            "categoria_instructor": categoria,
             "foto": self.get_foto_url(request, instructor),
             "cedula": instructor.cedula or "",
             "nacionalidad": instructor.nacionalidad or "",
