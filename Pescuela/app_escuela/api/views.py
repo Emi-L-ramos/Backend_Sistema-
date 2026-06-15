@@ -5664,41 +5664,29 @@ def certificado_obtener_datos(desde, hasta):
     if not desde_fecha or not hasta_fecha:
         return []
 
+    resultados = []
+
     matriculas = Matricula.objects.select_related(
         "estudiante",
         "categoria",
         "plan_de_estudio",
     ).filter(
-        estado="finalizado",
         tipo_curso="Principiante",
     ).order_by(
         "estudiante__apellido",
         "estudiante__nombre",
     )
 
-    resultados = []
-
     for matricula in matriculas:
-        examen = Calendario.objects.filter(
-            matricula=matricula,
-            es_examen=True,
-            estado="completada",
-            fecha__gte=desde_fecha,
-            fecha__lte=hasta_fecha,
-        ).order_by("-fecha", "-hora_inicio").first()
-
-        if not examen:
-            continue
-
         nota_teorica_obj = Notas.objects.filter(
             matricula=matricula,
             tipo_nota="teorico",
-        ).order_by("-fecha_registro").first()
+        ).order_by("-fecha_registro", "-id").first()
 
         nota_practica_obj = Notas.objects.filter(
             matricula=matricula,
             tipo_nota="practico",
-        ).order_by("-fecha_registro").first()
+        ).order_by("-fecha_registro", "-id").first()
 
         if not nota_teorica_obj or not nota_practica_obj:
             continue
@@ -5712,11 +5700,34 @@ def certificado_obtener_datos(desde, hasta):
         if nota_teorica < Decimal("80") or nota_practica < Decimal("80"):
             continue
 
+        fecha_teorica = None
+        fecha_practica = None
+
+        if getattr(nota_teorica_obj, "fecha_registro", None):
+            fecha_teorica = nota_teorica_obj.fecha_registro.date()
+
+        if getattr(nota_practica_obj, "fecha_registro", None):
+            fecha_practica = nota_practica_obj.fecha_registro.date()
+
+        fechas_notas = [
+            fecha for fecha in [fecha_teorica, fecha_practica]
+            if fecha is not None
+        ]
+
+        if fechas_notas:
+            fecha_egreso = max(fechas_notas)
+        elif matricula.fecha_registro:
+            fecha_egreso = matricula.fecha_registro.date()
+        else:
+            continue
+
+        if fecha_egreso < desde_fecha or fecha_egreso > hasta_fecha:
+            continue
+
         estudiante = matricula.estudiante
         categoria = matricula.categoria.nombre if matricula.categoria else ""
 
         fecha_inicio = matricula.fecha_registro.date() if matricula.fecha_registro else None
-        fecha_egreso = examen.fecha
 
         resultados.append({
             "id": matricula.id,
