@@ -4677,7 +4677,11 @@ def exportar_reporte_instructores_policial(request):
             horas_totales - float(horas_practicas)
         )
 
-        ws_ingresos.cell(row=fila, column=1, value=matricula.id)
+        ws_ingresos.cell(
+            row=fila,
+            column=1,
+            value=estudiante.codigo_estudiante or ""
+        )
 
         ws_ingresos.cell(
             row=fila,
@@ -4889,7 +4893,7 @@ def exportar_reporte_instructores_policial(request):
             horas_totales - float(horas_practicas)
         )
 
-        ws_egresos.cell(row=fila, column=1, value=matricula.id)
+        ws_egresos.cell(row=fila, column=1, value="")
 
         ws_egresos.cell(
             row=fila,

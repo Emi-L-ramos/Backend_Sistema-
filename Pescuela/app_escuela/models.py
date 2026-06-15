@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from django.contrib.auth.models import AbstractUser
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 
 
@@ -126,7 +126,13 @@ class Instructor(models.Model):
     def __str__(self):
         return f"{self.nombre} , {self.apellido}"
 
+class SecuenciaCodigoEstudiante(models.Model):
+    nombre = models.CharField(max_length=50, unique=True, default="estudiante")
+    ultimo_codigo = models.PositiveIntegerField(default=2130)
 
+    def __str__(self):
+        return f"{self.nombre} - último código: {self.ultimo_codigo}"
+    
 class Estudiante(models.Model):
     SEXO_CHOICES = [
         ('M', 'Masculino'),
@@ -140,14 +146,13 @@ class Estudiante(models.Model):
         ('Profesional', 'Profesional'),
     ]
     
-    codigo_estudiante = models.PositiveIntegerField(unique=True, null=True, blank=True)
+    codigo_estudiante = models.PositiveIntegerField(unique=True, blank=True, null=True)
 
     nombre = models.CharField(max_length=100)
     apellido = models.CharField(max_length=100)
     edad = models.PositiveIntegerField()
     sexo = models.CharField(max_length=10, choices=SEXO_CHOICES)
     nacionalidad = models.CharField(max_length=100)
-    cedula = models.CharField(max_length=20, unique=True)
     fecha_nacimiento = models.DateField()
     cedula = models.CharField(max_length=20, unique=True)
     direccion = models.CharField(max_length=200)
@@ -160,6 +165,23 @@ class Estudiante(models.Model):
 
     def __str__(self):
         return f"{self.nombre} {self.apellido} - {self.cedula}"
+    
+    
+    def save(self, *args, **kwargs):
+        if not self.codigo_estudiante:
+            with transaction.atomic():
+                secuencia, created = SecuenciaCodigoEstudiante.objects.select_for_update().get_or_create(
+                    nombre="estudiante",
+                    defaults={"ultimo_codigo": 2129}
+                )
+
+                secuencia.ultimo_codigo += 1
+                self.codigo_estudiante = secuencia.ultimo_codigo
+                secuencia.save(update_fields=["ultimo_codigo"])
+
+                super().save(*args, **kwargs)
+        else:
+            super().save(*args, **kwargs)
 
 class Matricula(models.Model):
     ESTADOS = [
