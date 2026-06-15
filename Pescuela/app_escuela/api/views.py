@@ -1,54 +1,49 @@
 # app_escuela/api/views.py
 import math
-import openpyxl
 import logging
 import os
 import base64
 import tempfile
 
+from copy import copy
 from datetime import date, datetime, timedelta
-from decimal import Decimal
-from decimal import Decimal
-from urllib import request
-from django.db import models
-from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from rest_framework import serializers
-from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-from django.db import transaction
-from django.db.models import Q, Sum, Count, Case, When, IntegerField
-from django.http import HttpResponse
-from django.utils import timezone
-from django.shortcuts import get_object_or_404
+from decimal import Decimal, InvalidOperation
+from io import BytesIO
+
+from django.conf import settings
 from django.contrib.auth import authenticate
+from django.db import models, transaction
+from django.db.models import Q, Sum
+from django.db.models.functions import TruncMonth
+from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from django.utils.dateparse import parse_date
+
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import status, viewsets
+
+from rest_framework import status, viewsets, serializers
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.contrib.auth import authenticate
-from rest_framework.authtoken.models import Token
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
-from django.db.models.functions import TruncMonth
-from decimal import Decimal
-from rest_framework import status
-from channels.layers import get_channel_layer
-from asgiref.sync import async_to_sync
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from openpyxl import Workbook
-from openpyxl import load_workbook
+
+from openpyxl import Workbook, load_workbook
 from openpyxl.drawing.image import Image as ExcelImage
-from django.conf import settings
-from copy import copy
-from datetime import timedelta
-from django.utils import timezone
-from django.db import transaction
-from django.db.models import Case, When, IntegerField
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+
+from docx import Document
+from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import (
+    WD_TABLE_ALIGNMENT,
+    WD_CELL_VERTICAL_ALIGNMENT,
+    WD_ROW_HEIGHT_RULE,
+)
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 from ..models import (
     Rol,
@@ -69,9 +64,11 @@ from ..models import (
     RespuestaExamenTeorico,
     PagoInstructor,
     CargoInstitucional,
+    SubtemaPlanEstudio,
+    ProgresoTema,
+    Notificacion,
+    HistorialPlanEstudio,
 )
-
-logging.getLogger("PIL").setLevel(logging.WARNING)
 
 from .serializers import (
     RolSerializer,
@@ -93,12 +90,12 @@ from .serializers import (
     RespuestaEnviarExamenSerializer,
     RespuestaExamenTeoricoSerializer,
     PagoInstructorSerializer,
+    PlanEstudioSerializer,
+    ProgresoTemaSerializer,
+    NotificacionSerializer,
 )
-from .serializers import (
-     PlanEstudioSerializer, ProgresoTemaSerializer, 
-     NotificacionSerializer
- )
-from ..models import PlanEstudio, SubtemaPlanEstudio, ProgresoTema
+
+logging.getLogger("PIL").setLevel(logging.WARNING)
 
 def obtener_rol(user):
     return str(getattr(user, 'rol_nombre', '') or '').lower()
@@ -2332,14 +2329,6 @@ class NotasViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         """Crear nota práctica asignando instructor y plan_de_estudio automáticamente"""
-        if not Calendario.objects.filter(
-            matricula=matricula,
-            instructor=request.user.instructor,
-            es_examen=False
-        ).exists():
-            return Response({
-                'error': 'No puedes registrar nota de un estudiante que no tienes asignado.'
-            }, status=status.HTTP_403_FORBIDDEN)
         
         if not request.user.instructor:
             return Response({
@@ -2360,6 +2349,15 @@ class NotasViewSet(viewsets.ModelViewSet):
             return Response({
                 'error': 'Matrícula no encontrada.'
             }, status=status.HTTP_404_NOT_FOUND)
+        
+        if not Calendario.objects.filter(
+            matricula=matricula,
+            instructor=request.user.instructor,
+            es_examen=False
+        ).exists():
+            return Response({
+                'error': 'No puedes registrar nota de un estudiante que no tienes asignado.'
+            }, status=status.HTTP_403_FORBIDDEN)
 
         if Notas.objects.filter(
             matricula=matricula,
@@ -2454,10 +2452,6 @@ def login(request):
         'last_name': user.last_name,
         'rol': user.rol.nombre if user.rol else 'sin rol',
     })
-
-from django.db.models import Sum, Count, Q
-from datetime import datetime, timedelta
-from decimal import Decimal
 
 class DashboardGananciasView(APIView):
     """Endpoint para obtener ganancias mensuales y matriculados"""
@@ -2673,11 +2667,6 @@ class DashboardIngresosMensualesView(APIView):
             9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
         }
         return meses.get(mes_numero, "")
-
-# views.py
-
-from django.utils import timezone
-from ..models import ProgresoTema, Notificacion, HistorialPlanEstudio
 
 class ProgresoTemaViewSet(viewsets.ModelViewSet):
     queryset = ProgresoTema.objects.select_related(
@@ -5461,5 +5450,616 @@ def reporte_kilometros_instructor(request):
     response['Content-Disposition'] = 'attachment; filename="reporte_kilometros_instructor.xlsx"'
 
     wb.save(response)
+
+    return response
+
+def certificado_numero(valor):
+    try:
+        if valor is None or valor == "":
+            return None
+
+        return Decimal(str(valor).replace(",", "."))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def certificado_fecha_larga(fecha):
+    if not fecha:
+        return ""
+
+    meses = {
+        1: "enero",
+        2: "febrero",
+        3: "marzo",
+        4: "abril",
+        5: "mayo",
+        6: "junio",
+        7: "julio",
+        8: "agosto",
+        9: "septiembre",
+        10: "octubre",
+        11: "noviembre",
+        12: "diciembre",
+    }
+
+    return f"{fecha.day:02d} de {meses[fecha.month]} del {fecha.year}"
+
+
+def certificado_dia_letras(dia):
+    dias = {
+        1: "un",
+        2: "dos",
+        3: "tres",
+        4: "cuatro",
+        5: "cinco",
+        6: "seis",
+        7: "siete",
+        8: "ocho",
+        9: "nueve",
+        10: "diez",
+        11: "once",
+        12: "doce",
+        13: "trece",
+        14: "catorce",
+        15: "quince",
+        16: "dieciséis",
+        17: "diecisiete",
+        18: "dieciocho",
+        19: "diecinueve",
+        20: "veinte",
+        21: "veintiún",
+        22: "veintidós",
+        23: "veintitrés",
+        24: "veinticuatro",
+        25: "veinticinco",
+        26: "veintiséis",
+        27: "veintisiete",
+        28: "veintiocho",
+        29: "veintinueve",
+        30: "treinta",
+        31: "treinta y un",
+    }
+
+    return dias.get(dia, str(dia))
+
+
+def certificado_mes_anio(fecha):
+    if not fecha:
+        return ""
+
+    meses = {
+        1: "enero",
+        2: "febrero",
+        3: "marzo",
+        4: "abril",
+        5: "mayo",
+        6: "junio",
+        7: "julio",
+        8: "agosto",
+        9: "septiembre",
+        10: "octubre",
+        11: "noviembre",
+        12: "diciembre",
+    }
+
+    return f"{meses[fecha.month]} del año {fecha.year}"
+
+
+def certificado_run(parrafo, texto, size=8, bold=False):
+    run = parrafo.add_run(str(texto))
+    run.bold = bold
+    run.font.name = "Arial"
+    run.font.size = Pt(size)
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    return run
+
+
+def certificado_parrafo(celda, texto="", size=8, bold=False, align=WD_ALIGN_PARAGRAPH.CENTER, after=0):
+    parrafo = celda.add_paragraph()
+    parrafo.alignment = align
+    parrafo.paragraph_format.space_before = Pt(0)
+    parrafo.paragraph_format.space_after = Pt(after)
+    certificado_run(parrafo, texto, size=size, bold=bold)
+    return parrafo
+
+
+def certificado_set_margenes_celda(celda, top=60, start=80, bottom=60, end=80):
+    tc = celda._tc
+    tc_pr = tc.get_or_add_tcPr()
+    tc_mar = tc_pr.first_child_found_in("w:tcMar")
+
+    if tc_mar is None:
+        tc_mar = OxmlElement("w:tcMar")
+        tc_pr.append(tc_mar)
+
+    valores = {
+        "top": top,
+        "start": start,
+        "bottom": bottom,
+        "end": end,
+    }
+
+    for nombre, valor in valores.items():
+        elemento = tc_mar.find(qn(f"w:{nombre}"))
+
+        if elemento is None:
+            elemento = OxmlElement(f"w:{nombre}")
+            tc_mar.append(elemento)
+
+        elemento.set(qn("w:w"), str(valor))
+        elemento.set(qn("w:type"), "dxa")
+
+
+def certificado_sombrear_celda(celda, color):
+    tc_pr = celda._tc.get_or_add_tcPr()
+    shd = tc_pr.find(qn("w:shd"))
+
+    if shd is None:
+        shd = OxmlElement("w:shd")
+        tc_pr.append(shd)
+
+    shd.set(qn("w:fill"), color)
+
+
+def certificado_bordes_tabla(tabla, color="1F4E79", size="14"):
+    tbl = tabla._tbl
+    tbl_pr = tbl.tblPr
+    borders = tbl_pr.first_child_found_in("w:tblBorders")
+
+    if borders is None:
+        borders = OxmlElement("w:tblBorders")
+        tbl_pr.append(borders)
+
+    for edge in ["top", "left", "bottom", "right", "insideH", "insideV"]:
+        tag = qn(f"w:{edge}")
+        element = borders.find(tag)
+
+        if element is None:
+            element = OxmlElement(f"w:{edge}")
+            borders.append(element)
+
+        element.set(qn("w:val"), "single")
+        element.set(qn("w:sz"), size)
+        element.set(qn("w:space"), "0")
+        element.set(qn("w:color"), color)
+
+
+def certificado_sin_bordes_tabla(tabla):
+    tbl = tabla._tbl
+    tbl_pr = tbl.tblPr
+    borders = tbl_pr.first_child_found_in("w:tblBorders")
+
+    if borders is None:
+        borders = OxmlElement("w:tblBorders")
+        tbl_pr.append(borders)
+
+    for edge in ["top", "left", "bottom", "right", "insideH", "insideV"]:
+        tag = qn(f"w:{edge}")
+        element = borders.find(tag)
+
+        if element is None:
+            element = OxmlElement(f"w:{edge}")
+            borders.append(element)
+
+        element.set(qn("w:val"), "nil")
+
+
+def certificado_agregar_imagen(celda, ruta, ancho):
+    if not os.path.exists(ruta):
+        return False
+
+    parrafo = celda.paragraphs[0]
+    parrafo.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    run = parrafo.add_run()
+    run.add_picture(ruta, width=Inches(ancho))
+
+    return True
+
+
+def certificado_obtener_datos(desde, hasta):
+    desde_fecha = parse_date(desde)
+    hasta_fecha = parse_date(hasta)
+
+    if not desde_fecha or not hasta_fecha:
+        return []
+
+    matriculas = Matricula.objects.select_related(
+        "estudiante",
+        "categoria",
+        "plan_de_estudio",
+    ).filter(
+        estado="finalizado",
+        tipo_curso="Principiante",
+    ).order_by(
+        "estudiante__apellido",
+        "estudiante__nombre",
+    )
+
+    resultados = []
+
+    for matricula in matriculas:
+        examen = Calendario.objects.filter(
+            matricula=matricula,
+            es_examen=True,
+            estado="completada",
+            fecha__gte=desde_fecha,
+            fecha__lte=hasta_fecha,
+        ).order_by("-fecha", "-hora_inicio").first()
+
+        if not examen:
+            continue
+
+        nota_teorica_obj = Notas.objects.filter(
+            matricula=matricula,
+            tipo_nota="teorico",
+        ).order_by("-fecha_registro").first()
+
+        nota_practica_obj = Notas.objects.filter(
+            matricula=matricula,
+            tipo_nota="practico",
+        ).order_by("-fecha_registro").first()
+
+        if not nota_teorica_obj or not nota_practica_obj:
+            continue
+
+        nota_teorica = certificado_numero(nota_teorica_obj.nota)
+        nota_practica = certificado_numero(nota_practica_obj.nota)
+
+        if nota_teorica is None or nota_practica is None:
+            continue
+
+        if nota_teorica < Decimal("80") or nota_practica < Decimal("80"):
+            continue
+
+        estudiante = matricula.estudiante
+        categoria = matricula.categoria.nombre if matricula.categoria else ""
+
+        fecha_inicio = matricula.fecha_registro.date() if matricula.fecha_registro else None
+        fecha_egreso = examen.fecha
+
+        resultados.append({
+            "id": matricula.id,
+            "estudiante": f"{estudiante.nombre} {estudiante.apellido}".strip().upper(),
+            "cedula": estudiante.cedula,
+            "categoria": categoria,
+            "tipo_curso": matricula.tipo_curso,
+            "fecha_inicio": fecha_inicio,
+            "fecha_egreso": fecha_egreso,
+            "nota_teorica": nota_teorica,
+            "nota_practica": nota_practica,
+        })
+
+    return resultados
+
+
+def certificado_crear_en_celda(celda, item, logo_path, auto_path, fecha_emision):
+    celda._tc.clear_content()
+    celda.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    certificado_set_margenes_celda(celda, top=40, start=70, bottom=40, end=70)
+    certificado_sombrear_celda(celda, "E1A13A")
+
+    tabla_marco = celda.add_table(rows=1, cols=1)
+    tabla_marco.alignment = WD_TABLE_ALIGNMENT.CENTER
+    tabla_marco.autofit = True
+    certificado_bordes_tabla(tabla_marco, color="E1A13A", size="8")
+
+    marco = tabla_marco.cell(0, 0)
+    marco.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    certificado_sombrear_celda(marco, "FFFFFF")
+    certificado_set_margenes_celda(marco, top=55, start=65, bottom=55, end=65)
+
+    tabla_interna = marco.add_table(rows=1, cols=1)
+    tabla_interna.alignment = WD_TABLE_ALIGNMENT.CENTER
+    tabla_interna.autofit = True
+    certificado_bordes_tabla(tabla_interna, color="1F4E79", size="16")
+
+    contenido = tabla_interna.cell(0, 0)
+    contenido.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    certificado_sombrear_celda(contenido, "FFFFFF")
+    certificado_set_margenes_celda(contenido, top=45, start=80, bottom=45, end=80)
+
+    header = contenido.add_table(rows=2, cols=3)
+    header.alignment = WD_TABLE_ALIGNMENT.CENTER
+    header.autofit = True
+    certificado_sin_bordes_tabla(header)
+
+    titulo_cell = header.cell(0, 0).merge(header.cell(0, 2))
+    certificado_set_margenes_celda(titulo_cell, top=0, start=5, bottom=5, end=5)
+
+    p_titulo = titulo_cell.paragraphs[0]
+    p_titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_titulo.paragraph_format.space_after = Pt(0)
+    certificado_run(p_titulo, "-ESCUELA DE MANEJO EL CACIQUE ADIACT", size=13, bold=True)
+
+    logo_cell = header.cell(1, 0)
+    texto_cell = header.cell(1, 1)
+    auto_cell = header.cell(1, 2)
+
+    for celda_header in [logo_cell, texto_cell, auto_cell]:
+        certificado_sombrear_celda(celda_header, "E1A13A")
+        certificado_set_margenes_celda(celda_header, top=10, start=10, bottom=10, end=10)
+
+    certificado_agregar_imagen(logo_cell, logo_path, 0.60)
+
+    texto_cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    texto_cell.paragraphs[0].paragraph_format.space_after = Pt(0)
+    certificado_run(texto_cell.paragraphs[0], "CERTIFICA QUE:", size=12, bold=True)
+
+    certificado_agregar_imagen(auto_cell, auto_path, 0.95)
+
+    certificado_parrafo(
+        contenido,
+        item["estudiante"],
+        size=12,
+        bold=True,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        after=0,
+    )
+
+    certificado_parrafo(
+        contenido,
+        f"Cédula: {item['cedula']}.",
+        size=9,
+        bold=True,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        after=0,
+    )
+
+    periodo = ""
+    if item["fecha_inicio"] and item["fecha_egreso"]:
+        periodo = (
+            f"del {certificado_fecha_larga(item['fecha_inicio'])} "
+            f"al {certificado_fecha_larga(item['fecha_egreso'])}"
+        )
+    elif item["fecha_egreso"]:
+        periodo = f"hasta el {certificado_fecha_larga(item['fecha_egreso'])}"
+
+    p_texto = contenido.add_paragraph()
+    p_texto.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    p_texto.paragraph_format.space_before = Pt(2)
+    p_texto.paragraph_format.space_after = Pt(0)
+
+    certificado_run(
+        p_texto,
+        "Ha cumplido con el plan de instrucción teórico y práctico aprobado por la DSTN, "
+        "de principiante, para optar a la Licencia de Conducir de Tipo Ordinaria en la Categoría ",
+        size=8.3,
+        bold=True,
+    )
+
+    certificado_run(
+        p_texto,
+        item["categoria"] or "__________",
+        size=8.3,
+        bold=True,
+    )
+
+    certificado_run(
+        p_texto,
+        f" impartido en el periodo comprendido {periodo}, habiendo obtenido las siguientes calificaciones:",
+        size=8.3,
+        bold=True,
+    )
+
+    certificado_parrafo(
+        contenido,
+        f"Evaluación Teórica: {int(item['nota_teorica'])} puntos.",
+        size=8.8,
+        bold=True,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        after=0,
+    )
+
+    certificado_parrafo(
+        contenido,
+        f"Evaluación Práctica: {int(item['nota_practica'])} puntos.",
+        size=8.8,
+        bold=True,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        after=0,
+    )
+
+    certificado_parrafo(
+        contenido,
+        "Registrado en el Asiento No. __________ del Folio No. __________ del Tomo No. __________.",
+        size=8.2,
+        bold=True,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        after=0,
+    )
+
+    texto_dia = certificado_dia_letras(fecha_emision.day)
+    texto_mes = certificado_mes_anio(fecha_emision)
+
+    certificado_parrafo(
+        contenido,
+        f"Dado en la ciudad de León a los {texto_dia} días del mes de {texto_mes}.",
+        size=8.2,
+        bold=True,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        after=0,
+    )
+
+    tabla_firma = contenido.add_table(rows=1, cols=3)
+    tabla_firma.alignment = WD_TABLE_ALIGNMENT.CENTER
+    tabla_firma.autofit = True
+    certificado_sin_bordes_tabla(tabla_firma)
+
+    firma_cell = tabla_firma.cell(0, 1)
+    certificado_set_margenes_celda(firma_cell, top=5, start=5, bottom=0, end=5)
+
+    certificado_parrafo(
+        firma_cell,
+        "______________________________",
+        size=7.3,
+        bold=True,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        after=0,
+    )
+
+    certificado_parrafo(
+        firma_cell,
+        "LIC. FRANCISCO AGUILERA FERRUFINO.",
+        size=7.3,
+        bold=True,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        after=0,
+    )
+
+    certificado_parrafo(
+        firma_cell,
+        "Director.",
+        size=7.3,
+        bold=True,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        after=0,
+    )
+
+
+def certificado_crear_word(certificados, fecha_emision):
+    documento = Document()
+
+    section = documento.sections[0]
+    section.page_width = Inches(8.5)
+    section.page_height = Inches(11)
+    section.top_margin = Inches(0.25)
+    section.bottom_margin = Inches(0.25)
+    section.left_margin = Inches(0.25)
+    section.right_margin = Inches(0.25)
+
+    logo_path = os.path.join(settings.BASE_DIR, "static", "certificados", "logo.png")
+    auto_path = os.path.join(settings.BASE_DIR, "static", "certificados", "auto.png")
+
+    if not os.path.exists(logo_path):
+        raise FileNotFoundError(f"No se encontró el logo en: {logo_path}")
+
+    if not os.path.exists(auto_path):
+        raise FileNotFoundError(f"No se encontró la imagen del auto en: {auto_path}")
+
+    for index in range(0, len(certificados), 2):
+        grupo = certificados[index:index + 2]
+
+        tabla = documento.add_table(rows=2, cols=1)
+        tabla.alignment = WD_TABLE_ALIGNMENT.CENTER
+        tabla.autofit = True
+        certificado_sin_bordes_tabla(tabla)
+
+        for fila_index in range(2):
+            fila = tabla.rows[fila_index]
+            fila.height = Inches(5.25)
+            fila.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
+
+            celda = fila.cells[0]
+            celda.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+
+            if fila_index < len(grupo):
+                certificado_crear_en_celda(
+                    celda,
+                    grupo[fila_index],
+                    logo_path,
+                    auto_path,
+                    fecha_emision,
+                )
+            else:
+                celda._tc.clear_content()
+
+        if index + 2 < len(certificados):
+            documento.add_page_break()
+
+    return documento
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def certificados_egresados(request):
+    if not es_admin(request.user):
+        return Response(
+            {"detail": "No tienes permiso para consultar certificados."},
+            status=403,
+        )
+
+    desde = request.GET.get("desde")
+    hasta = request.GET.get("hasta")
+
+    if not desde or not hasta:
+        return Response(
+            {"detail": "Debe enviar fecha desde y fecha hasta."},
+            status=400,
+        )
+
+    certificados = certificado_obtener_datos(desde, hasta)
+
+    data = []
+
+    for item in certificados:
+        data.append({
+            "id": item["id"],
+            "estudiante": item["estudiante"],
+            "cedula": item["cedula"],
+            "categoria": item["categoria"],
+            "tipo_curso": item["tipo_curso"],
+            "fecha_inicio": item["fecha_inicio"].isoformat() if item["fecha_inicio"] else "",
+            "fecha_egreso": item["fecha_egreso"].isoformat() if item["fecha_egreso"] else "",
+            "nota_teorica": int(item["nota_teorica"]),
+            "nota_practica": int(item["nota_practica"]),
+        })
+
+    return Response(data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def certificados_egresados_word(request):
+    if not es_admin(request.user):
+        return Response(
+            {"detail": "No tienes permiso para generar certificados."},
+            status=403,
+        )
+
+    desde = request.GET.get("desde")
+    hasta = request.GET.get("hasta")
+
+    if not desde or not hasta:
+        return Response(
+            {"detail": "Debe enviar fecha desde y fecha hasta."},
+            status=400,
+        )
+
+    certificados = certificado_obtener_datos(desde, hasta)
+
+    if not certificados:
+        return Response(
+            {
+                "detail": (
+                    "No hay estudiantes egresados del curso principiante con nota teórica "
+                    "y práctica mayor o igual a 80 en ese rango de fechas."
+                )
+            },
+            status=404,
+        )
+
+    fecha_emision = parse_date(hasta) or timezone.localdate()
+
+    try:
+        documento = certificado_crear_word(certificados, fecha_emision)
+    except FileNotFoundError as error:
+        return Response(
+            {"detail": str(error)},
+            status=500,
+        )
+
+    archivo = BytesIO()
+    documento.save(archivo)
+    archivo.seek(0)
+
+    response = HttpResponse(
+        archivo.getvalue(),
+        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+    response["Content-Disposition"] = (
+        f'attachment; filename="certificados_{desde}_{hasta}.docx"'
+    )
 
     return response

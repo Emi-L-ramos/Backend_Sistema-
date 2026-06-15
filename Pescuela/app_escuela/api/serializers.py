@@ -3,6 +3,7 @@
 from decimal import Decimal
 from rest_framework import serializers
 from django.db import models
+from django.db.models import Max
 
 from ..models import (
     Rol,
@@ -467,6 +468,21 @@ class EstudianteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Estudiante
         fields = '__all__'
+        read_only_fields = ['codigo_estudiante']
+
+    def create(self, validated_data):
+        ultimo_codigo = Estudiante.objects.aggregate(
+            max_codigo=Max('codigo_estudiante')
+        )['max_codigo']
+
+        if ultimo_codigo is None:
+            nuevo_codigo = 1984
+        else:
+            nuevo_codigo = ultimo_codigo + 1
+
+        validated_data['codigo_estudiante'] = nuevo_codigo
+
+        return super().create(validated_data)
 
     def get_usuario_data(self, obj):
         usuario = obj.usuarios.filter(rol__nombre__iexact='estudiante').first()

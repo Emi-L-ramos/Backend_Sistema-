@@ -139,6 +139,8 @@ class Estudiante(models.Model):
         ('Universidad', 'Universidad'),
         ('Profesional', 'Profesional'),
     ]
+    
+    codigo_estudiante = models.PositiveIntegerField(unique=True, null=True, blank=True)
 
     nombre = models.CharField(max_length=100)
     apellido = models.CharField(max_length=100)

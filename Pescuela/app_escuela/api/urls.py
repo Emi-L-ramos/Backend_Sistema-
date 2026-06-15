@@ -30,6 +30,8 @@ from .views import (
     exportar_reporte_instructores_policial,
     reporte_induccion_instructores,
     reporte_kilometros_instructor,
+    certificados_egresados,
+    certificados_egresados_word,
 )
 from .views import ( ProgresoTemaViewSet, NotificacionViewSet
 )
@@ -82,5 +84,16 @@ urlpatterns = [
         'reporte-kilometros-instructor/',
         reporte_kilometros_instructor,
         name='reporte_kilometros_instructor'
+    ),
+
+    path(
+        'certificados-egresados/',
+        certificados_egresados,
+        name='certificados_egresados'
+    ),
+    path(
+        'certificados-egresados-word/',
+        certificados_egresados_word,
+        name='certificados_egresados_word'
     ),
 ]
