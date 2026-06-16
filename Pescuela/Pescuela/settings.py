@@ -4,31 +4,23 @@ Django settings for Pescuela project.
 
 import os
 from pathlib import Path
-from dotenv import load_dotenv  # 1. Importa la función
-load_dotenv()  # 2. Carga las variables del archivo .env
+from dotenv import load_dotenv
 
-DEBUG = True
-
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-5zz7xfden4ks^m$1m!ggx6%&(74o(g9#rw8dtg^*cx(-zult-!'
+SECRET_KEY = os.environ.get(
+    "SECRET_KEY",
+    "django-insecure-5zz7xfden4ks^m$1m!ggx6%&(74o(g9#rw8dtg^*cx(-zult-!"
+)
 
-# SECRET_KEY = os.environ.get('SECRET_KEY')
+DEBUG = os.environ.get("DEBUG", "False").lower() == "true"
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get('DEBUG') == 'True'
-# ✅ AGREGAR localhost y 127.0.0.1 para desarrollo
+ALLOWED_HOSTS = os.environ.get(
+    "ALLOWED_HOSTS",
+    "localhost,127.0.0.1"
+).split(",")
 
-
-ALLOWED_HOSTS = [
-    "localhost",
-    "127.0.0.1",
-    "backendsistema-production.up.railway.app",
-]
-
-# Application definition
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -36,39 +28,19 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+
     'rest_framework',
+    'rest_framework.authtoken',
     'corsheaders',
-    'rest_framework.authtoken',  # ✅ Token authentication
-    
-    'app_escuela',  # Tu aplicación
-    'django_filters',  # ✅ Para filtrado en vistas
+    'django_filters',
+
+    'app_escuela',
 ]
 
-
-# ASGI_APPLICATION = 'Pescuela.asgi.application'
-
-# # Para desarrollo (memoria)
-# CHANNEL_LAYERS = {
-#     'default': {
-#         'BACKEND': 'channels.layers.InMemoryChannelLayer',
-#     }
-# }
-# # ✅ Modelo de usuario personalizado
-
-
-# Para producción (Redis - descomentar si tienes Redis)
-# CHANNEL_LAYERS = {
-#     'default': {
-#         'BACKEND': 'channels_redis.core.RedisChannelLayer',
-#         'CONFIG': {
-#             "hosts": [('127.0.0.1', 6379)],
-#         },
-#     },
-# }
 AUTH_USER_MODEL = 'app_escuela.Usuario'
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',  # ✅ CORS debe ir aquí
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -97,57 +69,33 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'Pescuela.wsgi.application'
 
-# Database
-#DATABASES = {
-#    'default': {
-#       'ENGINE': 'django.db.backends.mysql',
-#        'NAME': 'adiact_bd',
-#       'USER': 'root',
-#        'PASSWORD': '',  # XAMPP por defecto no tiene contraseña
-#         'HOST': 'localhost',
-#          'HOST': 'localhost',
-#          'PORT': '3306',
-#          'OPTIONS': {
-#              'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
-#              'charset': 'utf8mb4',
-#          }
-#      }
-#  }
-
-
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.environ.get('MYSQL_DATABASE', 'defaultdb'),
-        'USER': os.environ.get('MYSQL_USER', 'avnadmin'),
+        'NAME': os.environ.get('MYSQL_DATABASE', 'adiact_bd'),
+        'USER': os.environ.get('MYSQL_USER', 'adiact_user'),
         'PASSWORD': os.environ.get('MYSQL_PASSWORD', ''),
-        'HOST': os.environ.get('MYSQL_HOST', ''),
-        'PORT': os.environ.get('MYSQL_PORT', '22815'),
+        'HOST': os.environ.get('MYSQL_HOST', '127.0.0.1'),
+        'PORT': os.environ.get('MYSQL_PORT', '3306'),
         'OPTIONS': {
             'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
             'charset': 'utf8mb4',
-            'ssl': {},
         }
     }
 }
 
-# ✅ CORS - Permitir frontend
-CORS_ALLOWED_ORIGINS = [
-    "https://frontend-sistema-dgmt.vercel.app",
-    "http://127.0.0.1:5173",
-    "http://localhost:5173", # Del incoming
-    
-]
+CORS_ALLOWED_ORIGINS = os.environ.get(
+    "CORS_ALLOWED_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173"
+).split(",")
 
-CSRF_TRUSTED_ORIGINS = [
-    "https://backendsistema-production.up.railway.app",
-    "https://frontend-sistema-dgmt.vercel.app",
-]
+CSRF_TRUSTED_ORIGINS = os.environ.get(
+    "CSRF_TRUSTED_ORIGINS",
+    "http://localhost:8000,http://127.0.0.1:8000"
+).split(",")
 
-# ✅ Opcional: Permitir credenciales
 CORS_ALLOW_CREDENTIALS = True
 
-# ✅ Métodos permitidos
 CORS_ALLOW_METHODS = [
     'DELETE',
     'GET',
@@ -157,7 +105,6 @@ CORS_ALLOW_METHODS = [
     'PUT',
 ]
 
-# ✅ Headers permitidos
 CORS_ALLOW_HEADERS = [
     'accept',
     'accept-encoding',
@@ -170,7 +117,6 @@ CORS_ALLOW_HEADERS = [
     'x-requested-with',
 ]
 
-# Password validation
 AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
@@ -178,7 +124,7 @@ AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
         'OPTIONS': {
-            'min_length': 6,  # ✅ Mínimo 6 caracteres
+            'min_length': 6,
         }
     },
     {
@@ -189,45 +135,39 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-# Internationalization
-LANGUAGE_CODE = 'es-es'  # ✅ Cambiar a español
-TIME_ZONE = 'America/Managua'  # ✅ Cambiar a tu zona horaria (Nicaragua)
+LANGUAGE_CODE = 'es-es'
+TIME_ZONE = 'America/Managua'
 USE_I18N = True
 USE_TZ = True
 
-# Static files (CSS, JavaScript, Images)
-STATIC_URL = 'static/'
-STATIC_ROOT = BASE_DIR / 'staticfiles'  # ✅ Para producción
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-# Media files (subidas de usuarios)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
-# Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# ✅ REST Framework Configuration
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.TokenAuthentication',
-        'rest_framework.authentication.SessionAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
-        'rest_framework.permissions.AllowAny',
     ],
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
     ],
     'DEFAULT_PARSER_CLASSES': [
         'rest_framework.parsers.JSONParser',
+        'rest_framework.parsers.MultiPartParser',
+        'rest_framework.parsers.FormParser',
     ],
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend'
     ],
 }
 
-# ✅ Configuración de logging (opcional, para depuración)
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
