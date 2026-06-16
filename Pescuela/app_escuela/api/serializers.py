@@ -530,9 +530,9 @@ class MatriculaSerializer(serializers.ModelSerializer):
         tipo_curso = validated_data.get('tipo_curso')
 
         if tipo_curso == 'Principiante':
-            tipos_planes = ['Principiante', 'Intermedio', 'Avanzado']
+            tipos_planes = ['Principiante']
         elif tipo_curso == 'Intermedio':
-            tipos_planes = ['Intermedio', 'Avanzado']
+            tipos_planes = ['Intermedio']
         elif tipo_curso == 'Avanzado':
             tipos_planes = ['Avanzado']
         else:
