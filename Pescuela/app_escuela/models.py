@@ -128,7 +128,7 @@ class Instructor(models.Model):
 
 class SecuenciaCodigoEstudiante(models.Model):
     nombre = models.CharField(max_length=50, unique=True, default="estudiante")
-    ultimo_codigo = models.PositiveIntegerField(default=2130)
+    ultimo_codigo = models.PositiveIntegerField(default=2129)
 
     def __str__(self):
         return f"{self.nombre} - último código: {self.ultimo_codigo}"
