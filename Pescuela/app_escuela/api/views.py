@@ -1029,13 +1029,16 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if matricula.estudiante.usuario:
+        if matricula.estudiante.usuarios.filter(
+            rol__nombre__iexact='estudiante'
+        ).exists():
             return Response(
                 {'error': 'Este estudiante ya tiene usuario.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         data = request.data.copy()
+        data['matricula_id'] = matricula.id
         data.setdefault('first_name', matricula.estudiante.nombre)
         data.setdefault('last_name', matricula.estudiante.apellido)
         data.setdefault('email', matricula.estudiante.correo_electronico)
@@ -1043,9 +1046,6 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
         usuario = serializer.save()
-
-        matricula.estudiante.usuario = usuario
-        matricula.estudiante.save(update_fields=['usuario'])
 
         return Response(
             self.get_serializer(usuario).data,
