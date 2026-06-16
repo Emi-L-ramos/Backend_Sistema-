@@ -938,21 +938,28 @@ class ReciboViewSet(viewsets.ModelViewSet):
     
 
 class UserViewSet(viewsets.ModelViewSet):
-    queryset = Usuario.objects.select_related(
-        'rol',
-        'estudiante',
-        'instructor',
-    ).all()
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = None
 
     def get_queryset(self):
         user = self.request.user
 
-        if es_admin(user):
-            return self.queryset
+        queryset = Usuario.objects.select_related(
+            'rol',
+            'estudiante',
+            'instructor',
+        ).all().order_by('id')
 
-        return self.queryset.filter(id=user.id)
+        if es_admin(user):
+            return queryset
+
+        return queryset.filter(id=user.id)
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
