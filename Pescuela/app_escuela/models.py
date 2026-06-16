@@ -735,3 +735,68 @@ class CargoInstitucional(models.Model):
 
     def __str__(self):
         return f"{self.nombre} - {self.cargo}" 
+
+# ============================================================
+# Generación automática de progreso de Plan de Estudio
+# ============================================================
+
+from django.db import transaction
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
+
+def crear_progresos_plan_matricula(matricula):
+    """
+    Crea los registros de ProgresoTema para una matrícula según el tipo de curso.
+    No duplica registros existentes.
+    """
+
+    estado = (getattr(matricula, "estado", "") or "").lower()
+
+    if estado not in ["matriculado", "aprobada", "aprobado"]:
+        return 0
+
+    tipo_curso = getattr(matricula, "tipo_curso", None)
+
+    if not tipo_curso:
+        return 0
+
+    plan = PlanEstudio.objects.filter(
+        tipo_curso=tipo_curso,
+        activo=True
+    ).order_by("-id").first()
+
+    if not plan:
+        return 0
+
+    temas = plan.temas.filter(
+        activo=True
+    ).order_by("orden", "id")
+
+    creados = 0
+
+    for orden, tema in enumerate(temas, start=1):
+        _, creado = ProgresoTema.objects.get_or_create(
+            matricula=matricula,
+            tema=tema,
+            defaults={
+                "orden_general": orden,
+                "desbloqueado": orden == 1,
+            }
+        )
+
+        if creado:
+            creados += 1
+
+    return creados
+
+
+@receiver(post_save, sender=Matricula)
+def generar_progresos_al_matricular(sender, instance, **kwargs):
+    """
+    Cuando una matrícula se guarda como matriculada, se generan sus progresos.
+    """
+
+    transaction.on_commit(
+        lambda: crear_progresos_plan_matricula(instance)
+    )
