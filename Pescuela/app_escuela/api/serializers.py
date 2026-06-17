@@ -1139,6 +1139,10 @@ class NotasSerializer(serializers.ModelSerializer):
 class ProgresoTemaSerializer(serializers.ModelSerializer):
     estudiante_nombre = serializers.SerializerMethodField()
 
+    total_clases_diarias = serializers.SerializerMethodField()
+    checks_diarios_completados = serializers.SerializerMethodField()
+    porcentaje_clases_diarias = serializers.SerializerMethodField()
+
     estudiante_cedula = serializers.CharField(
         source='matricula.estudiante.cedula',
         read_only=True
@@ -1236,6 +1240,9 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
             'estudiante_completado_hoy',
             'instructor_completado_hoy',
             'completado_hoy',
+            'total_clases_diarias', 
+            'checks_diarios_completados',
+            'porcentaje_clases_diarias',
         ]
 
         read_only_fields = [
@@ -1333,6 +1340,47 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
 
         check_dia = self.obtener_check_dia(obj)
         return check_dia.completado if check_dia else False
+    
+    def obtener_clases_validas_diarias(self, obj):
+        return Calendario.objects.filter(
+            matricula=obj.matricula,
+            es_examen=False
+        ).exclude(
+            estado='cancelada'
+        )
+
+    def get_total_clases_diarias(self, obj):
+        if not self.es_modo_diario(obj):
+            return None
+
+        return self.obtener_clases_validas_diarias(obj).count()
+
+    def get_checks_diarios_completados(self, obj):
+        if not self.es_modo_diario(obj):
+            return None
+
+        clases = self.obtener_clases_validas_diarias(obj)
+
+        return ProgresoClaseTema.objects.filter(
+            progreso_tema=obj,
+            calendario__in=clases,
+            estudiante_completado=True,
+            instructor_completado=True,
+            completado=True
+        ).count()
+
+    def get_porcentaje_clases_diarias(self, obj):
+        if not self.es_modo_diario(obj):
+            return None
+
+        total = self.get_total_clases_diarias(obj)
+
+        if not total:
+            return 0
+
+        completados = self.get_checks_diarios_completados(obj)
+
+        return round((completados / total) * 100)
 
 
 class NotificacionSerializer(serializers.ModelSerializer):
