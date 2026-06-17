@@ -27,9 +27,8 @@ from ..models import (
     CargoInstitucional,
 )
 from django.db import transaction
-from ..models import ProgresoTema, HistorialPlanEstudio,Notificacion
-
-from ..models import PlanEstudio, SubtemaPlanEstudio, ProgresoTema
+from ..models import ProgresoTema, ProgresoClaseTema, HistorialPlanEstudio, Notificacion
+from ..models import PlanEstudio, SubtemaPlanEstudio
 
 class RolSerializer(serializers.ModelSerializer):
     class Meta:
@@ -271,6 +270,26 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
             return valor
 
         return []
+    
+    def validar_un_solo_tema_para_reforzamiento(self, tipo_curso, temas_data):
+        tipo = str(tipo_curso or '').strip().lower()
+
+        if tipo not in ['intermedio', 'avanzado']:
+            return
+
+        temas_validos = [
+            tema for tema in temas_data
+            if isinstance(tema, dict)
+            and self.limpiar_texto(tema.get('titulo'))
+        ]
+
+        if len(temas_validos) > 1:
+            raise serializers.ValidationError({
+                'temas': (
+                    'Los cursos Intermedio y Avanzado solo pueden tener '
+                    'un tema principal. Agregue los contenidos como subtemas.'
+                )
+            })
 
     def obtener_o_crear_tema(self, plan, tema_data, index_tema):
         tema_id = self.limpiar_id(tema_data.get('id'))
@@ -384,6 +403,11 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
         temas_data = validated_data.pop('temas', [])
         temas_data = self.normalizar_lista(temas_data)
 
+        self.validar_un_solo_tema_para_reforzamiento(
+            validated_data.get('tipo_curso'),
+            temas_data
+        )
+
         plan = PlanEstudio.objects.create(**validated_data)
 
         for index_tema, tema_data in enumerate(temas_data, start=1):
@@ -419,6 +443,16 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
 
         temas_data = self.normalizar_lista(temas_data)
 
+        tipo_curso_final = validated_data.get(
+            'tipo_curso',
+            instance.tipo_curso
+        )
+
+        self.validar_un_solo_tema_para_reforzamiento(
+            tipo_curso_final,
+            temas_data
+        )
+
         ids_temas_recibidos = []
 
         for index_tema, tema_data in enumerate(temas_data, start=1):
@@ -449,6 +483,8 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
         )
 
         return instance
+    
+
 
 class ValorCursoSerializer(serializers.ModelSerializer):
     class Meta:
@@ -1156,6 +1192,15 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
         read_only=True
     )
 
+    modo_diario = serializers.SerializerMethodField()
+    clase_actual_id = serializers.SerializerMethodField()
+    fecha_clase_actual = serializers.SerializerMethodField()
+    hora_inicio_clase = serializers.SerializerMethodField()
+    habilitado_hoy = serializers.SerializerMethodField()
+    estudiante_completado_hoy = serializers.SerializerMethodField()
+    instructor_completado_hoy = serializers.SerializerMethodField()
+    completado_hoy = serializers.SerializerMethodField()
+
     class Meta:
         model = ProgresoTema
         fields = [
@@ -1183,6 +1228,14 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
             'matricula_id',
             'matricula_fecha',
             'matricula_estado',
+            'modo_diario',
+            'clase_actual_id',
+            'fecha_clase_actual',
+            'hora_inicio_clase',
+            'habilitado_hoy',
+            'estudiante_completado_hoy',
+            'instructor_completado_hoy',
+            'completado_hoy',
         ]
 
         read_only_fields = [
@@ -1223,6 +1276,63 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
         return obj.tema.subtemas.filter(
             activo=True
         ).count()
+    
+    def es_modo_diario(self, obj):
+        tipo = str(getattr(obj.matricula, 'tipo_curso', '') or '').lower()
+        return tipo in ['intermedio', 'avanzado']
+
+    def obtener_check_dia(self, obj):
+        return getattr(obj, 'check_dia_actual', None)
+
+    def obtener_clase_actual(self, obj):
+        check_dia = self.obtener_check_dia(obj)
+
+        if check_dia and check_dia.calendario:
+            return check_dia.calendario
+
+        return getattr(obj, 'calendario_actual', None)
+
+    def get_modo_diario(self, obj):
+        return self.es_modo_diario(obj)
+
+    def get_clase_actual_id(self, obj):
+        clase = self.obtener_clase_actual(obj)
+        return clase.id if clase else None
+
+    def get_fecha_clase_actual(self, obj):
+        clase = self.obtener_clase_actual(obj)
+        return clase.fecha if clase else None
+
+    def get_hora_inicio_clase(self, obj):
+        clase = self.obtener_clase_actual(obj)
+        return clase.hora_inicio if clase else None
+
+    def get_habilitado_hoy(self, obj):
+        if not self.es_modo_diario(obj):
+            return obj.desbloqueado
+
+        return bool(getattr(obj, 'habilitado_hoy', False))
+
+    def get_estudiante_completado_hoy(self, obj):
+        if not self.es_modo_diario(obj):
+            return obj.estudiante_completado
+
+        check_dia = self.obtener_check_dia(obj)
+        return check_dia.estudiante_completado if check_dia else False
+
+    def get_instructor_completado_hoy(self, obj):
+        if not self.es_modo_diario(obj):
+            return obj.instructor_completado
+
+        check_dia = self.obtener_check_dia(obj)
+        return check_dia.instructor_completado if check_dia else False
+
+    def get_completado_hoy(self, obj):
+        if not self.es_modo_diario(obj):
+            return obj.completado
+
+        check_dia = self.obtener_check_dia(obj)
+        return check_dia.completado if check_dia else False
 
 
 class NotificacionSerializer(serializers.ModelSerializer):

@@ -65,7 +65,9 @@ from ..models import (
     PagoInstructor,
     CargoInstitucional,
     SubtemaPlanEstudio,
+    TemaPlanEstudio,
     ProgresoTema,
+    ProgresoClaseTema,
     Notificacion,
     HistorialPlanEstudio,
 )
@@ -121,22 +123,21 @@ def generar_progreso_plan(matricula):
     if not matricula.plan_de_estudio:
         return
 
-    subtemas = SubtemaPlanEstudio.objects.filter(
-        tema__plan_estudio=matricula.plan_de_estudio,
-        activo=True,
-        tema__activo=True
+    temas = TemaPlanEstudio.objects.filter(
+        plan_estudio=matricula.plan_de_estudio,
+        activo=True
     ).order_by(
-        'tema__orden',
         'orden',
         'id'
     )
 
-    for index, subtema in enumerate(subtemas):
+    for index, tema in enumerate(temas, start=1):
         ProgresoTema.objects.get_or_create(
             matricula=matricula,
-            subtema=subtema,
+            tema=tema,
             defaults={
-                'desbloqueado': index == 0,
+                'orden_general': index,
+                'desbloqueado': index == 1,
                 'estudiante_completado': False,
                 'instructor_completado': False,
                 'completado': False,
@@ -2685,7 +2686,7 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
         'tema__subtemas'
     ).all()
 
-    serializer_class = ProgresoTemaSerializer  # ← IMPORTANTE: AGREGAR ESTO
+    serializer_class = ProgresoTemaSerializer 
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -2717,10 +2718,236 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
             ).distinct()
 
         return ProgresoTema.objects.none()
-
     
-    # El resto de tus métodos (marcar_estudiante, marcar_instructor, etc.) se mantienen igual
-    def normalizar_desbloqueo(self, matricula):
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        progresos = list(queryset)
+
+        matriculas = {
+            progreso.matricula_id: progreso.matricula
+            for progreso in progresos
+        }
+
+        for matricula in matriculas.values():
+            self.normalizar_desbloqueo(matricula)
+
+        progresos_preparados = []
+
+        for progreso in progresos:
+            progreso.refresh_from_db()
+            progresos_preparados.append(
+                self.preparar_contexto_diario(progreso)
+            )
+
+        serializer = self.get_serializer(
+            progresos_preparados,
+            many=True
+        )
+
+        return Response(serializer.data)
+
+    def retrieve(self, request, *args, **kwargs):
+        progreso = self.get_object()
+
+        self.normalizar_desbloqueo(progreso.matricula)
+
+        progreso.refresh_from_db()
+        progreso = self.preparar_contexto_diario(progreso)
+
+        serializer = self.get_serializer(progreso)
+
+        return Response(serializer.data)
+
+    def es_modo_diario(self, matricula):
+        tipo = str(getattr(matricula, 'tipo_curso', '') or '').lower()
+        return tipo in ['intermedio', 'avanzado']
+
+    def obtener_clase_habilitada_hoy(self, matricula):
+        ahora = timezone.localtime()
+        hoy = timezone.localdate()
+
+        clases = Calendario.objects.filter(
+            matricula=matricula,
+            es_examen=False,
+            fecha=hoy
+        ).exclude(
+            estado='cancelada'
+        ).order_by(
+            'hora_inicio',
+            'id'
+        )
+
+        for clase in clases:
+            if not clase.hora_inicio:
+                continue
+
+            inicio = datetime.combine(clase.fecha, clase.hora_inicio)
+
+            if timezone.is_naive(inicio):
+                inicio = timezone.make_aware(
+                    inicio,
+                    timezone.get_current_timezone()
+                )
+
+            momento_habilitado = inicio - timedelta(minutes=10)
+
+            if ahora >= momento_habilitado:
+                return clase
+
+        return None
+
+    def obtener_check_diario_actual(self, progreso, crear=False):
+        clase = self.obtener_clase_habilitada_hoy(progreso.matricula)
+
+        if not clase:
+            return None
+
+        if crear:
+            check, _ = ProgresoClaseTema.objects.get_or_create(
+                calendario=clase,
+                progreso_tema=progreso
+            )
+            return check
+
+        return ProgresoClaseTema.objects.filter(
+            calendario=clase,
+            progreso_tema=progreso
+        ).first()
+
+    def preparar_contexto_diario(self, progreso):
+        if not self.es_modo_diario(progreso.matricula):
+            return progreso
+
+        clase = self.obtener_clase_habilitada_hoy(progreso.matricula)
+        progreso.calendario_actual = clase
+        progreso.habilitado_hoy = bool(clase)
+
+        if clase:
+            check, _ = ProgresoClaseTema.objects.get_or_create(
+                calendario=clase,
+                progreso_tema=progreso
+            )
+            progreso.check_dia_actual = check
+        else:
+            progreso.check_dia_actual = None
+
+        return progreso
+
+    def todas_las_clases_diarias_completadas(self, progreso):
+        clases = Calendario.objects.filter(
+            matricula=progreso.matricula,
+            es_examen=False
+        ).exclude(
+            estado='cancelada'
+        )
+
+        total_clases = clases.count()
+
+        if total_clases == 0:
+            return False
+
+        total_checks_completados = ProgresoClaseTema.objects.filter(
+            progreso_tema=progreso,
+            calendario__in=clases,
+            estudiante_completado=True,
+            instructor_completado=True,
+            completado=True
+        ).count()
+
+        return total_checks_completados >= total_clases
+
+    def actualizar_estado_global_diario(self, progreso):
+        clases = Calendario.objects.filter(
+            matricula=progreso.matricula,
+            es_examen=False
+        ).exclude(
+            estado='cancelada'
+        )
+
+        total_clases = clases.count()
+
+        if total_clases == 0:
+            progreso.estudiante_completado = False
+            progreso.instructor_completado = False
+            progreso.completado = False
+            progreso.save(
+                update_fields=[
+                    'estudiante_completado',
+                    'instructor_completado',
+                    'completado',
+                ]
+            )
+            return
+
+        total_checks_completados = ProgresoClaseTema.objects.filter(
+            progreso_tema=progreso,
+            calendario__in=clases,
+            estudiante_completado=True,
+            instructor_completado=True,
+            completado=True
+        ).count()
+
+        plan_diario_completo = total_checks_completados >= total_clases
+
+        progreso.estudiante_completado = plan_diario_completo
+        progreso.instructor_completado = plan_diario_completo
+        progreso.completado = plan_diario_completo
+
+        if plan_diario_completo:
+            progreso.desbloqueado = True
+
+            ahora = timezone.now()
+
+            if not progreso.fecha_estudiante:
+                progreso.fecha_estudiante = ahora
+
+            if not progreso.fecha_instructor:
+                progreso.fecha_instructor = ahora
+
+            if not progreso.fecha_completado:
+                progreso.fecha_completado = ahora
+        else:
+            progreso.fecha_completado = None
+
+        progreso.save(
+            update_fields=[
+                'estudiante_completado',
+                'instructor_completado',
+                'completado',
+                'desbloqueado',
+                'fecha_estudiante',
+                'fecha_instructor',
+                'fecha_completado',
+            ]
+        )
+
+    def normalizar_desbloqueo_diario(self, matricula):
+        progresos = list(
+            ProgresoTema.objects.filter(
+                matricula=matricula
+            ).order_by(
+                'orden_general',
+                'id'
+            )
+        )
+
+        if not progresos:
+            return
+
+        clase = self.obtener_clase_habilitada_hoy(matricula)
+        habilitado = bool(clase)
+
+        for index, progreso in enumerate(progresos):
+            progreso.desbloqueado = habilitado and index == 0
+            progreso.save(update_fields=['desbloqueado'])
+
+            if habilitado and index == 0:
+                ProgresoClaseTema.objects.get_or_create(
+                    calendario=clase,
+                    progreso_tema=progreso
+                )
+
+    def normalizar_desbloqueo_principiante(self, matricula):
         hoy = timezone.localdate()
 
         progresos = list(
@@ -2798,6 +3025,13 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
                 progreso.desbloqueado = True
                 progreso.save(update_fields=['desbloqueado'])
 
+    def normalizar_desbloqueo(self, matricula):
+        if self.es_modo_diario(matricula):
+            self.normalizar_desbloqueo_diario(matricula)
+            return
+
+        self.normalizar_desbloqueo_principiante(matricula)
+
 
     def _actualizar_progreso(self, progreso):
         progreso.completado = (
@@ -2869,19 +3103,6 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
             progreso.desbloqueado = True
             progreso.save(update_fields=['desbloqueado'])
 
-            # if usuario_estudiante:
-            #     Notificacion.objects.update_or_create(
-            #         estudiante=usuario_estudiante,
-            #         tema=progreso.tema,
-            #         tipo='tema_desbloqueado',
-            #         defaults={
-            #             'mensaje': (
-            #                 f"Nuevo tema desbloqueado: "
-            #                 f"'{progreso.tema.titulo}'."
-            #             ),
-            #             'leida': False
-            #         }
-            #     )
 
     def _obtener_usuario_estudiante(self, progreso):
         estudiante = progreso.matricula.estudiante
@@ -3031,21 +3252,66 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
             'message': 'Desbloqueos actualizados correctamente.'
         })
 
-
-
-
     @action(detail=True, methods=['post'], url_path='marcar-estudiante')
     def marcar_estudiante(self, request, pk=None):
         try:
             progreso = self.get_object()
+
+            if self.es_modo_diario(progreso.matricula):
+                self.normalizar_desbloqueo(progreso.matricula)
+                progreso.refresh_from_db()
+                progreso = self.preparar_contexto_diario(progreso)
+
+                if not getattr(progreso, 'habilitado_hoy', False):
+                    return Response({
+                        'success': False,
+                        'error': 'Este tema aún no está disponible para la clase de hoy.'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                check_dia = self.obtener_check_diario_actual(
+                    progreso,
+                    crear=True
+                )
+
+                if not check_dia:
+                    return Response({
+                        'success': False,
+                        'error': 'No hay clase habilitada para marcar este tema.'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                if check_dia.estudiante_completado:
+                    return Response({
+                        'success': False,
+                        'error': 'Ya marcaste este tema como recibido en la clase de hoy.'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                with transaction.atomic():
+                    check_dia.estudiante_completado = True
+                    check_dia.fecha_estudiante = timezone.now()
+                    check_dia.save()
+
+                    if check_dia.completado:
+                        self.actualizar_estado_global_diario(progreso)
+                        mensaje = "Tema completado correctamente para la clase de hoy."
+                    else:
+                        mensaje = "Tema marcado como recibido para la clase de hoy. Falta confirmación del instructor."
+
+                progreso.refresh_from_db()
+                progreso = self.preparar_contexto_diario(progreso)
+
+                serializer = self.get_serializer(progreso)
+
+                return Response({
+                    'success': True,
+                    'message': mensaje,
+                    'data': serializer.data
+                })
 
             if not progreso.desbloqueado:
                 return Response({
                     'success': False,
                     'error': 'Este tema aún no está disponible.'
                 }, status=status.HTTP_400_BAD_REQUEST)
-
-         
 
             if progreso.estudiante_completado:
                 return Response({
@@ -3101,12 +3367,61 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
         try:
             progreso = self.get_object()
 
+            if self.es_modo_diario(progreso.matricula):
+                self.normalizar_desbloqueo(progreso.matricula)
+                progreso.refresh_from_db()
+                progreso = self.preparar_contexto_diario(progreso)
+
+                if not getattr(progreso, 'habilitado_hoy', False):
+                    return Response({
+                        'success': False,
+                        'error': 'Este tema aún no está disponible para la clase de hoy.'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                check_dia = self.obtener_check_diario_actual(
+                    progreso,
+                    crear=True
+                )
+
+                if not check_dia:
+                    return Response({
+                        'success': False,
+                        'error': 'No hay clase habilitada para marcar este tema.'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                if check_dia.instructor_completado:
+                    return Response({
+                        'success': False,
+                        'error': 'Ya marcaste este tema como dado en la clase de hoy.'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                with transaction.atomic():
+                    check_dia.instructor_completado = True
+                    check_dia.fecha_instructor = timezone.now()
+                    check_dia.save()
+
+                    if check_dia.completado:
+                        self.actualizar_estado_global_diario(progreso)
+                        mensaje = "Tema completado correctamente para la clase de hoy."
+                    else:
+                        mensaje = "Tema marcado como dado para la clase de hoy. Falta confirmación del estudiante."
+
+                progreso.refresh_from_db()
+                progreso = self.preparar_contexto_diario(progreso)
+
+                serializer = self.get_serializer(progreso)
+
+                return Response({
+                    'success': True,
+                    'message': mensaje,
+                    'data': serializer.data
+                })
+
             if not progreso.desbloqueado:
                 return Response({
                     'success': False,
                     'error': 'Este tema aún no está disponible.'
                 }, status=status.HTTP_400_BAD_REQUEST)
-           
 
             if progreso.instructor_completado:
                 return Response({
@@ -3155,11 +3470,10 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
                 'success': False,
                 'error': str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
-            
 
     @action(detail=True, methods=['post'], url_path='admin-forzar')
     def admin_forzar(self, request, pk=None):
-        rol = str(getattr(request.user, 'rol', '')).lower()
+        rol = str(getattr(request.user, 'rol_nombre', '') or '').lower()
 
         if (
             rol != 'admin'
@@ -3191,16 +3505,88 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
                 'error': 'Valor inválido. Use true o false'
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        if self.es_modo_diario(progreso.matricula):
+            self.normalizar_desbloqueo(progreso.matricula)
+            progreso.refresh_from_db()
+            progreso = self.preparar_contexto_diario(progreso)
+
+            if not getattr(progreso, 'habilitado_hoy', False):
+                return Response({
+                    'success': False,
+                    'error': 'Este tema aún no está disponible para la clase de hoy.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            check_dia = self.obtener_check_diario_actual(
+                progreso,
+                crear=True
+            )
+
+            if not check_dia:
+                return Response({
+                    'success': False,
+                    'error': 'No hay clase habilitada para modificar este tema.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            with transaction.atomic():
+                old_estudiante = check_dia.estudiante_completado
+                old_instructor = check_dia.instructor_completado
+
+                if tipo_check == 'estudiante':
+                    check_dia.estudiante_completado = valor
+                    check_dia.fecha_estudiante = timezone.now() if valor else None
+                else:
+                    check_dia.instructor_completado = valor
+                    check_dia.fecha_instructor = timezone.now() if valor else None
+
+                if not valor:
+                    check_dia.fecha_completado = None
+
+                check_dia.save()
+
+                if check_dia.completado:
+                    self.actualizar_estado_global_diario(progreso)
+
+                try:
+                    HistorialPlanEstudio.objects.create(
+                        progreso_tema=progreso,
+                        usuario=request.user,
+                        accion='admin_forzar_diario',
+                        valor_anterior_estudiante=old_estudiante,
+                        valor_anterior_instructor=old_instructor,
+                        valor_nuevo_estudiante=check_dia.estudiante_completado,
+                        valor_nuevo_instructor=check_dia.instructor_completado
+                    )
+                except Exception as e:
+                    print(f"Error al guardar historial diario: {e}")
+
+            progreso.refresh_from_db()
+            progreso = self.preparar_contexto_diario(progreso)
+
+            serializer = self.get_serializer(progreso)
+
+            check_nombre = "estudiante" if tipo_check == 'estudiante' else "instructor"
+
+            return Response({
+                'success': True,
+                'message': f'Check diario de {check_nombre} actualizado correctamente',
+                'data': serializer.data
+            })
+
         with transaction.atomic():
             old_estudiante = progreso.estudiante_completado
             old_instructor = progreso.instructor_completado
 
             if tipo_check == 'estudiante':
                 progreso.estudiante_completado = valor
+                progreso.fecha_estudiante = timezone.now() if valor else None
             else:
                 progreso.instructor_completado = valor
+                progreso.fecha_instructor = timezone.now() if valor else None
 
             progreso.fecha_admin_edit = timezone.now()
+
+            if not valor:
+                progreso.fecha_completado = None
 
             self._actualizar_progreso(progreso)
             self.normalizar_desbloqueo(progreso.matricula)
@@ -3217,9 +3603,6 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
                 )
             except Exception as e:
                 print(f"Error al guardar historial: {e}")
-
-            check_nombre = "estudiante" if tipo_check == 'estudiante' else "instructor"
-            accion_texto = "habilitado" if valor else "deshabilitado"
 
             usuario_estudiante = progreso.matricula.estudiante.usuarios.first()
 
@@ -3241,6 +3624,8 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
                     print(f"Error creando notificación: {e}")
 
         serializer = self.get_serializer(progreso)
+
+        check_nombre = "estudiante" if tipo_check == 'estudiante' else "instructor"
 
         return Response({
             'success': True,

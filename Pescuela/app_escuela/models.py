@@ -549,7 +549,7 @@ class ProgresoTema(models.Model):
 
     class Meta:
         unique_together = ['matricula', 'tema']
-        ordering = ['orden_general', 'tema__orden', 'id']  # ← CAMBIAR ES
+        ordering = ['orden_general', 'tema__orden', 'id'] 
 
     def __str__(self):
         return f"{self.matricula.estudiante.nombre} - {self.tema.titulo}"
@@ -561,6 +561,49 @@ class ProgresoTema(models.Model):
             self.instructor_completado
         )
 
+class ProgresoClaseTema(models.Model):
+    calendario = models.ForeignKey(
+        'Calendario',
+        on_delete=models.CASCADE,
+        related_name='progresos_tema_dia'
+    )
+
+    progreso_tema = models.ForeignKey(
+        'ProgresoTema',
+        on_delete=models.CASCADE,
+        related_name='checks_por_clase'
+    )
+
+    estudiante_completado = models.BooleanField(default=False)
+    instructor_completado = models.BooleanField(default=False)
+    completado = models.BooleanField(default=False)
+
+    fecha_estudiante = models.DateTimeField(null=True, blank=True)
+    fecha_instructor = models.DateTimeField(null=True, blank=True)
+    fecha_completado = models.DateTimeField(null=True, blank=True)
+
+    fecha_creacion = models.DateTimeField(auto_now_add=True)
+    fecha_actualizacion = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['calendario', 'progreso_tema']
+        ordering = ['calendario__fecha', 'calendario__hora_inicio']
+
+    def actualizar_completado(self):
+        self.completado = (
+            self.estudiante_completado and
+            self.instructor_completado
+        )
+
+        if self.completado and not self.fecha_completado:
+            self.fecha_completado = timezone.now()
+
+    def save(self, *args, **kwargs):
+        self.actualizar_completado()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.progreso_tema} - {self.calendario}"
 
 class Notificacion(models.Model):
     """Notificaciones para el administrador"""
