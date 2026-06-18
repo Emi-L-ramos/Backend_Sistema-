@@ -193,6 +193,7 @@ class Matricula(models.Model):
     MODALIDADES = [
         ('Regular', 'Regular'),
         ('Extraordinario', 'Extraordinario'),
+        ('Mixto', 'Mixto'),
     ]
     
     HORARIOS = [

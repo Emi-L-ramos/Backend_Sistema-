@@ -987,7 +987,82 @@ class CrearBloqueCitasSerializer(serializers.Serializer):
             )
 
         return data
+    
+class CrearCalendarioManualSerializer(serializers.Serializer):
+    instructor_id = serializers.IntegerField()
+    matricula_id = serializers.IntegerField()
+    fechas = serializers.ListField(
+        child=serializers.DateField(),
+        allow_empty=False
+    )
+    horas_por_dia = serializers.IntegerField(default=2, required=False)
 
+    def validate(self, data):
+        try:
+            matricula = Matricula.objects.select_related('estudiante').get(
+                pk=data['matricula_id']
+            )
+        except Matricula.DoesNotExist:
+            raise serializers.ValidationError('Matrícula no encontrada.')
+
+        if matricula.estado != 'matriculado':
+            raise serializers.ValidationError(
+                'No se puede asignar horario porque la matrícula aún no está aprobada.'
+            )
+
+        if not matricula.estudiante.usuarios.filter(rol__nombre__iexact='estudiante').exists():
+            raise serializers.ValidationError(
+                'No se puede asignar horario porque el estudiante todavía no tiene usuario creado.'
+            )
+
+        modalidad = str(matricula.modalidad or '').strip().lower()
+
+        if modalidad != 'mixto':
+            raise serializers.ValidationError(
+                'La asignación manual solo está permitida para modalidad Mixto.'
+            )
+
+        horas_por_dia = int(data.get('horas_por_dia') or 2)
+
+        if horas_por_dia <= 0:
+            raise serializers.ValidationError(
+                'Las horas por día deben ser mayores a cero.'
+            )
+
+        fechas = data.get('fechas') or []
+
+        if len(fechas) != len(set(fechas)):
+            raise serializers.ValidationError(
+                'No puede seleccionar fechas repetidas.'
+            )
+
+        if Calendario.objects.filter(matricula=matricula).exists():
+            raise serializers.ValidationError(
+                'Esta matrícula ya tiene clases asignadas.'
+            )
+
+        if matricula.tipo_curso in ['Intermedio', 'Avanzado']:
+            horas_totales = matricula.horas_reforzamiento
+
+            if not horas_totales:
+                raise serializers.ValidationError(
+                    'La matrícula no tiene horas asignadas para este curso.'
+                )
+        else:
+            horas_totales = 16
+
+        num_clases = int(horas_totales) // horas_por_dia
+
+        if int(horas_totales) % horas_por_dia != 0:
+            num_clases += 1
+
+        if len(fechas) != num_clases:
+            raise serializers.ValidationError(
+                f'Debe seleccionar exactamente {num_clases} fecha(s) para completar {horas_totales} hora(s).'
+            )
+
+        data['num_clases'] = num_clases
+        return data
 
 class AsistenciaSerializer(serializers.ModelSerializer):
     estudiante_nombre = serializers.SerializerMethodField()

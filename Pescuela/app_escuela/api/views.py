@@ -83,6 +83,7 @@ from .serializers import (
     ReciboSerializer,
     CalendarioSerializer,
     CrearBloqueCitasSerializer,
+    CrearCalendarioManualSerializer,
     AsistenciaSerializer,
     NotasSerializer,
     ValorCursoSerializer,
@@ -1315,6 +1316,123 @@ class CalendarioViewSet(viewsets.ModelViewSet):
         return Response(
             {
                 'message': f'Bloque de {len(creadas)} clases creado correctamente.',
+                'fecha_inicio': fechas[0],
+                'fecha_fin': fechas[-1],
+                'clases_creadas': len(creadas),
+                'hora_inicio': hora_inicio.strftime('%H:%M'),
+                'hora_fin': hora_fin.strftime('%H:%M'),
+                'citas': CalendarioSerializer(creadas, many=True).data,
+            },
+            status=status.HTTP_201_CREATED
+        )
+    
+    @action(detail=False, methods=['post'], url_path='crear-manual')
+    def crear_calendario_manual(self, request):
+        if not es_admin(request.user):
+            return Response(
+                {'error': 'Solo el administrador puede crear calendario manual.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        serializer = CrearCalendarioManualSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        matricula = Matricula.objects.select_related(
+            'estudiante',
+            'categoria',
+        ).get(id=data['matricula_id'])
+
+        instructor = Instructor.objects.get(id=data['instructor_id'])
+
+        rango = obtener_rango_horario(matricula)
+
+        if not rango:
+            return Response(
+                {'error': 'La matrícula no tiene un horario válido.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        horas_por_dia = int(data.get('horas_por_dia', 2))
+
+        if horas_por_dia <= 0:
+            return Response(
+                {'error': 'Las horas por día deben ser mayores a cero.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        hora_inicio = datetime.strptime(rango[0], '%H:%M').time()
+
+        hora_fin = (
+            datetime.combine(date.today(), hora_inicio) +
+            timedelta(hours=horas_por_dia)
+        ).time()
+
+        fechas = sorted(data['fechas'])
+
+        for fecha_clase in fechas:
+            choque = Calendario.objects.filter(
+                instructor=instructor,
+                fecha=fecha_clase,
+                hora_inicio__lt=hora_fin,
+                hora_fin__gt=hora_inicio,
+            ).exclude(
+                estado='cancelada'
+            ).exists()
+
+            if choque:
+                return Response(
+                    {
+                        'error': (
+                            f'El instructor ya tiene ocupado el horario '
+                            f'{hora_inicio.strftime("%H:%M")} - {hora_fin.strftime("%H:%M")} '
+                            f'el día {fecha_clase}.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        creadas = []
+
+        with transaction.atomic():
+            for i, fecha_clase in enumerate(fechas, start=1):
+                clase = Calendario.objects.create(
+                    matricula=matricula,
+                    instructor=instructor,
+                    fecha=fecha_clase,
+                    hora_inicio=hora_inicio,
+                    hora_fin=hora_fin,
+                    numero_clase=i,
+                    estado='pendiente',
+                    es_examen=False,
+                )
+
+                creadas.append(clase)
+
+            progresos = list(
+                ProgresoTema.objects.filter(
+                    matricula=matricula
+                ).select_related(
+                    'tema',
+                    'tema__plan_estudio'
+                ).order_by(
+                    'orden_general',
+                    'id'
+                )
+            )
+
+        pendientes = [
+            progreso for progreso in progresos
+            if not progreso.completado
+        ]
+
+        for progreso in pendientes:
+            progreso.desbloqueado = False
+            progreso.save(update_fields=['desbloqueado'])
+
+        return Response(
+            {
+                'message': f'Calendario manual de {len(creadas)} clases creado correctamente.',
                 'fecha_inicio': fechas[0],
                 'fecha_fin': fechas[-1],
                 'clases_creadas': len(creadas),
