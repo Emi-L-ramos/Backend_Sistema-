@@ -1862,15 +1862,25 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             es_pasado = clase.fecha < hoy
             es_futuro = clase.fecha > hoy
 
+            es_admin_asistencia = (
+                rol in ['admin', 'administrador']
+                or user.is_staff
+                or user.is_superuser
+            )
+
             puede_marcar = (
-                rol == 'instructor'
-                and es_hoy
+                es_hoy
                 and en_rango
                 and asistencia is None
                 and clase.estado in ['pendiente', 'reprogramada']
-                and clase.instructor_id == user.instructor_id
+                and (
+                    es_admin_asistencia
+                    or (
+                        rol == 'instructor'
+                        and clase.instructor_id == getattr(user, 'instructor_id', None)
+                    )
+                )
             )
-
               
 
             resultado[matricula_id]['asistencias'][str(clase.numero_clase)] = {
@@ -1925,7 +1935,6 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
 
         return Response(list(resultado.values()))
     
-
     @action(detail=False, methods=['post'], url_path='marcar')
     def marcar(self, request):
         clase_id = request.data.get('clase_id')
@@ -1934,27 +1943,26 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
         km_inicial = request.data.get('km_inicial')
         km_final = request.data.get('km_final')
 
-        if estado == 'asistio':
+        user = request.user
+        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ''
 
-            if km_inicial in [None, '']:
-                return Response(
-                    {'error': 'Debe ingresar el km inicial.'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+        es_admin_asistencia = (
+            rol in ['admin', 'administrador']
+            or user.is_staff
+            or user.is_superuser
+        )
 
-            try:
-                km_inicial = Decimal(str(km_inicial))
-            except Exception:
-                return Response(
-                    {'error': 'El km inicial debe ser numérico.'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+        es_usuario_instructor = rol == 'instructor'
 
-            km_final = None
+        if not es_admin_asistencia and not es_usuario_instructor:
+            return Response(
+                {'error': 'Solo el instructor o el administrador pueden marcar asistencia.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         if estado not in ['asistio', 'falto']:
             return Response(
-                {'error': 'El instructor solo puede marcar asistió o faltó.'},
+                {'error': 'Solo se puede marcar asistió o faltó.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1970,46 +1978,55 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        user = request.user
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ''
+        if es_usuario_instructor and not es_admin_asistencia:
+            instructor_usuario = getattr(user, 'instructor', None)
 
-        if rol != 'instructor':
-            return Response(
-                {'error': 'Solo el instructor puede marcar asistencia.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            if not instructor_usuario:
+                return Response(
+                    {'error': 'El usuario actual no tiene instructor asignado.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
 
-        instructor_usuario = getattr(user, 'instructor', None)
+            if clase.instructor_id != instructor_usuario.id:
+                return Response(
+                    {'error': 'No puedes marcar asistencia de una clase que no te pertenece.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
 
-        if not instructor_usuario:
-            return Response(
-                {'error': 'El usuario actual no tiene instructor asignado.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        if estado == 'asistio':
+            if km_inicial in [None, '']:
+                    return Response(
+                    {'error': 'Debe ingresar el km inicial.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-        if clase.instructor_id != instructor_usuario.id:
-            return Response(
-                {'error': 'No puedes marcar asistencia de una clase que no te pertenece.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            try:
+                km_inicial = Decimal(str(km_inicial))
+            except Exception:
+                return Response(
+                    {'error': 'El km inicial debe ser numérico.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-    #Nuew funcionalidad ------------------------->
+            km_final = None
+
+            if not observacion and es_admin_asistencia:
+                observacion = 'Asistencia registrada por administrador.'
+        else:
+            km_inicial = None
+            km_final = None
 
         hoy = timezone.localdate()
 
         if clase.fecha != hoy:
             return Response(
-                {
-                    'error': 'Solo se puede marcar asistencia el día exacto de la clase.'
-                },
+                {'error': 'Solo se puede marcar asistencia el día exacto de la clase.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         if clase.estado not in ['pendiente', 'reprogramada']:
             return Response(
-                {
-                    'error': 'Esta clase ya no está disponible para marcar asistencia.'
-                },
+                {'error': 'Esta clase ya no está disponible para marcar asistencia.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -2039,30 +2056,29 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'message': 'Asistencia registrada correctamente.',
             'data': serializer.data
         })
-
-
+    
     @action(detail=False, methods=['post'], url_path='finalizar-km')
     def finalizar_km(self, request):
-
         asistencia_id = request.data.get('asistencia_id')
         km_final = request.data.get('km_final')
+
         user = request.user
         rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ''
 
-        if rol != 'instructor':
+        es_admin_asistencia = (
+            rol in ['admin', 'administrador']
+            or user.is_staff
+            or user.is_superuser
+        )
+
+        es_usuario_instructor = rol == 'instructor'
+
+        if not es_admin_asistencia and not es_usuario_instructor:
             return Response(
-                {'error': 'Solo el instructor puede finalizar kilometraje.'},
+                {'error': 'Solo el instructor o el administrador pueden finalizar kilometraje.'},
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        instructor_usuario = getattr(user, 'instructor', None)
-
-        if not instructor_usuario:
-            return Response(
-                {'error': 'El usuario actual no tiene instructor asignado.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
         if not asistencia_id:
             return Response(
                 {'error': 'Debe enviar la asistencia.'},
@@ -2074,18 +2090,26 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 'As_calendario',
                 'As_calendario__instructor'
             ).get(id=asistencia_id)
-
         except Asistencia.DoesNotExist:
             return Response(
                 {'error': 'Asistencia no encontrada.'},
                 status=status.HTTP_404_NOT_FOUND
             )
-        
-        if asistencia.As_calendario.instructor_id != instructor_usuario.id:
-            return Response(
-                {'error': 'No puedes finalizar kilometraje de una clase que no te pertenece.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+
+        if es_usuario_instructor and not es_admin_asistencia:
+            instructor_usuario = getattr(user, 'instructor', None)
+
+            if not instructor_usuario:
+                return Response(
+                    {'error': 'El usuario actual no tiene instructor asignado.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            if asistencia.As_calendario.instructor_id != instructor_usuario.id:
+                return Response(
+                    {'error': 'No puedes finalizar kilometraje de una clase que no te pertenece.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
 
         if asistencia.estado != 'asistio':
             return Response(
@@ -2128,7 +2152,111 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'success': True,
             'message': 'Kilometraje final registrado.',
             'data': serializer.data
-        })   
+        })
+    
+    @action(detail=False, methods=['post'], url_path='editar-km')
+    def editar_km(self, request):
+        asistencia_id = request.data.get('asistencia_id')
+        km_inicial = request.data.get('km_inicial')
+        km_final = request.data.get('km_final')
+
+        user = request.user
+        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ''
+
+        es_admin_asistencia = (
+            rol in ['admin', 'administrador']
+            or user.is_staff
+            or user.is_superuser
+        )
+
+        es_usuario_instructor = rol == 'instructor'
+
+        if not es_admin_asistencia and not es_usuario_instructor:
+            return Response(
+                {'error': 'Solo el instructor o el administrador pueden editar kilometraje.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if not asistencia_id:
+            return Response(
+                {'error': 'Debe enviar la asistencia.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            asistencia = Asistencia.objects.select_related(
+                'As_calendario',
+                'As_calendario__instructor'
+            ).get(id=asistencia_id)
+        except Asistencia.DoesNotExist:
+            return Response(
+                {'error': 'Asistencia no encontrada.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if es_usuario_instructor and not es_admin_asistencia:
+            instructor_usuario = getattr(user, 'instructor', None)
+
+            if not instructor_usuario:
+                return Response(
+                    {'error': 'El usuario actual no tiene instructor asignado.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            if asistencia.As_calendario.instructor_id != instructor_usuario.id:
+                return Response(
+                    {'error': 'No puedes editar kilometraje de una clase que no te pertenece.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+        if asistencia.estado != 'asistio':
+            return Response(
+                {'error': 'Solo se puede editar kilometraje de clases asistidas.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if km_inicial in [None, '']:
+            return Response(
+                {'error': 'Debe ingresar el km inicial.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            km_inicial = Decimal(str(km_inicial))
+        except Exception:
+            return Response(
+                {'error': 'El km inicial debe ser numérico.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if km_final in [None, '']:
+            km_final = None
+        else:
+            try:
+                km_final = Decimal(str(km_final))
+            except Exception:
+                return Response(
+                    {'error': 'El km final debe ser numérico.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if km_final < km_inicial:
+                return Response(
+                    {'error': 'El km final no puede ser menor al inicial.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        asistencia.km_inicial = km_inicial
+        asistencia.km_final = km_final
+        asistencia.save(update_fields=['km_inicial', 'km_final'])
+
+        serializer = self.get_serializer(asistencia)
+
+        return Response({
+            'success': True,
+            'message': 'Kilometraje editado correctamente.',
+            'data': serializer.data
+        })
         
     @action(detail=True, methods=['post'], url_path='justificar')
     def justificar(self, request, pk=None):
