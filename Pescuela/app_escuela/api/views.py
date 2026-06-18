@@ -1869,8 +1869,7 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             )
 
             puede_marcar = (
-                en_rango
-                and asistencia is None
+                asistencia is None
                 and clase.estado in ['pendiente', 'reprogramada']
                 and (
                     (
@@ -1879,6 +1878,7 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                     )
                     or (
                         rol == 'instructor'
+                        and en_rango
                         and es_hoy
                         and clase.instructor_id == getattr(user, 'instructor_id', None)
                     )
