@@ -1869,20 +1869,22 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             )
 
             puede_marcar = (
-                es_hoy
-                and en_rango
+                en_rango
                 and asistencia is None
                 and clase.estado in ['pendiente', 'reprogramada']
                 and (
-                    es_admin_asistencia
+                    (
+                        es_admin_asistencia
+                        and clase.fecha <= hoy
+                    )
                     or (
                         rol == 'instructor'
+                        and es_hoy
                         and clase.instructor_id == getattr(user, 'instructor_id', None)
                     )
                 )
             )
               
-
             resultado[matricula_id]['asistencias'][str(clase.numero_clase)] = {
                 'id': clase.id,
                 'asistencia_id': asistencia_id,
@@ -2018,11 +2020,18 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
 
         hoy = timezone.localdate()
 
-        if clase.fecha != hoy:
-            return Response(
-                {'error': 'Solo se puede marcar asistencia el día exacto de la clase.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        if es_admin_asistencia:
+            if clase.fecha > hoy:
+                return Response(
+                    {'error': 'No se puede marcar asistencia de una clase futura.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            if clase.fecha != hoy:
+                return Response(
+                    {'error': 'Solo se puede marcar asistencia el día exacto de la clase.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
         if clase.estado not in ['pendiente', 'reprogramada']:
             return Response(
