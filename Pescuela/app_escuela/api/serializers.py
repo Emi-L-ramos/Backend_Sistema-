@@ -26,6 +26,8 @@ from ..models import (
     PagoInstructor,
     CargoInstitucional,
 )
+
+
 from django.db import transaction
 from ..models import ProgresoTema, ProgresoClaseTema, HistorialPlanEstudio, Notificacion
 from ..models import PlanEstudio, SubtemaPlanEstudio
@@ -526,11 +528,26 @@ class InstructorSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Instructor
-        fields = '__all__'
+        exclude = ['foto_base64']
+
     def get_nombre_completo(self, obj):
         nombre = f"{obj.nombre or ''} {obj.apellido or ''}".strip()
         return nombre or f"Instructor {obj.id}"
+
+    def get_categoria_nombre(self, obj):
+        return obj.categoria_instructor or ""
     
+class InstructorListSerializer(serializers.ModelSerializer):
+    nombre_completo = serializers.SerializerMethodField()
+    categoria_nombre = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Instructor
+        exclude = ['foto_base64']
+
+    def get_nombre_completo(self, obj):
+        nombre = f"{obj.nombre or ''} {obj.apellido or ''}".strip()
+        return nombre or f"Instructor {obj.id}"
 
     def get_categoria_nombre(self, obj):
         return obj.categoria_instructor or ""

@@ -78,6 +78,7 @@ from .serializers import (
     CargoInstitucionalSerializer,
     EstudianteSerializer,
     InstructorSerializer,
+    InstructorListSerializer,
     CategoriaVehiculoSerializer,
     MatriculaSerializer,
     ReciboSerializer,
@@ -567,6 +568,12 @@ class InstructorViewSet(viewsets.ModelViewSet):
     serializer_class = InstructorSerializer
     permission_classes = [IsAuthenticated]
     parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return InstructorListSerializer
+
+        return InstructorSerializer
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
@@ -1514,6 +1521,9 @@ class CalendarioViewSet(viewsets.ModelViewSet):
 
         aplicar_a = request.data.get('aplicar_a', 'solo')
         instructor_id = request.data.get('instructor')
+        nueva_fecha = request.data.get('fecha')
+        nueva_hora_inicio = request.data.get('hora_inicio')
+        nueva_hora_fin = request.data.get('hora_fin')
 
         if not es_admin(request.user):
             return Response(
@@ -1521,41 +1531,145 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        if not instructor_id:
-            return super().partial_update(request, *args, **kwargs)
+        def convertir_hora(valor, campo):
+            if valor in [None, '']:
+                return None
 
-        if aplicar_a == 'pendientes':
+            valor = str(valor).strip()
+
+            try:
+                if len(valor) == 5:
+                    return datetime.strptime(valor, '%H:%M').time()
+
+                return datetime.strptime(valor, '%H:%M:%S').time()
+            except ValueError:
+                raise serializers.ValidationError({
+                    campo: 'La hora debe tener formato HH:MM.'
+                })
+
+        try:
+            hora_inicio_obj = convertir_hora(nueva_hora_inicio, 'hora_inicio')
+            hora_fin_obj = convertir_hora(nueva_hora_fin, 'hora_fin')
+        except serializers.ValidationError as error:
+            return Response(error.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        cambia_hora = hora_inicio_obj is not None or hora_fin_obj is not None
+
+        if cambia_hora and (hora_inicio_obj is None or hora_fin_obj is None):
+            return Response(
+                {'error': 'Debe enviar hora de inicio y hora fin para cambiar el horario.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if cambia_hora and hora_fin_obj <= hora_inicio_obj:
+            return Response(
+                {'error': 'La hora fin debe ser mayor que la hora inicio.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        fecha_obj = None
+
+        if nueva_fecha not in [None, '']:
+            fecha_obj = parse_date(str(nueva_fecha))
+
+            if not fecha_obj:
+                return Response(
+                    {'error': 'La fecha debe tener formato YYYY-MM-DD.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        if instructor_id in ['', None]:
+            instructor_id = None
+        else:
+            try:
+                instructor_id = int(instructor_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {'error': 'El instructor enviado no es válido.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if not Instructor.objects.filter(id=instructor_id).exists():
+                return Response(
+                    {'error': 'El instructor seleccionado no existe.'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+        if aplicar_a == 'pendientes' and not instance.es_examen:
             clases = Calendario.objects.filter(
                 matricula=instance.matricula,
                 estado='pendiente',
                 fecha__gte=instance.fecha,
                 es_examen=False,
-            )
+            ).order_by('fecha', 'hora_inicio')
         else:
             clases = Calendario.objects.filter(id=instance.id)
 
+        if not clases.exists():
+            return Response(
+                {'error': 'No hay clases disponibles para actualizar.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         for clase in clases:
+            instructor_destino_id = instructor_id or clase.instructor_id
+
+            if not instructor_destino_id:
+                return Response(
+                    {'error': 'La clase no tiene instructor asignado.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if aplicar_a == 'pendientes' and not instance.es_examen:
+                fecha_destino = clase.fecha
+            else:
+                fecha_destino = fecha_obj or clase.fecha
+
+            hora_inicio_destino = hora_inicio_obj or clase.hora_inicio
+            hora_fin_destino = hora_fin_obj or clase.hora_fin
+
             choque = Calendario.objects.filter(
-                instructor_id=instructor_id,
-                fecha=clase.fecha,
-                hora_inicio__lt=clase.hora_fin,
-                hora_fin__gt=clase.hora_inicio,
+                instructor_id=instructor_destino_id,
+                fecha=fecha_destino,
+                hora_inicio__lt=hora_fin_destino,
+                hora_fin__gt=hora_inicio_destino,
                 estado__in=['pendiente', 'reprogramada', 'inasistencia']
-            ).exclude(id=clase.id).exists()
+            ).exclude(
+                id=clase.id
+            ).exists()
 
             if choque:
                 return Response(
                     {
                         'error': (
                             f'El instructor ya tiene ocupado el horario '
-                            f'{clase.hora_inicio.strftime("%H:%M")} - {clase.hora_fin.strftime("%H:%M")} '
-                            f'el día {clase.fecha}.'
+                            f'{hora_inicio_destino.strftime("%H:%M")} - {hora_fin_destino.strftime("%H:%M")} '
+                            f'el día {fecha_destino}.'
                         )
                     },
-                    status=400
+                    status=status.HTTP_400_BAD_REQUEST
                 )
 
-        clases.update(instructor_id=instructor_id)
+        with transaction.atomic():
+            for clase in clases:
+                campos_actualizados = []
+
+                if instructor_id:
+                    clase.instructor_id = instructor_id
+                    campos_actualizados.append('instructor')
+
+                if aplicar_a != 'pendientes' or instance.es_examen:
+                    if fecha_obj:
+                        clase.fecha = fecha_obj
+                        campos_actualizados.append('fecha')
+
+                if cambia_hora:
+                    clase.hora_inicio = hora_inicio_obj
+                    clase.hora_fin = hora_fin_obj
+                    campos_actualizados.extend(['hora_inicio', 'hora_fin'])
+
+                if campos_actualizados:
+                    clase.save(update_fields=campos_actualizados)
 
         instance.refresh_from_db()
         serializer = self.get_serializer(instance)
@@ -1575,9 +1689,22 @@ class CalendarioViewSet(viewsets.ModelViewSet):
 
         matricula_id = request.data.get('matricula_id')
         fecha = request.data.get('fecha')
+        horario_examen = request.data.get('horario_examen', '14_16')
 
-        hora_inicio = '14:00'
-        hora_fin = '16:00'
+        horarios_examen = {
+            '08_10': ('08:00', '10:00'),
+            '14_16': ('14:00', '16:00'),
+        }
+
+        if horario_examen not in horarios_examen:
+            return Response(
+                {
+                    'error': 'Horario de examen no válido. Use 08_10 o 14_16.'
+                },
+                status=400
+            )
+
+        hora_inicio, hora_fin = horarios_examen[horario_examen]
 
         try:
             matricula = Matricula.objects.select_related(
@@ -1663,6 +1790,25 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': 'Este estudiante ya tiene el máximo de 3 exámenes policiales asignados.'
+                },
+                status=400
+            )
+        
+        choque = Calendario.objects.filter(
+            instructor=instructor,
+            fecha=fecha,
+            hora_inicio__lt=hora_fin,
+            hora_fin__gt=hora_inicio,
+            estado__in=['pendiente', 'reprogramada', 'inasistencia']
+        ).exists()
+
+        if choque:
+            return Response(
+                {
+                    'error': (
+                        f'El instructor ya tiene ocupado el horario '
+                        f'{hora_inicio} - {hora_fin} el día {fecha}.'
+                    )
                 },
                 status=400
             )
@@ -4937,10 +5083,10 @@ class PerfilView(APIView):
     def get_foto_url(self, request, instructor):
         return obtener_foto_instructor(instructor)
 
-    def serializar_instructor(self, request, instructor):
+    def serializar_instructor(self, request, instructor, incluir_foto=True):
         categoria = instructor.categoria_instructor or ""
 
-        return {
+        data = {
             "id": instructor.id,
             "nombre": instructor.nombre,
             "apellido": instructor.apellido,
@@ -4950,12 +5096,18 @@ class PerfilView(APIView):
             "experiencia": instructor.experiencia or "",
             "categoria": categoria,
             "categoria_instructor": categoria,
-            "foto": self.get_foto_url(request, instructor),
             "cedula": instructor.cedula or "",
             "nacionalidad": instructor.nacionalidad or "",
             "centro_trabajo": instructor.centro_trabajo or "",
             "cargo": instructor.cargo or "",
         }
+
+        if incluir_foto:
+            data["foto"] = self.get_foto_url(request, instructor)
+        else:
+            data["foto"] = None
+
+        return data
 
     def serializar_estudiante(self, estudiante):
         return {
@@ -4985,13 +5137,16 @@ class PerfilView(APIView):
             "instructores": [],
         }
 
-        if rol in ['admin', 'secretaria']:
-            instructores = Instructor.objects.all()
-
-            estudiantes = Estudiante.objects.all()
+        if rol in ['admin', 'administrador', 'secretaria']:
+            instructores = Instructor.objects.all().order_by('-id')
+            estudiantes = Estudiante.objects.all().order_by('-id')
 
             data["instructores"] = [
-                self.serializar_instructor(request, instructor)
+                self.serializar_instructor(
+                    request,
+                    instructor,
+                    incluir_foto=False
+                )
                 for instructor in instructores
             ]
 
