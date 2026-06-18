@@ -119,6 +119,72 @@ def es_instructor(user):
 def es_estudiante(user):
     return obtener_rol(user) == 'estudiante' and getattr(user, 'estudiante_id', None)
 
+def validar_plan_completado_para_examen(matricula):
+    tipo = str(getattr(matricula, 'tipo_curso', '') or '').strip().lower()
+
+    progresos = ProgresoTema.objects.filter(matricula=matricula)
+    total_temas = progresos.count()
+
+    if total_temas == 0:
+        return {
+            'completo': False,
+            'error': 'El estudiante no tiene temas asignados en su plan de estudio.',
+            'progreso': '0/0',
+        }
+
+    if tipo in ['intermedio', 'avanzado']:
+        progreso = progresos.first()
+
+        clases = Calendario.objects.filter(
+            matricula=matricula,
+            es_examen=False,
+        ).exclude(
+            estado='cancelada'
+        )
+
+        total_clases = clases.count()
+
+        if total_clases == 0:
+            return {
+                'completo': False,
+                'error': 'El estudiante no tiene clases asignadas.',
+                'progreso': '0/0',
+            }
+
+        checks_completados = ProgresoClaseTema.objects.filter(
+            progreso_tema=progreso,
+            calendario__in=clases,
+            estudiante_completado=True,
+            instructor_completado=True,
+            completado=True,
+        ).count()
+
+        completo = checks_completados >= total_clases
+
+        return {
+            'completo': completo,
+            'error': (
+                f'No se puede habilitar el examen porque aún no ha completado '
+                f'todos los checks diarios. Progreso: {checks_completados}/{total_clases} clases.'
+            ),
+            'progreso': f'{checks_completados}/{total_clases}',
+        }
+
+    completados = progresos.filter(
+        estudiante_completado=True,
+        instructor_completado=True,
+    ).count()
+
+    completo = completados >= total_temas
+
+    return {
+        'completo': completo,
+        'error': (
+            f'No se puede habilitar el examen porque el plan de estudio '
+            f'aún no está completo. Progreso: {completados}/{total_temas} temas.'
+        ),
+        'progreso': f'{completados}/{total_temas}',
+    }
 
 def generar_progreso_plan(matricula):
     if not matricula.plan_de_estudio:
@@ -2493,24 +2559,14 @@ class NotasViewSet(viewsets.ModelViewSet):
                 'error': 'Ya existe una nota práctica registrada para este estudiante.'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        progresos = ProgresoTema.objects.filter(matricula=matricula)
-        total_temas = progresos.count()
+        validacion_plan = validar_plan_completado_para_examen(matricula)
 
-        if total_temas == 0:
+        if not validacion_plan['completo']:
             return Response({
-                'error': 'El estudiante no tiene temas asignados en su plan de estudio.'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        completados = progresos.filter(
-            estudiante_completado=True,
-            instructor_completado=True
-        ).count()
-
-        plan_completado = completados == total_temas
-
-        if not plan_completado:
-            return Response({
-                'error': f'No se puede registrar la nota porque el estudiante no ha completado el plan de estudio. Progreso: {completados}/{total_temas} temas completados.'
+                'error': (
+                    'No se puede registrar la nota porque el estudiante no ha completado '
+                    f'el plan de estudio. {validacion_plan["error"]}'
+                )
             }, status=status.HTTP_400_BAD_REQUEST)
 
         plan_estudio = matricula.plan_de_estudio
@@ -3783,6 +3839,11 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
             if not matricula.plan_de_estudio:
                 continue
 
+            validacion_plan = validar_plan_completado_para_examen(matricula)
+
+            if not validacion_plan['completo']:
+                continue
+
             progresos = ProgresoTema.objects.filter(matricula=matricula)
 
             total_temas = progresos.count()
@@ -3821,36 +3882,18 @@ class ProgresoTemaViewSet(viewsets.ModelViewSet):
         try:
             matricula = Matricula.objects.get(id=pk)
 
-            progresos = ProgresoTema.objects.filter(matricula=matricula)
-
-            total_temas = progresos.count()
-
-            if total_temas == 0:
-                return Response({
-                    'success': True,
-                    'matricula_id': matricula.id,
-                    'plan_completado': False,
-                    'total_temas': 0,
-                    'temas_completados': 0,
-                    'porcentaje': 0,
-                    'mensaje': 'No hay temas asignados para este plan'
-                })
-
-            completados = progresos.filter(
-                estudiante_completado=True,
-                instructor_completado=True
-            ).count()
-
-            plan_completado = completados == total_temas
-            porcentaje = round((completados / total_temas * 100))
+            validacion_plan = validar_plan_completado_para_examen(matricula)
 
             return Response({
                 'success': True,
                 'matricula_id': matricula.id,
-                'plan_completado': plan_completado,
-                'total_temas': total_temas,
-                'temas_completados': completados,
-                'porcentaje': porcentaje
+                'plan_completado': validacion_plan['completo'],
+                'progreso': validacion_plan['progreso'],
+                'mensaje': (
+                    'Plan de estudio completado.'
+                    if validacion_plan['completo']
+                    else validacion_plan['error']
+                ),
             })
 
         except Matricula.DoesNotExist:
@@ -4366,29 +4409,11 @@ class ExamenTeoricoViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        progresos = ProgresoTema.objects.filter(matricula=matricula)
+        validacion_plan = validar_plan_completado_para_examen(matricula)
 
-        total_temas = progresos.count()
-
-        if total_temas == 0:
+        if not validacion_plan['completo']:
             return Response(
-                {'error': 'El estudiante no tiene temas asignados en su plan de estudio.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        completados = progresos.filter(
-            estudiante_completado=True,
-            instructor_completado=True,
-        ).count()
-
-        if completados < total_temas:
-            return Response(
-                {
-                    'error': (
-                        f'No se puede habilitar el examen porque el plan de estudio '
-                        f'aún no está completo. Progreso: {completados}/{total_temas}.'
-                    )
-                },
+                {'error': validacion_plan['error']},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
