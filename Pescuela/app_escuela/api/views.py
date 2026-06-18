@@ -4212,15 +4212,21 @@ class DashboardPlanViewSet(viewsets.ViewSet):
     def mi_progreso(self, request):
         user = request.user
 
-        if not hasattr(user, 'estudiante') or not user.estudiante:
+        estudiante = getattr(user, 'estudiante', None)
+
+        if not estudiante:
             return Response({
                 'porcentaje': 0,
                 'temas_completados': 0,
                 'total_temas': 0,
+                'unidad': 'temas',
             })
 
-        matricula = Matricula.objects.filter(
-            estudiante=user.estudiante,
+        matricula = Matricula.objects.select_related(
+            'estudiante',
+            'plan_de_estudio',
+        ).filter(
+            estudiante=estudiante,
             estado='matriculado'
         ).order_by('-id').first()
 
@@ -4229,13 +4235,64 @@ class DashboardPlanViewSet(viewsets.ViewSet):
                 'porcentaje': 0,
                 'temas_completados': 0,
                 'total_temas': 0,
+                'unidad': 'temas',
             })
+
+        tipo = str(matricula.tipo_curso or '').strip().lower()
 
         progresos = ProgresoTema.objects.filter(
             matricula=matricula
+        ).order_by(
+            'orden_general',
+            'id'
         )
 
         total_temas = progresos.count()
+
+        if total_temas == 0:
+            return Response({
+                'porcentaje': 0,
+                'temas_completados': 0,
+                'total_temas': 0,
+                'unidad': 'temas',
+            })
+
+        if tipo in ['intermedio', 'avanzado']:
+            progreso = progresos.first()
+
+            clases = Calendario.objects.filter(
+                matricula=matricula,
+                es_examen=False,
+            ).exclude(
+                estado='cancelada'
+            )
+
+            total_clases = clases.count()
+
+            if total_clases == 0:
+                return Response({
+                    'porcentaje': 0,
+                    'temas_completados': 0,
+                    'total_temas': 0,
+                    'unidad': 'clases',
+                })
+
+            checks_completados = ProgresoClaseTema.objects.filter(
+                progreso_tema=progreso,
+                calendario__in=clases,
+                estudiante_completado=True,
+                instructor_completado=True,
+                completado=True,
+            ).count()
+
+            porcentaje = round((checks_completados / total_clases) * 100)
+
+            return Response({
+                'porcentaje': porcentaje,
+                'temas_completados': checks_completados,
+                'total_temas': total_clases,
+                'unidad': 'clases',
+            })
 
         temas_completados = progresos.filter(
             estudiante_completado=True,
@@ -4252,6 +4309,7 @@ class DashboardPlanViewSet(viewsets.ViewSet):
             'porcentaje': porcentaje,
             'temas_completados': temas_completados,
             'total_temas': total_temas,
+            'unidad': 'temas',
         })
     
 
