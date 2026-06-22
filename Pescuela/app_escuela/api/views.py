@@ -1783,34 +1783,15 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 status=400
             )
 
-        total_clases = Calendario.objects.filter(
-            matricula=matricula,
-            es_examen=False,
-        ).count()
+        validacion_plan = validar_plan_completado_para_examen(matricula)
 
-        if total_clases == 0:
+        if not validacion_plan['completo']:
             return Response(
                 {
-                    'error': 'El estudiante todavía no tiene clases asignadas.'
+                    'error': validacion_plan['error'],
+                    'progreso': validacion_plan['progreso'],
                 },
-                status=400
-            )
-
-        clases_completadas = Calendario.objects.filter(
-            matricula=matricula,
-            es_examen=False,
-            estado='completada',
-        ).count()
-
-        if clases_completadas < total_clases:
-            return Response(
-                {
-                    'error': (
-                        'El estudiante aún no ha completado '
-                        'todas sus clases prácticas.'
-                    )
-                },
-                status=400
+                status=status.HTTP_400_BAD_REQUEST
             )
 
         cantidad_examenes = Calendario.objects.filter(
