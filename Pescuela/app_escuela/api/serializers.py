@@ -619,29 +619,24 @@ class MatriculaSerializer(serializers.ModelSerializer):
 
         matricula = Matricula.objects.create(**validated_data)
 
-        orden_general = 1
+        temas = TemaPlanEstudio.objects.filter(
+            plan_estudio=plan_principal,
+            activo=True,
+        ).order_by(
+            'orden',
+            'id',
+        )
 
-        for plan in planes:
-            temas = TemaPlanEstudio.objects.filter(
-                plan_estudio=plan,
-                activo=True
-            ).order_by(
-                'orden',
-                'id'
+        for orden_general, tema in enumerate(temas, start=1):
+            ProgresoTema.objects.create(
+                matricula=matricula,
+                tema=tema,
+                orden_general=orden_general,
+                desbloqueado=False,
+                estudiante_completado=False,
+                instructor_completado=False,
+                completado=False,
             )
-
-            for tema in temas:
-                ProgresoTema.objects.create(
-                    matricula=matricula,
-                    tema=tema,
-                    orden_general=orden_general,
-                    desbloqueado=False,
-                    estudiante_completado=False,
-                    instructor_completado=False,
-                    completado=False,
-                )
-
-                orden_general += 1
 
         return matricula
 
