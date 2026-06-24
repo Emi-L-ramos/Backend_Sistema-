@@ -568,6 +568,7 @@ class MatriculaSerializer(serializers.ModelSerializer):
     estudiante_telefono_emergencia = serializers.CharField(source='estudiante.telefono_emergencia', read_only=True)
     tiene_usuario = serializers.SerializerMethodField()
     categoria_nombre = serializers.CharField(source='categoria.nombre', read_only=True)
+    usa_checks = serializers.SerializerMethodField()
 
     class Meta:
         model = Matricula
@@ -578,6 +579,13 @@ class MatriculaSerializer(serializers.ModelSerializer):
 
     def get_tiene_usuario(self, obj):
         return obj.estudiante.usuarios.exists()
+    
+    def get_usa_checks(self, obj):
+        tipo_curso = str(
+            getattr(obj, 'tipo_curso', '') or ''
+        ).strip().lower()
+
+        return tipo_curso == 'principiante'
 
     def create(self, validated_data):
         tipo_curso = validated_data.get('tipo_curso')
@@ -1141,12 +1149,6 @@ class AsistenciaSerializer(serializers.ModelSerializer):
         instructor = obj.As_calendario.instructor
         return f"{instructor.nombre} {instructor.apellido}"
 
-# serializers.py - Modifica el NotasSerializer
-
-# serializers.py - Asegúrate de que el serializer incluya instructor
-
-# serializers.py
-
 class NotasSerializer(serializers.ModelSerializer):
 
     estudiante_nombre = serializers.SerializerMethodField()
@@ -1225,6 +1227,7 @@ class NotasSerializer(serializers.ModelSerializer):
 
 class ProgresoTemaSerializer(serializers.ModelSerializer):
     estudiante_nombre = serializers.SerializerMethodField()
+    usa_checks = serializers.SerializerMethodField()
 
     total_clases_diarias = serializers.SerializerMethodField()
     checks_diarios_completados = serializers.SerializerMethodField()
@@ -1310,6 +1313,7 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
             'estudiante_nombre',
             'estudiante_cedula',
             'tipo_curso',
+            'usa_checks',
             'tema_titulo',
             'subtemas',
             'subtemas_count',
@@ -1372,8 +1376,7 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
         ).count()
     
     def es_modo_diario(self, obj):
-        tipo = str(getattr(obj.matricula, 'tipo_curso', '') or '').lower()
-        return tipo in ['intermedio', 'avanzado']
+        return False
 
     def obtener_check_dia(self, obj):
         return getattr(obj, 'check_dia_actual', None)
@@ -1468,6 +1471,13 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
         completados = self.get_checks_diarios_completados(obj)
 
         return round((completados / total) * 100)
+    
+    def get_usa_checks(self, obj):
+        tipo_curso = str(
+            getattr(obj.matricula, 'tipo_curso', '') or ''
+        ).strip().lower()
+
+        return tipo_curso == 'principiante'
 
 
 class NotificacionSerializer(serializers.ModelSerializer):
