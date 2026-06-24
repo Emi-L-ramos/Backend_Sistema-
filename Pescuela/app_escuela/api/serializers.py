@@ -579,6 +579,63 @@ class MatriculaSerializer(serializers.ModelSerializer):
     def get_tiene_usuario(self, obj):
         return obj.estudiante.usuarios.exists()
 
+#Cambios realizados es decir sse agreagron
+    def validate(self, data):
+        tipo_curso = data.get(
+            'tipo_curso',
+            getattr(self.instance, 'tipo_curso', None)
+        )
+
+        horas_reforzamiento = data.get(
+            'horas_reforzamiento',
+            getattr(self.instance, 'horas_reforzamiento', None)
+        )
+
+        incluye_examen_policial = data.get(
+            'incluye_examen_policial',
+            getattr(
+                self.instance,
+                'incluye_examen_policial',
+                False
+            )
+        )
+
+        # Principiante no utiliza esta nueva opción.
+        if tipo_curso == 'Principiante':
+            data['incluye_examen_policial'] = False
+            return data
+
+        # La nueva opción solo corresponde a Intermedio y Avanzado.
+        if tipo_curso in ['Intermedio', 'Avanzado']:
+            if not horas_reforzamiento:
+                raise serializers.ValidationError({
+                    'horas_reforzamiento': (
+                        'Debe ingresar la cantidad de horas '
+                        'de reforzamiento.'
+                    )
+                })
+
+            if (
+                incluye_examen_policial
+                and int(horas_reforzamiento) < 3
+            ):
+                raise serializers.ValidationError({
+                    'horas_reforzamiento': (
+                        'Para incluir el examen policial debe '
+                        'seleccionar al menos 3 horas: '
+                        '1 hora práctica y 2 horas para el examen.'
+                    )
+                })
+
+            return data
+
+        # Protección para cualquier otro tipo de curso.
+        data['incluye_examen_policial'] = False
+
+        return data
+
+
+
     def create(self, validated_data):
         tipo_curso = validated_data.get('tipo_curso')
 
@@ -1054,13 +1111,20 @@ class CrearCalendarioManualSerializer(serializers.Serializer):
             )
 
         if matricula.tipo_curso in ['Intermedio', 'Avanzado']:
-            horas_totales = matricula.horas_reforzamiento
+            horas_totales = int(
+                matricula.horas_reforzamiento or 0
+            )
 
-            if not horas_totales:
+            if horas_totales <= 0:
                 raise serializers.ValidationError(
                     'La matrícula no tiene horas asignadas para este curso.'
                 )
+
+            if matricula.incluye_examen_policial:
+                horas_totales -= 2
+
         else:
+            # Principiante continúa exactamente como está.
             horas_totales = 16
 
         num_clases = int(horas_totales) // horas_por_dia

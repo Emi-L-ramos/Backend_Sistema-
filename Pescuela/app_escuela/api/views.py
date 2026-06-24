@@ -842,6 +842,11 @@ class MatriculaViewSet(viewsets.ModelViewSet):
         resultados = []
 
         for matricula in matriculas:
+            if (
+                matricula.tipo_curso in ['Intermedio', 'Avanzado']
+                and not matricula.incluye_examen_policial
+            ):
+                continue
 
             total_clases = Calendario.objects.filter(
                 matricula=matricula,
@@ -1329,14 +1334,26 @@ class CalendarioViewSet(viewsets.ModelViewSet):
         ).time()
 
         if matricula.tipo_curso in ['Intermedio', 'Avanzado']:
-            horas_totales = matricula.horas_reforzamiento
+            horas_totales = int(
+                matricula.horas_reforzamiento or 0
+            )
 
-            if not horas_totales:
+            if horas_totales <= 0:
                 return Response(
-                    {'error': 'La matrícula no tiene horas asignadas para este curso.'},
+                    {
+                        'error': (
+                            'La matrícula no tiene horas asignadas '
+                            'para este curso.'
+                        )
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
+
+            if matricula.incluye_examen_policial:
+                horas_totales -= 2
+
         else:
+            # Principiante continúa exactamente como está.
             horas_totales = 16
 
         num_clases = int(horas_totales) // horas_por_dia
@@ -1717,6 +1734,20 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response(
                 {'error': 'El usuario actual no tiene instructor asignado.'},
                 status=400
+            )
+
+        if (
+            matricula.tipo_curso in ['Intermedio', 'Avanzado']
+            and not matricula.incluye_examen_policial
+        ):
+            return Response(
+                {
+                    'error': (
+                        'Esta matrícula no incluye '
+                        'acompañamiento al examen policial.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
             )
 
         matricula_id = request.data.get('matricula_id')

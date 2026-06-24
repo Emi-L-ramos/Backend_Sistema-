@@ -1,5 +1,4 @@
 from decimal import Decimal
-
 from django.contrib.auth.models import AbstractUser
 from django.db import models, transaction
 from django.utils import timezone
@@ -234,6 +233,7 @@ class Matricula(models.Model):
     tipo_curso = models.CharField(max_length=50, choices=TIPOS_CURSO)
     horas_reforzamiento = models.PositiveSmallIntegerField(null=True,blank=True)
     aparicion = models.CharField(max_length=50, choices=APARICIONES)
+    incluye_examen_policial = models.BooleanField(default=False)
     observaciones = models.TextField(blank=True, null=True)
 
     def __str__(self):
