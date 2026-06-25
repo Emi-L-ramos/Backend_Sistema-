@@ -3321,6 +3321,63 @@ class NotasViewSet(viewsets.ModelViewSet):
             return queryset.filter(matricula__estudiante_id=user.estudiante_id)
 
         return queryset.none()
+    
+    @action(detail=False, methods=['get'], url_path='estudiantes-disponibles')
+    def estudiantes_disponibles(self, request):
+        user = request.user
+
+        if not es_instructor(user):
+            return Response(
+                [],
+                status=status.HTTP_200_OK
+            )
+
+        matriculas_con_nota_practica = Notas.objects.filter(
+            tipo_nota='practico'
+        ).values_list(
+            'matricula_id',
+            flat=True
+        )
+
+        matriculas = Matricula.objects.select_related(
+            'estudiante',
+            'plan_de_estudio',
+        ).filter(
+            estado='matriculado',
+            clases__instructor_id=user.instructor_id,
+            clases__es_examen=False,
+        ).exclude(
+            id__in=matriculas_con_nota_practica
+        ).distinct().order_by(
+            'estudiante__nombre',
+            'estudiante__apellido',
+        )
+
+        resultado = []
+
+        for matricula in matriculas:
+            resultado.append({
+                'id': matricula.id,
+                'estudiante_id': matricula.estudiante_id,
+                'estudiante_nombre': (
+                    f'{matricula.estudiante.nombre} '
+                    f'{matricula.estudiante.apellido}'
+                ).strip(),
+                'estudiante_cedula': (
+                    matricula.estudiante.cedula
+                ),
+                'tipo_curso': matricula.tipo_curso,
+                'plan_nombre': (
+                    matricula.plan_de_estudio.nombre
+                    if matricula.plan_de_estudio
+                    else 'Sin plan asignado'
+                ),
+                'fecha_inscripcion': (
+                    matricula.fecha_registro
+                ),
+            })
+
+        return Response(resultado)
 
     def create(self, request, *args, **kwargs):
         """Crear nota práctica asignando instructor y plan_de_estudio automáticamente"""
@@ -3360,16 +3417,6 @@ class NotasViewSet(viewsets.ModelViewSet):
         ).exists():
             return Response({
                 'error': 'Ya existe una nota práctica registrada para este estudiante.'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        validacion_plan = validar_plan_completado_para_examen(matricula)
-
-        if not validacion_plan['completo']:
-            return Response({
-                'error': (
-                    'No se puede registrar la nota porque el estudiante no ha completado '
-                    f'el plan de estudio. {validacion_plan["error"]}'
-                )
             }, status=status.HTTP_400_BAD_REQUEST)
 
         plan_estudio = matricula.plan_de_estudio
