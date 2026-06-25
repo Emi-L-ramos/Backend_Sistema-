@@ -155,7 +155,7 @@ class Estudiante(models.Model):
     fecha_nacimiento = models.DateField()
     cedula = models.CharField(max_length=20, unique=True)
     direccion = models.CharField(max_length=200)
-    correo_electronico = models.EmailField(max_length=254, unique=True)
+    correo_electronico = models.EmailField(max_length=254, unique=True,blank=True, null=True)
     telefono_movil = models.CharField(max_length=100)
     nivel_educativo = models.CharField(max_length=50, choices=NIVEL_EDUCATIVO_CHOICES)
     nombre_emergencia = models.CharField(max_length=100)
@@ -163,20 +163,35 @@ class Estudiante(models.Model):
     activo = models.BooleanField(default=True)
 
     def __str__(self):
-        return f"{self.nombre} {self.apellido} - {self.cedula}"
-    
-    
+        return (
+            f"{self.nombre} {self.apellido} - {self.cedula}"
+        )
+
     def save(self, *args, **kwargs):
+        if not self.correo_electronico or not self.correo_electronico.strip():
+            self.correo_electronico = None
+        else:
+            self.correo_electronico = (
+                self.correo_electronico.strip().lower()
+            )
+
         if not self.codigo_estudiante:
             with transaction.atomic():
-                secuencia, created = SecuenciaCodigoEstudiante.objects.select_for_update().get_or_create(
-                    nombre="estudiante",
-                    defaults={"ultimo_codigo": 2129}
+                secuencia, created = (
+                    SecuenciaCodigoEstudiante.objects
+                    .select_for_update()
+                    .get_or_create(
+                        nombre="estudiante",
+                        defaults={"ultimo_codigo": 2129}
+                    )
                 )
 
                 secuencia.ultimo_codigo += 1
                 self.codigo_estudiante = secuencia.ultimo_codigo
-                secuencia.save(update_fields=["ultimo_codigo"])
+
+                secuencia.save(
+                    update_fields=["ultimo_codigo"]
+                )
 
                 super().save(*args, **kwargs)
         else:
