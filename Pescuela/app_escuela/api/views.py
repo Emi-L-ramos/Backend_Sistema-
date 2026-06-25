@@ -942,20 +942,65 @@ def saldo(request):
         )
 
     def calcular_monto_total(matricula):
+        primer_recibo = Recibo.objects.filter(
+            matricula=matricula,
+            valor_curso__isnull=False
+        ).select_related(
+            'valor_curso'
+        ).order_by(
+            'id'
+        ).first()
+
+        if primer_recibo:
+            valor_curso = primer_recibo.valor_curso
+        else:
+            valor_curso = ValorCurso.objects.filter(
+                tipo_curso=matricula.tipo_curso,
+                activo=True
+            ).order_by(
+                '-fecha_modificacion',
+                '-id'
+            ).first()
+
+        if not valor_curso:
+            raise ValueError(
+                f'No existe un valor activo para el curso '
+                f'{matricula.tipo_curso}.'
+            )
+
         if matricula.tipo_curso == 'Principiante':
-            return Decimal('6500')
+            return Decimal(
+                str(valor_curso.precio_total)
+            ).quantize(
+                Decimal('0.01')
+            )
 
-        if matricula.tipo_curso == 'Intermedio':
-            horas = matricula.horas_reforzamiento or 6
-            return Decimal(horas) * Decimal('433.33')
+        if matricula.tipo_curso in ['Intermedio', 'Avanzado']:
+            horas = matricula.horas_reforzamiento
 
-        if matricula.tipo_curso == 'Avanzado':
-            horas = matricula.horas_reforzamiento or 2
-            return Decimal(horas) * Decimal('433.33')
+            if not horas:
+                raise ValueError(
+                    f'La matrícula del curso '
+                    f'{matricula.tipo_curso} no tiene horas asignadas.'
+                )
 
-        return Decimal('0')
+            return (
+                Decimal(str(horas))
+                * Decimal(str(valor_curso.precio_hora))
+            ).quantize(
+                Decimal('0.01')
+            )
 
-    monto_total = calcular_monto_total(matricula)
+        return Decimal('0.00')
+
+
+    try:
+        monto_total = calcular_monto_total(matricula)
+    except ValueError as error:
+        return Response(
+            {'error': str(error)},
+            status=400
+        )
 
     total_pagado = Recibo.objects.filter(
         matricula=matricula,
@@ -6726,10 +6771,21 @@ def reporte_kilometros_instructor(request):
     ws['B7'] = f'{instructor.nombre or ""} {instructor.apellido or ""}'.strip()
 
     ws['A8'] = 'Fecha de emisión:'
-    ws['B8'] = timezone.now().strftime('%d/%m/%Y')
+    ws['B8'] = timezone.localdate()
+    ws['B8'].number_format = 'dd/mm/yyyy'
 
     ws['D8'] = 'Desde:'
-    ws['E8'] = fecha_desde or 'Inicio'
+    fecha_desde_excel = parse_date(fecha_desde) if fecha_desde else None
+    fecha_hasta_excel = parse_date(fecha_hasta) if fecha_hasta else None
+
+    ws['E8'] = fecha_desde_excel or 'Inicio'
+    ws['G8'] = fecha_hasta_excel or 'Fin'
+
+    if fecha_desde_excel:
+        ws['E8'].number_format = 'dd/mm/yyyy'
+
+    if fecha_hasta_excel:
+        ws['G8'].number_format = 'dd/mm/yyyy'
 
     ws['F8'] = 'Hasta:'
     ws['G8'] = fecha_hasta or 'Fin'
@@ -6757,51 +6813,131 @@ def reporte_kilometros_instructor(request):
         celda.border = border
         celda.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
-    fila = fila_encabezado + 1
-    total_km = Decimal('0')
+    fila_inicio_datos = fila_encabezado + 1
+    fila = fila_inicio_datos
 
     for index, asistencia in enumerate(asistencias, start=1):
         clase = asistencia.As_calendario
         estudiante = asistencia.As_estudiante
 
-        km_inicial = asistencia.km_inicial or Decimal('0')
-        km_final = asistencia.km_final or Decimal('0')
-        km_recorridos = asistencia.km_recorridos or Decimal('0')
-
-        total_km += km_recorridos
+        # Convertir explícitamente a número.
+        km_inicial = float(asistencia.km_inicial or 0)
+        km_final = float(asistencia.km_final or 0)
 
         valores = [
             index,
-            clase.fecha.strftime('%d/%m/%Y') if clase.fecha else '',
+            clase.fecha if clase.fecha else None,
             f'{instructor.nombre or ""} {instructor.apellido or ""}'.strip(),
             f'{estudiante.nombre or ""} {estudiante.apellido or ""}'.strip(),
             estudiante.cedula or '',
-            clase.numero_clase,
-            clase.hora_inicio.strftime('%H:%M') if clase.hora_inicio else '',
-            clase.hora_fin.strftime('%H:%M') if clase.hora_fin else '',
-            float(km_inicial),
-            float(km_final),
-            float(km_recorridos),
+            int(clase.numero_clase or 0),
+            clase.hora_inicio if clase.hora_inicio else None,
+            clase.hora_fin if clase.hora_fin else None,
+            km_inicial,
+            km_final,
         ]
 
+        # Columnas A hasta J.
         for col, valor in enumerate(valores, start=1):
-            celda = ws.cell(row=fila, column=col, value=valor)
+            celda = ws.cell(
+                row=fila,
+                column=col,
+                value=valor
+            )
+
             celda.border = border
-            celda.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            celda.alignment = Alignment(
+                horizontal='center',
+                vertical='center',
+                wrap_text=True
+            )
+
+        # Fecha real de Excel.
+        ws.cell(
+            row=fila,
+            column=2
+        ).number_format = 'dd/mm/yyyy'
+
+        # Horas reales de Excel.
+        ws.cell(
+            row=fila,
+            column=7
+        ).number_format = 'hh:mm'
+
+        ws.cell(
+            row=fila,
+            column=8
+        ).number_format = 'hh:mm'
+
+        # Kilometrajes como números.
+        ws.cell(
+            row=fila,
+            column=9
+        ).number_format = '#,##0.00'
+
+        ws.cell(
+            row=fila,
+            column=10
+        ).number_format = '#,##0.00'
+
+        # Columna K: Km recorridos = Km final - Km inicial.
+        celda_km_recorridos = ws.cell(
+            row=fila,
+            column=11,
+            value=f'=J{fila}-I{fila}'
+        )
+
+        celda_km_recorridos.number_format = '#,##0.00'
+        celda_km_recorridos.border = border
+        celda_km_recorridos.alignment = Alignment(
+            horizontal='center',
+            vertical='center'
+        )
 
         fila += 1
 
-    ws.cell(row=fila, column=10, value='TOTAL KM:')
-    ws.cell(row=fila, column=11, value=float(total_km))
+
+    # Fila del total.
+    fila_total = fila
+
+    ws.cell(
+        row=fila_total,
+        column=10,
+        value='TOTAL KM:'
+    )
+
+    celda_total = ws.cell(
+        row=fila_total,
+        column=11
+    )
+
+    # Si existen registros, suma toda la columna K.
+    if fila_total > fila_inicio_datos:
+        celda_total.value = (
+            f'=SUM(K{fila_inicio_datos}:K{fila_total - 1})'
+        )
+    else:
+        celda_total.value = 0
+
+    celda_total.number_format = '#,##0.00'
 
     for col in range(10, 12):
-        celda = ws.cell(row=fila, column=col)
+        celda = ws.cell(
+            row=fila_total,
+            column=col
+        )
+
         celda.font = Font(bold=True)
         celda.border = border
         celda.fill = header_fill
-        celda.alignment = Alignment(horizontal='center')
+        celda.alignment = Alignment(
+            horizontal='center',
+            vertical='center'
+        )
 
-    fila_footer = fila + 3
+    fila = fila_total
+
+    fila_footer = fila_total + 3
 
     ws.merge_cells(start_row=fila_footer, start_column=1, end_row=fila_footer, end_column=12)
     ws.cell(
@@ -6843,6 +6979,10 @@ def reporte_kilometros_instructor(request):
     )
 
     response['Content-Disposition'] = 'attachment; filename="reporte_kilometros_instructor.xlsx"'
+
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
+    wb.calculation.calcMode = "auto"
 
     wb.save(response)
 
