@@ -807,63 +807,95 @@ class MatriculaViewSet(viewsets.ModelViewSet):
     def para_examen(self, request):
 
         user = request.user
-        rol = user.rol_nombre
+
+        if not es_instructor(user):
+            return Response(
+                [],
+                status=status.HTTP_200_OK
+            )
+
+        matriculas_ids = Calendario.objects.filter(
+            instructor_id=user.instructor_id,
+            es_examen=False,
+            matricula__estado='matriculado',
+        ).exclude(
+            estado='cancelada'
+        ).values_list(
+            'matricula_id',
+            flat=True
+        ).distinct()
 
         matriculas = Matricula.objects.select_related(
             'estudiante'
         ).filter(
-            estado='matriculado'
+            id__in=matriculas_ids,
+            estado='matriculado',
+            estudiante__activo=True,
+        ).order_by(
+            'estudiante__nombre',
+            'estudiante__apellido',
         )
-
-        if rol == 'instructor':
-            if not user.instructor_id:
-                return Response([], status=200)
-
-            matriculas_ids = Calendario.objects.filter(
-                instructor_id=user.instructor_id,
-                es_examen=False,
-                matricula__estado='matriculado'
-            ).exclude(
-                estado='cancelada'
-            ).values_list(
-                'matricula_id',
-                flat=True
-            ).distinct()
-
-            matriculas = matriculas.filter(id__in=matriculas_ids)
 
         resultados = []
 
         for matricula in matriculas:
+            tipo_curso = str(
+                matricula.tipo_curso or ''
+            ).strip().lower()
+
+            if tipo_curso not in [
+                'principiante',
+                'intermedio',
+                'avanzado',
+            ]:
+                continue
+
+            # Principiante siempre puede tener examen policial.
+            # Intermedio y Avanzado necesitan el check.
             if (
-                matricula.tipo_curso in ['Intermedio', 'Avanzado']
+                tipo_curso in ['intermedio', 'avanzado']
                 and not matricula.incluye_examen_policial
             ):
                 continue
 
-            total_clases = Calendario.objects.filter(
+            clases_regulares = Calendario.objects.filter(
                 matricula=matricula,
                 es_examen=False,
-            ).count()
+            ).exclude(
+                estado='cancelada'
+            )
 
-            if total_clases == 0:
+            if not clases_regulares.exists():
                 continue
 
-            clases_completadas = Calendario.objects.filter(
-                matricula=matricula,
-                es_examen=False,
-                estado='completada',
-            ).count()
-
-            if clases_completadas < total_clases:
-                continue
-
-            tiene_examen = Calendario.objects.filter(
-                matricula=matricula,
-                es_examen=True,
+            tiene_clases_pendientes = clases_regulares.exclude(
+                estado='completada'
             ).exists()
 
-            if tiene_examen:
+            if tiene_clases_pendientes:
+                continue
+
+            examenes_del_estudiante = Calendario.objects.filter(
+                matricula=matricula,
+                es_examen=True,
+            )
+
+            total_examenes_asignados = (
+                examenes_del_estudiante.count()
+            )
+
+            if total_examenes_asignados >= 3:
+                continue
+
+            # Un examen pendiente o completado impide crear otro.
+            # Uno cancelado permite volver a programar.
+            tiene_examen_vigente = (
+                examenes_del_estudiante.exclude(
+                    estado='cancelada'
+                ).exists()
+            )
+
+            if tiene_examen_vigente:
                 continue
 
             resultados.append({
@@ -872,7 +904,19 @@ class MatriculaViewSet(viewsets.ModelViewSet):
                     f"{matricula.estudiante.nombre} "
                     f"{matricula.estudiante.apellido}"
                 ).strip(),
-                'estudiante_cedula': matricula.estudiante.cedula,
+                'estudiante_cedula': (
+                    matricula.estudiante.cedula
+                ),
+                'tipo_curso': matricula.tipo_curso,
+                'incluye_examen_policial': (
+                    matricula.incluye_examen_policial
+                ),
+                'examenes_asignados': (
+                    total_examenes_asignados
+                ),
+                'examenes_disponibles': (
+                    3 - total_examenes_asignados
+                ),
             })
 
         return Response(resultados)     
@@ -1273,11 +1317,106 @@ class CalendarioViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
-                {'error': 'Solo el administrador puede crear citas.'},
+                {
+                    'error': (
+                        'Solo el administrador puede '
+                        'crear citas normales.'
+                    )
+                },
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        return super().create(request, *args, **kwargs)
+        es_examen_solicitado = request.data.get(
+            'es_examen',
+            False
+        )
+
+        es_examen_solicitado = (
+            es_examen_solicitado is True
+            or str(es_examen_solicitado).strip().lower()
+            in ['true', '1']
+        )
+
+        if es_examen_solicitado:
+            return Response(
+                {
+                    'error': (
+                        'Los exámenes policiales solo pueden '
+                        'ser programados por un instructor '
+                        'desde la opción Examen Policial.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return super().create(
+            request,
+            *args,
+            **kwargs
+        )
+    
+    def update(self, request, *args, **kwargs):
+        if not es_admin(request.user):
+            return Response(
+                {
+                    'error': (
+                        'Solo el administrador puede '
+                        'modificar el calendario.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        instance = self.get_object()
+
+        if instance.es_examen:
+            return Response(
+                {
+                    'error': (
+                        'Los exámenes policiales no pueden '
+                        'modificarse desde la edición normal.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        return super().update(
+            request,
+            *args,
+            **kwargs
+        )
+    
+    def destroy(self, request, *args, **kwargs):
+        if not es_admin(request.user):
+            return Response(
+                {
+                    'error': (
+                        'Solo el administrador puede '
+                        'eliminar citas normales.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        instance = self.get_object()
+
+        if instance.es_examen:
+            return Response(
+                {
+                    'error': (
+                        'Los exámenes policiales no pueden '
+                        'eliminarse. Deben marcarse como '
+                        'Asistieron o Cancelado.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        return super().destroy(
+            request,
+            *args,
+            **kwargs
+        )
 
 
     @action(detail=False, methods=['get'], url_path='hoy')
@@ -1293,39 +1432,111 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             'fecha': hoy.isoformat(),
         })
     
- ## En la copia no me sale esta funcion
-    
-    @action(detail=True, methods=['post'], url_path='completar-examen')
-    def completar_examen(self, request, pk=None):
+    @action(detail=True, methods=['post'], url_path='resultado-examen')
+    def resultado_examen(self, request, pk=None):
         calendario = self.get_object()
+        user = request.user
 
         if not calendario.es_examen:
             return Response(
-                {'error': 'Esta cita no corresponde a un examen policial.'},
+                {
+                    'error': (
+                        'Esta cita no corresponde a un '
+                        'examen policial.'
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if calendario.estado == 'completada':
+        tiene_permiso = (
+            es_admin(user)
+            or (
+                es_instructor(user)
+                and calendario.instructor_id == user.instructor_id
+            )
+        )
+
+        if not tiene_permiso:
             return Response(
-                {'error': 'Este examen ya fue marcado como completado.'},
+                {
+                    'error': (
+                        'No tienes permiso para registrar '
+                        'el resultado de este examen.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        resultado = str(
+            request.data.get('resultado') or ''
+        ).strip().lower()
+
+        if resultado not in ['asistieron', 'cancelado']:
+            return Response(
+                {
+                    'error': (
+                        'Resultado no válido. Debe enviar '
+                        '"asistieron" o "cancelado".'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if calendario.estado != 'pendiente':
+            return Response(
+                {
+                    'error': (
+                        'Este examen ya fue procesado '
+                        'y no puede modificarse nuevamente.'
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         with transaction.atomic():
-            calendario.estado = 'completada'
-            calendario.save(update_fields=['estado'])
+            if resultado == 'cancelado':
+                calendario.estado = 'cancelada'
+                calendario.save(
+                    update_fields=['estado']
+                )
 
-            matricula = calendario.matricula
-            estudiante = matricula.estudiante
+                mensaje = (
+                    'El examen policial fue cancelado. '
+                    'El estudiante puede volver a ser programado.'
+                )
 
-            matricula.estado = 'finalizado'
-            matricula.save(update_fields=['estado'])
+            else:
+                calendario.estado = 'completada'
+                calendario.save(
+                    update_fields=['estado']
+                )
 
-            desactivar_usuarios_estudiante(estudiante)
+                matricula = calendario.matricula
+                estudiante = matricula.estudiante
+
+                matricula.estado = 'finalizado'
+                matricula.save(
+                    update_fields=['estado']
+                )
+
+                desactivar_usuarios_estudiante(
+                    estudiante
+                )
+
+                mensaje = (
+                    'La asistencia al examen policial fue '
+                    'confirmada. El usuario del estudiante '
+                    'fue desactivado.'
+                )
+
+        calendario.refresh_from_db()
 
         return Response({
-            'message': 'Examen policial completado. El estudiante fue desactivado correctamente.',
-            'calendario': CalendarioSerializer(calendario).data,
+            'message': mensaje,
+            'resultado': resultado,
+            'calendario': CalendarioSerializer(
+                calendario
+            ).data,
         })
 
     @action(detail=False, methods=['post'], url_path='crear-bloque')
@@ -1623,6 +1834,17 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 {'error': 'Solo el administrador puede modificar el calendario.'},
                 status=status.HTTP_403_FORBIDDEN
             )
+        
+        if instance.es_examen:
+            return Response(
+                {
+                    'error': (
+                        'Los exámenes policiales no pueden '
+                        'modificarse desde la edición normal.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         def convertir_hora(valor, campo):
             if valor in [None, '']:
@@ -1771,17 +1993,161 @@ class CalendarioViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['post'], url_path='crear-examen')
     def crear_examen(self, request):
-
         user = request.user
 
-        if not user.instructor_id:
+        if not es_instructor(user):
             return Response(
-                {'error': 'El usuario actual no tiene instructor asignado.'},
-                status=400
+                {
+                    'error': (
+                        'Solo un instructor puede programar '
+                        'un examen policial.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        matricula_id = request.data.get('matricula_id')
+        fecha = request.data.get('fecha')
+
+        if not matricula_id:
+            return Response(
+                {
+                    'error': 'Debe seleccionar un estudiante.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not fecha:
+            return Response(
+                {
+                    'error': (
+                        'Debe seleccionar la fecha '
+                        'del examen policial.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        fecha_examen = parse_date(str(fecha))
+
+        if not fecha_examen:
+            return Response(
+                {
+                    'error': (
+                        'La fecha del examen no tiene '
+                        'un formato válido.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        dia_semana = fecha_examen.weekday()
+
+        # Lunes a viernes: 2:00 p. m. a 4:00 p. m.
+        if dia_semana in [0, 1, 2, 3, 4]:
+            horario_examen = '14_16'
+            hora_inicio = datetime.strptime(
+                '14:00',
+                '%H:%M'
+            ).time()
+            hora_fin = datetime.strptime(
+                '16:00',
+                '%H:%M'
+            ).time()
+
+        # Sábado: 8:00 a. m. a 10:00 a. m.
+        elif dia_semana == 5:
+            horario_examen = '08_10'
+            hora_inicio = datetime.strptime(
+                '08:00',
+                '%H:%M'
+            ).time()
+            hora_fin = datetime.strptime(
+                '10:00',
+                '%H:%M'
+            ).time()
+
+        else:
+            return Response(
+                {
+                    'error': (
+                        'Los exámenes policiales no pueden '
+                        'programarse los domingos.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            matricula = Matricula.objects.select_related(
+                'estudiante'
+            ).get(
+                id=matricula_id
+            )
+
+        except Matricula.DoesNotExist:
+            return Response(
+                {
+                    'error': 'Matrícula no encontrada.'
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        try:
+            instructor = Instructor.objects.get(
+                id=user.instructor_id
+            )
+
+        except Instructor.DoesNotExist:
+            return Response(
+                {
+                    'error': 'Instructor no encontrado.'
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if matricula.estado != 'matriculado':
+            return Response(
+                {
+                    'error': (
+                        'La matrícula del estudiante '
+                        'no está activa.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not matricula.estudiante.activo:
+            return Response(
+                {
+                    'error': (
+                        'El estudiante se encuentra inactivo.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        tipo_curso = str(
+            matricula.tipo_curso or ''
+        ).strip().lower()
+
+        if tipo_curso not in [
+            'principiante',
+            'intermedio',
+            'avanzado',
+        ]:
+            return Response(
+                {
+                    'error': (
+                        'El tipo de curso de la matrícula '
+                        'no es válido.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
             )
 
         if (
-            matricula.tipo_curso in ['Intermedio', 'Avanzado']
+            tipo_curso in ['intermedio', 'avanzado']
             and not matricula.incluye_examen_policial
         ):
             return Response(
@@ -1794,71 +2160,76 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        matricula_id = request.data.get('matricula_id')
-        fecha = request.data.get('fecha')
-        horario_examen = request.data.get('horario_examen', '14_16')
-
-        horarios_examen = {
-            '08_10': ('08:00', '10:00'),
-            '14_16': ('14:00', '16:00'),
-        }
-
-        if horario_examen not in horarios_examen:
-            return Response(
-                {
-                    'error': 'Horario de examen no válido. Use 08_10 o 14_16.'
-                },
-                status=400
-            )
-
-        hora_inicio, hora_fin = horarios_examen[horario_examen]
-
-        try:
-            matricula = Matricula.objects.select_related(
-                'estudiante'
-            ).get(id=matricula_id)
-
-            instructor = Instructor.objects.get(id=user.instructor_id)
-
-        except Matricula.DoesNotExist:
-            return Response(
-                {'error': 'Matrícula no encontrada.'},
-                status=404
-            )
-
-        except Instructor.DoesNotExist:
-            return Response(
-                {'error': 'Instructor no encontrado.'},
-                status=404
-            )
-
-        if matricula.estado != 'matriculado':
-            return Response(
-                {
-                    'error': (
-                        'No se puede programar examen porque '
-                        'la matrícula aún no está matriculada.'
-                    )
-                },
-                status=400
-            )
-
-        tiene_usuario = matricula.estudiante.usuarios.filter(
-            rol__nombre__iexact='estudiante'
+        usuario_activo = matricula.estudiante.usuarios.filter(
+            rol__nombre__iexact='estudiante',
+            is_active=True,
         ).exists()
 
-        if not tiene_usuario:
+        if not usuario_activo:
             return Response(
                 {
                     'error': (
-                        'No se puede programar examen porque '
-                        'el estudiante todavía no tiene usuario.'
+                        'No se puede programar el examen '
+                        'porque el estudiante no tiene '
+                        'un usuario activo.'
                     )
                 },
-                status=400
+                status=status.HTTP_400_BAD_REQUEST
             )
 
-        validacion_plan = validar_plan_completado_para_examen(matricula)
+        clases_regulares = Calendario.objects.filter(
+            matricula=matricula,
+            es_examen=False,
+        ).exclude(
+            estado='cancelada'
+        )
+
+        if not clases_regulares.exists():
+            return Response(
+                {
+                    'error': (
+                        'El estudiante no tiene clases '
+                        'regulares asignadas.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        esta_asignado_al_instructor = (
+            clases_regulares.filter(
+                instructor=instructor
+            ).exists()
+        )
+
+        if not esta_asignado_al_instructor:
+            return Response(
+                {
+                    'error': (
+                        'Este estudiante no está asignado '
+                        'al instructor actual.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        tiene_clases_pendientes = clases_regulares.exclude(
+            estado='completada'
+        ).exists()
+
+        if tiene_clases_pendientes:
+            return Response(
+                {
+                    'error': (
+                        'El estudiante todavía no ha '
+                        'completado todas sus clases.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        validacion_plan = validar_plan_completado_para_examen(
+            matricula
+        )
 
         if not validacion_plan['completo']:
             return Response(
@@ -1869,45 +2240,94 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        cantidad_examenes = Calendario.objects.filter(
+        examenes_del_estudiante = Calendario.objects.filter(
             matricula=matricula,
             es_examen=True,
-        ).count()
+        )
 
-        if cantidad_examenes >= 3:
+        total_examenes_asignados = (
+            examenes_del_estudiante.count()
+        )
+
+        # Los exámenes cancelados también cuentan
+        # dentro de las tres asignaciones.
+        if total_examenes_asignados >= 3:
             return Response(
                 {
                     'error': (
-                        'Este estudiante ya tiene el máximo '
-                        'de 3 exámenes policiales asignados.'
+                        'El estudiante ya alcanzó el máximo '
+                        'de 3 asignaciones para examen policial.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        choque = Calendario.objects.filter(
-            instructor=instructor,
-            fecha=fecha,
-            hora_inicio__lt=hora_fin,
-            hora_fin__gt=hora_inicio,
-            estado__in=['pendiente', 'reprogramada', 'inasistencia']
-        ).exists()
 
-        if choque:
+        tiene_examen_vigente = (
+            examenes_del_estudiante.exclude(
+                estado='cancelada'
+            ).exists()
+        )
+
+        if tiene_examen_vigente:
             return Response(
                 {
                     'error': (
-                        f'El instructor ya tiene ocupado el horario '
-                        f'{hora_inicio} - {hora_fin} el día {fecha}.'
+                        'El estudiante ya tiene un examen '
+                        'policial pendiente o completado.'
                     )
                 },
-                status=400
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Los exámenes pueden compartir horario.
+        # Solo se revisa choque con clases normales.
+        choque_clase_regular = Calendario.objects.filter(
+            instructor=instructor,
+            fecha=fecha_examen,
+            es_examen=False,
+            hora_inicio__lt=hora_fin,
+            hora_fin__gt=hora_inicio,
+        ).exclude(
+            estado='cancelada'
+        ).exists()
+
+        if choque_clase_regular:
+            return Response(
+                {
+                    'error': (
+                        'El instructor tiene una clase regular '
+                        f'el {fecha_examen} entre '
+                        f'{hora_inicio.strftime("%H:%M")} y '
+                        f'{hora_fin.strftime("%H:%M")}.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        examenes_instructor_dia = Calendario.objects.filter(
+            instructor=instructor,
+            fecha=fecha_examen,
+            es_examen=True,
+        ).exclude(
+            estado='cancelada'
+        ).count()
+
+        if examenes_instructor_dia >= 10:
+            return Response(
+                {
+                    'error': (
+                        'El instructor ya tiene asignados '
+                        '10 estudiantes para examen policial '
+                        'en esa fecha.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
             )
 
         examen = Calendario.objects.create(
             matricula=matricula,
             instructor=instructor,
-            fecha=fecha,
+            fecha=fecha_examen,
             hora_inicio=hora_inicio,
             hora_fin=hora_fin,
             numero_clase=99,
@@ -1917,10 +2337,28 @@ class CalendarioViewSet(viewsets.ModelViewSet):
 
         return Response(
             {
-                'message': 'Examen policial programado correctamente.',
-                'examen': CalendarioSerializer(examen).data,
+                'message': (
+                    'Examen policial programado correctamente.'
+                ),
+                'fecha': fecha_examen,
+                'horario_examen': horario_examen,
+                'hora_inicio': hora_inicio.strftime('%H:%M'),
+                'hora_fin': hora_fin.strftime('%H:%M'),
+                'cupo_instructor': {
+                    'asignados': examenes_instructor_dia + 1,
+                    'maximo': 10,
+                },
+                'asignaciones_estudiante': {
+                    'utilizadas': (
+                        total_examenes_asignados + 1
+                    ),
+                    'maximo': 3,
+                },
+                'examen': CalendarioSerializer(
+                    examen
+                ).data,
             },
-            status=201
+            status=status.HTTP_201_CREATED
         )
 
 
@@ -2015,9 +2453,16 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
         elif rol not in ['admin', 'administrador'] and not user.is_staff and not user.is_superuser:
             return Response([])
         
-        clases = clases_base.filter(
+        matriculas_en_rango = clases_base.filter(
             fecha__gte=fecha_inicio,
             fecha__lte=fecha_fin
+        ).values_list(
+            'matricula_id',
+            flat=True
+        ).distinct()
+
+        clases = clases_base.filter(
+            matricula_id__in=matriculas_en_rango
         ).order_by(
             'matricula_id',
             'numero_clase',
