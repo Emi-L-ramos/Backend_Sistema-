@@ -293,6 +293,7 @@ class Calendario(models.Model):
         ('completada', 'Completada'),
         ('inasistencia', 'Inasistencia'),
         ('reprogramada', 'Reprogramada'),
+        ('cancelada', 'Cancelada'),
     ]
 
     matricula = models.ForeignKey(
