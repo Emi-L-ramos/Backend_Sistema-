@@ -2453,23 +2453,15 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
         elif rol not in ['admin', 'administrador'] and not user.is_staff and not user.is_superuser:
             return Response([])
         
-        matriculas_en_rango = clases_base.filter(
+        clases = clases_base.filter(
             fecha__gte=fecha_inicio,
             fecha__lte=fecha_fin
-        ).values_list(
-            'matricula_id',
-            flat=True
-        ).distinct()
-
-        clases = clases_base.filter(
-            matricula_id__in=matriculas_en_rango
         ).order_by(
             'matricula_id',
             'numero_clase',
             'fecha',
             'hora_inicio'
         )
-
 
         asistencias = Asistencia.objects.select_related(
             'As_estudiante',
