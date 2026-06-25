@@ -274,6 +274,33 @@ def desactivar_usuarios_instructor(instructor):
     for usuario in usuarios:
         desactivar_usuario(usuario)
 
+def finalizar_matricula_si_tiene_dos_notas(matricula):
+    tipos_notas = set(
+        Notas.objects.filter(
+            matricula=matricula,
+            tipo_nota__in=[
+                'teorico',
+                'practico',
+            ],
+        ).values_list(
+            'tipo_nota',
+            flat=True,
+        )
+    )
+
+    tiene_nota_teorica = 'teorico' in tipos_notas
+    tiene_nota_practica = 'practico' in tipos_notas
+
+    if (
+        tiene_nota_teorica
+        and tiene_nota_practica
+        and matricula.estado != 'finalizado'
+    ):
+        matricula.estado = 'finalizado'
+        matricula.save(
+            update_fields=['estado']
+        )
+
 def obtener_foto_instructor(instructor):
     if not instructor:
         return None
@@ -452,7 +479,6 @@ class EstudianteViewSet(viewsets.ModelViewSet):
 
 class PlanEstudioViewSet(viewsets.ModelViewSet):
 
-    serializer_class = PlanEstudioSerializer
     permission_classes = [IsAuthenticated]
 
     def create(self, request, *args, **kwargs):
@@ -1201,7 +1227,6 @@ class UserViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='crear-estudiante')
     def crear_usuario_estudiante(self, request):
-        matricula_id = request.data.get('matricula_id')
         if not es_admin(request.user):
             return Response(
                 {'error': 'Solo el administrador puede crear usuarios de estudiantes.'},
@@ -1266,23 +1291,6 @@ class CalendarioViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['instructor', 'fecha']
     permission_classes = [IsAuthenticated]
-
-    def perform_update(self, serializer):
-        instancia_anterior = self.get_object()
-        calendario = serializer.save()
-
-        if (
-            calendario.es_examen
-            and calendario.estado == 'completada'
-            and instancia_anterior.estado != 'completada'
-        ):
-            matricula = calendario.matricula
-            estudiante = matricula.estudiante
-
-            matricula.estado = 'finalizado'
-            matricula.save(update_fields=['estado'])
-
-            desactivar_usuarios_estudiante(estudiante)
 
     def get_queryset(self):
         user = self.request.user
@@ -1511,16 +1519,8 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                     update_fields=['estado']
                 )
 
-                matricula = calendario.matricula
-                estudiante = matricula.estudiante
-
-                matricula.estado = 'finalizado'
-                matricula.save(
-                    update_fields=['estado']
-                )
-
                 desactivar_usuarios_estudiante(
-                    estudiante
+                    calendario.matricula.estudiante
                 )
 
                 mensaje = (
@@ -2564,7 +2564,6 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 'instructor_id': clase.instructor.id if clase.instructor else None,
                 'instructor_nombre': instructor_nombre,
 
-                #'observacion': observacion,
                 'km_inicial': asistencia.km_inicial if asistencia else None,
                 'km_final': asistencia.km_final if asistencia else None,
                 'km_recorridos': asistencia.km_recorridos if asistencia else 0,
@@ -3387,17 +3386,11 @@ class NotasViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
 
-        nota = serializer.save()
+        serializer.save()
 
-        nota_teorica_aprobada = Notas.objects.filter(
-            matricula=matricula,
-            tipo_nota='teorico',
-            nota__gte=80
-        ).exists()
-
-        if nota_teorica_aprobada:
-            matricula.estado = 'finalizado'
-            matricula.save(update_fields=['estado'])
+        finalizar_matricula_si_tiene_dos_notas(
+            matricula
+        )
 
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
@@ -6022,6 +6015,10 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
                         )
                     ),
                 }
+            )
+
+            finalizar_matricula_si_tiene_dos_notas(
+                examen.matricula
             )
 
         return Response(
