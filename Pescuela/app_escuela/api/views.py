@@ -843,7 +843,10 @@ class MatriculaViewSet(viewsets.ModelViewSet):
         matriculas_ids = Calendario.objects.filter(
             instructor_id=user.instructor_id,
             es_examen=False,
-            matricula__estado='matriculado',
+            matricula__estado__in=[
+                'matriculado',
+                'finalizado',
+            ],
         ).exclude(
             estado='cancelada'
         ).values_list(
@@ -855,7 +858,10 @@ class MatriculaViewSet(viewsets.ModelViewSet):
             'estudiante'
         ).filter(
             id__in=matriculas_ids,
-            estado='matriculado',
+            estado__in=[
+                'matriculado',
+                'finalizado',
+            ],
             estudiante__activo=True,
         ).order_by(
             'estudiante__nombre',
@@ -2106,12 +2112,15 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        if matricula.estado != 'matriculado':
+        if matricula.estado not in [
+            'matriculado',
+            'finalizado',
+        ]:
             return Response(
                 {
                     'error': (
-                        'La matrícula del estudiante '
-                        'no está activa.'
+                        'No se puede programar el examen porque '
+                        'la matrícula no está aprobada.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
