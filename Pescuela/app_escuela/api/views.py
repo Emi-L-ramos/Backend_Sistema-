@@ -1919,12 +1919,20 @@ class CalendarioViewSet(viewsets.ModelViewSet):
         if aplicar_a == 'pendientes' and not instance.es_examen:
             clases = Calendario.objects.filter(
                 matricula=instance.matricula,
-                estado='pendiente',
-                fecha__gte=instance.fecha,
+                estado__in=[
+                    'pendiente',
+                    'reprogramada',
+                ],
                 es_examen=False,
-            ).order_by('fecha', 'hora_inicio')
+            ).order_by(
+                'fecha',
+                'hora_inicio',
+                'id',
+            )
         else:
-            clases = Calendario.objects.filter(id=instance.id)
+            clases = Calendario.objects.filter(
+                id=instance.id
+            )
 
         if not clases.exists():
             return Response(
@@ -1977,25 +1985,61 @@ class CalendarioViewSet(viewsets.ModelViewSet):
 
                 if instructor_id:
                     clase.instructor_id = instructor_id
-                    campos_actualizados.append('instructor')
+                    campos_actualizados.append(
+                        'instructor'
+                    )
 
                 if aplicar_a != 'pendientes' or instance.es_examen:
                     if fecha_obj:
                         clase.fecha = fecha_obj
-                        campos_actualizados.append('fecha')
+                        campos_actualizados.append(
+                            'fecha'
+                        )
 
                 if cambia_hora:
                     clase.hora_inicio = hora_inicio_obj
                     clase.hora_fin = hora_fin_obj
-                    campos_actualizados.extend(['hora_inicio', 'hora_fin'])
+
+                    campos_actualizados.extend([
+                        'hora_inicio',
+                        'hora_fin',
+                    ])
 
                 if campos_actualizados:
-                    clase.save(update_fields=campos_actualizados)
+                    clase.save(
+                        update_fields=list(
+                            dict.fromkeys(campos_actualizados)
+                        )
+                    )
+
+            # Cuando se cambia oficialmente al estudiante de instructor, tambien se actualiza el instructor usado por el informe de induccion.
+            if (
+                instructor_id
+                and aplicar_a == 'pendientes'
+                and not instance.es_examen
+            ):
+                Notas.objects.filter(
+                    matricula=instance.matricula,
+                    tipo_nota='practico',
+                ).exclude(
+                    instructor_id=instructor_id
+                ).update(
+                    instructor_id=instructor_id
+                )
 
         instance.refresh_from_db()
-        serializer = self.get_serializer(instance)
 
-        return Response(serializer.data)
+        serializer = self.get_serializer(
+            instance
+        )
+
+        return Response({
+            'message': (
+                'La clase y el instructor fueron '
+                'actualizados correctamente.'
+            ),
+            'calendario': serializer.data,
+        })
     
     @action(detail=False, methods=['post'], url_path='crear-examen')
     def crear_examen(self, request):
