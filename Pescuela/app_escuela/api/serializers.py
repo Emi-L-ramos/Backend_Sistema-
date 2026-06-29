@@ -1,6 +1,6 @@
 # app_escuela/api/serializers.py
 
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from rest_framework import serializers
 from django.db import models
 
@@ -780,13 +780,11 @@ class ReciboSerializer(serializers.ModelSerializer):
         )
 
         if matricula.tipo_curso == 'Principiante':
-            return Decimal(
+            monto_total = Decimal(
                 str(valor_curso.precio_total)
-            ).quantize(
-                Decimal('0.01')
             )
 
-        if matricula.tipo_curso in [
+        elif matricula.tipo_curso in [
             'Intermedio',
             'Avanzado',
         ]:
@@ -798,14 +796,18 @@ class ReciboSerializer(serializers.ModelSerializer):
                     f'requiere horas.'
                 )
 
-            return (
+            monto_total = (
                 Decimal(str(horas))
                 * Decimal(str(valor_curso.precio_hora))
-            ).quantize(
-                Decimal('0.01')
             )
 
-        return Decimal('0.00')
+        else:
+            monto_total = Decimal('0')
+
+        return monto_total.quantize(
+            Decimal('1'),
+            rounding=ROUND_HALF_UP
+        )
 
     def validate(self, data):
         matricula = (
