@@ -1323,6 +1323,7 @@ class CalendarioSerializer(serializers.ModelSerializer):
     estudiante_nombre = serializers.SerializerMethodField()
     estudiante_cedula = serializers.CharField(source='matricula.estudiante.cedula', read_only=True)
     instructor_nombre = serializers.SerializerMethodField()
+    instructor_telefono = serializers.SerializerMethodField()
     horario = serializers.CharField(source='matricula.horario', read_only=True)
     tipo_curso = serializers.CharField(source='matricula.tipo_curso', read_only=True)
     modalidad = serializers.CharField(source='matricula.modalidad', read_only=True)
@@ -1352,6 +1353,14 @@ class CalendarioSerializer(serializers.ModelSerializer):
             return nombre_usuario or usuario.username
 
         return f"Instructor {obj.instructor.id}"
+    
+    def get_instructor_telefono(self, obj):
+        if not obj.instructor:
+            return ""
+
+        return str(
+            obj.instructor.numero_telefono or ""
+        ).strip()
 
     def validate(self, data):
         matricula = data.get('matricula') or getattr(self.instance, 'matricula', None)
