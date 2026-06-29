@@ -7,7 +7,7 @@ import tempfile
 
 from copy import copy
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from io import BytesIO
 
 from django.conf import settings
@@ -1045,30 +1045,35 @@ def saldo(request):
             )
 
         if matricula.tipo_curso == 'Principiante':
-            return Decimal(
+            monto_total = Decimal(
                 str(valor_curso.precio_total)
-            ).quantize(
-                Decimal('0.01')
             )
 
-        if matricula.tipo_curso in ['Intermedio', 'Avanzado']:
+        elif matricula.tipo_curso in [
+            'Intermedio',
+            'Avanzado',
+        ]:
             horas = matricula.horas_reforzamiento
 
             if not horas:
                 raise ValueError(
                     f'La matrícula del curso '
-                    f'{matricula.tipo_curso} no tiene horas asignadas.'
+                    f'{matricula.tipo_curso} '
+                    f'no tiene horas asignadas.'
                 )
 
-            return (
+            monto_total = (
                 Decimal(str(horas))
                 * Decimal(str(valor_curso.precio_hora))
-            ).quantize(
-                Decimal('0.01')
             )
 
-        return Decimal('0.00')
+        else:
+            monto_total = Decimal('0')
 
+        return monto_total.quantize(
+            Decimal('1'),
+            rounding=ROUND_HALF_UP
+        )
 
     try:
         monto_total = calcular_monto_total(matricula)
