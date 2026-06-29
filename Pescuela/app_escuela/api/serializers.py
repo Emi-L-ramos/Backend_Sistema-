@@ -706,9 +706,17 @@ class MatriculaSerializer(serializers.ModelSerializer):
         return matricula
 
 class ReciboSerializer(serializers.ModelSerializer):
-    matricula_data = MatriculaSerializer(source='matricula', read_only=True)
+    matricula_data = MatriculaSerializer(
+        source='matricula',
+        read_only=True
+    )
+
     estudiante_nombre = serializers.SerializerMethodField()
-    estudiante_cedula = serializers.CharField(source='matricula.estudiante.cedula', read_only=True)
+
+    estudiante_cedula = serializers.CharField(
+        source='matricula.estudiante.cedula',
+        read_only=True
+    )
 
     class Meta:
         model = Recibo
@@ -716,258 +724,597 @@ class ReciboSerializer(serializers.ModelSerializer):
 
     def get_estudiante_nombre(self, obj):
         estudiante = obj.matricula.estudiante
-        return f"{estudiante.nombre} {estudiante.apellido}"
+
+        return (
+            f"{estudiante.nombre} "
+            f"{estudiante.apellido}"
+        ).strip()
 
     def obtener_valor_curso(self, matricula):
-        valor_curso = ValorCurso.objects.filter(
-            tipo_curso=matricula.tipo_curso,
-            activo=True
-        ).order_by('-fecha_modificacion').first()
+        """
+        Si la matrícula ya tiene un recibo, se conserva
+        el valor del curso utilizado en ese primer pago.
+
+        Esto evita que un cambio posterior en el precio
+        altere el saldo pendiente del estudiante.
+        """
+
+        primer_recibo = (
+            Recibo.objects
+            .filter(
+                matricula=matricula,
+                valor_curso__isnull=False,
+            )
+            .select_related('valor_curso')
+            .order_by('id')
+            .first()
+        )
+
+        if primer_recibo:
+            return primer_recibo.valor_curso
+
+        valor_curso = (
+            ValorCurso.objects
+            .filter(
+                tipo_curso=matricula.tipo_curso,
+                activo=True,
+            )
+            .order_by(
+                '-fecha_modificacion',
+                '-id',
+            )
+            .first()
+        )
 
         if not valor_curso:
             raise serializers.ValidationError(
-                f'No existe un valor activo para el curso {matricula.tipo_curso}.'
+                f'No existe un valor activo para el curso '
+                f'{matricula.tipo_curso}.'
             )
 
         return valor_curso
 
-
     def calcular_monto_total(self, matricula):
-        valor_curso = self.obtener_valor_curso(matricula)
+        valor_curso = self.obtener_valor_curso(
+            matricula
+        )
 
         if matricula.tipo_curso == 'Principiante':
-           return Decimal(valor_curso.precio_total).quantize(Decimal('1'))
+            return Decimal(
+                str(valor_curso.precio_total)
+            ).quantize(
+                Decimal('0.01')
+            )
 
-        if matricula.tipo_curso in ['Intermedio', 'Avanzado']:
+        if matricula.tipo_curso in [
+            'Intermedio',
+            'Avanzado',
+        ]:
             horas = matricula.horas_reforzamiento
 
             if not horas:
                 raise serializers.ValidationError(
-                    f'El curso {matricula.tipo_curso} requiere horas.'
+                    f'El curso {matricula.tipo_curso} '
+                    f'requiere horas.'
                 )
 
-            return (Decimal(horas) * valor_curso.precio_hora).quantize(Decimal('1'))
+            return (
+                Decimal(str(horas))
+                * Decimal(str(valor_curso.precio_hora))
+            ).quantize(
+                Decimal('0.01')
+            )
 
-        return Decimal('0')
+        return Decimal('0.00')
 
     def validate(self, data):
-        matricula = data.get('matricula') or getattr(self.instance, 'matricula', None)
+        matricula = (
+            data.get('matricula')
+            or getattr(
+                self.instance,
+                'matricula',
+                None,
+            )
+        )
 
         if not matricula:
             raise serializers.ValidationError({
-                'matricula': 'Debe seleccionar una matrícula.'
+                'matricula': (
+                    'Debe seleccionar una matrícula.'
+                )
             })
 
-        if matricula.estado in ['cancelado', 'finalizado']:
+        if matricula.estado in [
+            'cancelado',
+            'finalizado',
+        ]:
             raise serializers.ValidationError({
-                'matricula': 'No se pueden registrar pagos en una matrícula cancelada o finalizada.'
+                'matricula': (
+                    'No se pueden registrar pagos en una '
+                    'matrícula cancelada o finalizada.'
+                )
             })
 
-        recibos_previos = Recibo.objects.filter(matricula=matricula)
+        recibos_previos = Recibo.objects.filter(
+            matricula=matricula
+        )
+
         if self.instance:
-            recibos_previos = recibos_previos.exclude(id=self.instance.id)
+            recibos_previos = recibos_previos.exclude(
+                id=self.instance.id
+            )
 
-        tipo_pago = data.get('tipo_pago')
-        monto_pagado = data.get('monto_pagado') or Decimal('0')
-        monto_total = self.calcular_monto_total(matricula)
+        tipo_pago = data.get(
+            'tipo_pago',
+            getattr(
+                self.instance,
+                'tipo_pago',
+                None,
+            )
+        )
 
-        total_pagado_previo = recibos_previos.aggregate(
-            total=models.Sum('monto_pagado')
-        )['total'] or Decimal('0')
+        monto_pagado = data.get(
+            'monto_pagado',
+            getattr(
+                self.instance,
+                'monto_pagado',
+                Decimal('0.00'),
+            )
+        ) or Decimal('0.00')
 
-        saldo_pendiente = monto_total - total_pagado_previo
+        monto_total = self.calcular_monto_total(
+            matricula
+        )
 
-        if tipo_pago != 'beneficio' and monto_pagado <= 0:
+        total_pagado_previo = (
+            recibos_previos.aggregate(
+                total=models.Sum('monto_pagado')
+            )['total']
+            or Decimal('0.00')
+        )
+
+        saldo_pendiente = (
+            monto_total - total_pagado_previo
+        )
+
+        if (
+            not self.instance
+            and recibos_previos.count() >= 2
+        ):
+            raise serializers.ValidationError(
+                'Esta matrícula ya tiene los dos recibos '
+                'permitidos.'
+            )
+
+        if (
+            tipo_pago != 'beneficio'
+            and monto_pagado <= 0
+        ):
             raise serializers.ValidationError({
-                'monto_pagado': 'El monto debe ser mayor a cero.'
+                'monto_pagado': (
+                    'El monto debe ser mayor a cero.'
+                )
             })
 
-        # COMPLETO
         if tipo_pago == 'completo':
-            tiene_pago_completo = recibos_previos.filter(
-                tipo_pago__in=['completo', 'beneficio']
-            ).exists()
-            if tiene_pago_completo:
+            tiene_pago_final = (
+                recibos_previos.filter(
+                    tipo_pago__in=[
+                        'completo',
+                        'beneficio',
+                    ]
+                ).exists()
+            )
+
+            if tiene_pago_final:
                 raise serializers.ValidationError(
-                    'Esta Matrícula ya tiene un Pago Completo o Beneficio Registrado.'
-                )
-            if (monto_pagado != monto_total) :
-                raise serializers.ValidationError(
-                    f'El pago completo debe cubrir el total exacto: C${monto_total}.'
+                    'Esta matrícula ya tiene un pago '
+                    'completo o beneficio registrado.'
                 )
 
-        # ANTICIPO
+            anticipos_previos = (
+                recibos_previos.filter(
+                    tipo_pago='anticipo'
+                )
+            )
+
+            monto_requerido = (
+                saldo_pendiente
+                if anticipos_previos.exists()
+                else monto_total
+            )
+
+            montos_permitidos = {
+                monto_requerido,
+            }
+
+            # Permite reparar recibos antiguos duplicados
+            # mediante la opción Editar.
+            if (
+                self.instance
+                and anticipos_previos.exists()
+            ):
+                montos_permitidos.add(
+                    monto_total
+                )
+
+            if monto_pagado not in montos_permitidos:
+                raise serializers.ValidationError({
+                    'monto_pagado': (
+                        'El pago debe cubrir exactamente '
+                        f'C${monto_requerido}.'
+                    )
+                })
+
         elif tipo_pago == 'anticipo':
-            anticipos_previos = recibos_previos.filter(tipo_pago='anticipo')
-            cantidad_anticipos = anticipos_previos.count()
+            tiene_pago_final = (
+                recibos_previos.filter(
+                    tipo_pago__in=[
+                        'completo',
+                        'beneficio',
+                    ]
+                ).exists()
+            )
+
+            if tiene_pago_final:
+                raise serializers.ValidationError(
+                    'Esta matrícula ya está pagada '
+                    'completamente.'
+                )
+
+            anticipos_previos = (
+                recibos_previos.filter(
+                    tipo_pago='anticipo'
+                )
+            )
+
+            cantidad_anticipos = (
+                anticipos_previos.count()
+            )
 
             if cantidad_anticipos >= 1:
                 if monto_pagado != saldo_pendiente:
                     raise serializers.ValidationError({
-                        'monto_pagado':
-                            f'El segundo anticipo debe ser exactamente el saldo pendiente: C${saldo_pendiente}.'
+                        'monto_pagado': (
+                            'El segundo anticipo debe ser '
+                            'exactamente el saldo pendiente: '
+                            f'C${saldo_pendiente}.'
+                        )
                     })
 
             else:
                 if monto_pagado >= monto_total:
                     raise serializers.ValidationError({
-                        'monto_pagado':
-                            f'El primer anticipo debe ser menor al total del curso: C${monto_total}.'
+                        'monto_pagado': (
+                            'El primer anticipo debe ser '
+                            'menor al total del curso: '
+                            f'C${monto_total}.'
+                        )
                     })
 
             if monto_pagado > saldo_pendiente:
                 raise serializers.ValidationError({
-                    'monto_pagado':
-                        f'El monto excede el saldo pendiente: C${saldo_pendiente}.'
+                    'monto_pagado': (
+                        'El monto excede el saldo '
+                        f'pendiente: C${saldo_pendiente}.'
+                    )
                 })
 
-        # BENEFICIO
         elif tipo_pago == 'beneficio':
             if recibos_previos.exists():
                 raise serializers.ValidationError(
-                    'La matrícula ya tiene pagos registrados.'
+                    'La matrícula ya tiene pagos '
+                    'registrados.'
                 )
 
         return data
 
-    def create(self, validated_data):
-        matricula = validated_data['matricula']
-        tipo_pago = validated_data.get('tipo_pago')
-        monto_pagado = validated_data.get('monto_pagado') or Decimal('0')
-        monto_total = self.calcular_monto_total(matricula)
-
-        valor_curso = self.obtener_valor_curso(matricula)
+    def preparar_datos_curso(
+        self,
+        matricula,
+        validated_data,
+    ):
+        valor_curso = self.obtener_valor_curso(
+            matricula
+        )
 
         validated_data['valor_curso'] = valor_curso
-
-        if matricula.tipo_curso == 'Principiante':
-            validated_data['cantidad'] = valor_curso.cantidad_horas
-            validated_data['monto_unitario'] = valor_curso.precio_total
-        elif matricula.tipo_curso in ['Intermedio', 'Avanzado']:
-            validated_data['cantidad'] = matricula.horas_reforzamiento
-            validated_data['monto_unitario'] = valor_curso.precio_hora
-        else:
-            validated_data['cantidad'] = 1
-            validated_data['monto_unitario'] = Decimal('0')
-
         validated_data['estado'] = 'pagado'
 
-        # ==============================================
-        # CASO 1: BENEFICIO
-        # ==============================================
-        if tipo_pago == 'beneficio':
-            matricula.estado = 'matriculado'
-            matricula.save(update_fields=['estado'])
-            print(f"✅ BENEFICIO: Matrícula {matricula.id} cambiada a MATRICULADO")
-            return Recibo.objects.create(**validated_data)
-
-        # ==============================================
-        # CASO 2: COMPLETO DIRECTO
-        # ==============================================
-        elif tipo_pago == 'completo':
-            matricula.estado = 'matriculado'
-            matricula.save(update_fields=['estado'])
-            print(f"✅ COMPLETO: Matrícula {matricula.id} cambiada a MATRICULADO")
-            return Recibo.objects.create(**validated_data)
-
-        # ==============================================
-        # CASO 3: ANTICIPO
-        # ==============================================
-                # ==============================================
-        # CASO 3: ANTICIPO
-        # ==============================================
-        elif tipo_pago == 'anticipo':
-            # Sumar TODOS los pagos anteriores de esta matrícula
-            total_pagado_anterior = Recibo.objects.filter(
-                matricula=matricula
-            ).aggregate(
-                total=models.Sum('monto_pagado')
-            )['total'] or Decimal('0')
-
-            # Saldo que quedaba pendiente ANTES de este pago
-            saldo_antes_de_este_pago = monto_total - total_pagado_anterior
-            nuevo_total_pagado = total_pagado_anterior + monto_pagado
-
-            print(f"\n=== PROCESANDO ANTICIPO ===")
-            print(f"Totala apagar: {monto_total}")
-            print(f"Total pagado antes: {total_pagado_anterior}")
-            print(f"Monto nuevo: {monto_pagado}")
-            print(f"Saldo pendiente antes: {saldo_antes_de_este_pago}")
-            print(f"Nuevo total pagado: {nuevo_total_pagado}")
-            print(f"Monto total curso: {monto_total}")
-
-            # Completa si: el total acumulado llega al monto del curso
-            # O si este pago cubre exactamente el saldo que quedaba
-            pago_completa_curso = (
-                nuevo_total_pagado >= monto_total or
-                monto_pagado >= saldo_antes_de_este_pago
+        if matricula.tipo_curso == 'Principiante':
+            validated_data['cantidad'] = (
+                valor_curso.cantidad_horas
             )
 
-            if pago_completa_curso:
-                print(f"✅ ANTICIPO COMPLETA EL CURSO")
+            validated_data['monto_unitario'] = (
+                valor_curso.precio_total
+            )
 
-                # Eliminar todos los anticipos previos
-                anticipos_previos = Recibo.objects.filter(
+        elif matricula.tipo_curso in [
+            'Intermedio',
+            'Avanzado',
+        ]:
+            validated_data['cantidad'] = (
+                matricula.horas_reforzamiento
+            )
+
+            validated_data['monto_unitario'] = (
+                valor_curso.precio_hora
+            )
+
+        return validated_data
+
+    @transaction.atomic
+    def create(self, validated_data):
+        matricula = validated_data['matricula']
+
+        tipo_pago = validated_data.get(
+            'tipo_pago'
+        )
+
+        monto_pagado = (
+            validated_data.get('monto_pagado')
+            or Decimal('0.00')
+        )
+
+        monto_total = self.calcular_monto_total(
+            matricula
+        )
+
+        validated_data = self.preparar_datos_curso(
+            matricula,
+            validated_data,
+        )
+
+        if tipo_pago == 'beneficio':
+            matricula.estado = 'matriculado'
+
+            matricula.save(
+                update_fields=['estado']
+            )
+
+            return Recibo.objects.create(
+                **validated_data
+            )
+
+        if tipo_pago == 'completo':
+            anticipos_previos = (
+                Recibo.objects.filter(
                     matricula=matricula,
-                    tipo_pago='anticipo'
+                    tipo_pago='anticipo',
                 )
-                cantidad = anticipos_previos.count()
-                anticipos_previos.delete()
-                print(f"   - {cantidad} anticipo(s) anterior(es) eliminado(s)")
+            )
 
-                # Convertir este recibo a COMPLETO con el total real acumulado
-                validated_data['tipo_pago'] = 'completo'
-                validated_data['monto_pagado'] = nuevo_total_pagado
+            # El segundo recibo reemplaza al anticipo.
+            if anticipos_previos.exists():
+                anticipos_previos.delete()
+
+            validated_data['tipo_pago'] = (
+                'completo'
+            )
+
+            validated_data['monto_pagado'] = (
+                monto_total
+            )
+
+            matricula.estado = 'matriculado'
+
+            matricula.save(
+                update_fields=['estado']
+            )
+
+            return Recibo.objects.create(
+                **validated_data
+            )
+
+        if tipo_pago == 'anticipo':
+            total_pagado_anterior = (
+                Recibo.objects.filter(
+                    matricula=matricula
+                ).aggregate(
+                    total=models.Sum(
+                        'monto_pagado'
+                    )
+                )['total']
+                or Decimal('0.00')
+            )
+
+            nuevo_total_pagado = (
+                total_pagado_anterior
+                + monto_pagado
+            )
+
+            if nuevo_total_pagado >= monto_total:
+                anticipos_previos = (
+                    Recibo.objects.filter(
+                        matricula=matricula,
+                        tipo_pago='anticipo',
+                    )
+                )
+
+                anticipos_previos.delete()
+
+                validated_data['tipo_pago'] = (
+                    'completo'
+                )
+
+                validated_data['monto_pagado'] = (
+                    monto_total
+                )
 
                 matricula.estado = 'matriculado'
-                matricula.save(update_fields=['estado'])
-                print(f"   - Matrícula {matricula.id} cambiada a MATRICULADO")
+
+                matricula.save(
+                    update_fields=['estado']
+                )
 
             else:
-                saldo_restante = monto_total - nuevo_total_pagado
-                print(f"⚠️ ANTICIPO PARCIAL - Saldo restante: C${saldo_restante}")
-                validated_data['tipo_pago'] = 'anticipo'
+                validated_data['tipo_pago'] = (
+                    'anticipo'
+                )
 
-            return Recibo.objects.create(**validated_data)
+                if matricula.estado != 'pendiente':
+                    matricula.estado = 'pendiente'
 
+                    matricula.save(
+                        update_fields=['estado']
+                    )
+
+            return Recibo.objects.create(
+                **validated_data
+            )
+
+        return Recibo.objects.create(
+            **validated_data
+        )
+
+    @transaction.atomic
     def update(self, instance, validated_data):
-        matricula = instance.matricula
+        matricula_anterior = instance.matricula
+
+        matricula_destino = validated_data.get(
+            'matricula',
+            instance.matricula,
+        )
+
+        # Conserva el valor histórico del curso y evita que el frontend sobrescriba cantidad o precio con el valor activo más reciente.
+        validated_data = self.preparar_datos_curso(
+            matricula_destino,
+            validated_data,
+        )
 
         for attr, value in validated_data.items():
-            setattr(instance, attr, value)
+            setattr(
+                instance,
+                attr,
+                value,
+            )
 
+        instance.estado = 'pagado'
         instance.save()
-        self.actualizar_estado_matricula(matricula)
+
+        matricula = instance.matricula
+
+        monto_total = self.calcular_monto_total(
+            matricula
+        )
+
+        recibos = Recibo.objects.filter(
+            matricula=matricula
+        )
+
+        total_pagado = (
+            recibos.aggregate(
+                total=models.Sum('monto_pagado')
+            )['total']
+            or Decimal('0.00')
+        )
+
+        if instance.tipo_pago == 'beneficio':
+            recibos.exclude(
+                id=instance.id
+            ).delete()
+
+            instance.monto_pagado = Decimal(
+                '0.00'
+            )
+
+            instance.estado = 'pagado'
+
+            instance.save(
+                update_fields=[
+                    'monto_pagado',
+                    'estado',
+                ]
+            )
+
+            matricula.estado = 'matriculado'
+
+            matricula.save(
+                update_fields=['estado']
+            )
+
+        elif total_pagado >= monto_total:
+            # Conserva el recibo que se está editando
+            # y elimina los recibos anteriores.
+            recibos.exclude(
+                id=instance.id
+            ).delete()
+
+            instance.tipo_pago = 'completo'
+            instance.monto_pagado = monto_total
+            instance.estado = 'pagado'
+
+            instance.save(
+                update_fields=[
+                    'tipo_pago',
+                    'monto_pagado',
+                    'estado',
+                ]
+            )
+
+            matricula.estado = 'matriculado'
+
+            matricula.save(
+                update_fields=['estado']
+            )
+
+        else:
+            instance.tipo_pago = 'anticipo'
+            instance.estado = 'pagado'
+
+            instance.save(
+                update_fields=[
+                    'tipo_pago',
+                    'estado',
+                ]
+            )
+
+            matricula.estado = 'pendiente'
+
+            matricula.save(
+                update_fields=['estado']
+            )
+
+        if (
+            matricula_anterior.id
+            != matricula.id
+        ):
+            self.actualizar_estado_matricula(
+                matricula_anterior
+            )
+
         return instance
 
-    def actualizar_estado_matricula(self, matricula):
+    def actualizar_estado_matricula(
+        self,
+        matricula,
+    ):
         if not matricula:
             return
 
-        monto_total = self.calcular_monto_total(matricula)
+        monto_total = self.calcular_monto_total(
+            matricula
+        )
 
-        total_pagado = matricula.recibos.aggregate(
-            total=models.Sum('monto_pagado')
-        )['total'] or Decimal('0')
-
-        print(f"\n=== RECALCULANDO MATRÍCULA {matricula.id} ===")
-        print(f"Total pagado: {total_pagado}")
-        print(f"Monto total: {monto_total}")
+        total_pagado = (
+            matricula.recibos.aggregate(
+                total=models.Sum('monto_pagado')
+            )['total']
+            or Decimal('0.00')
+        )
 
         if total_pagado >= monto_total:
-            if matricula.estado != 'matriculado':
-                matricula.estado = 'matriculado'
-                matricula.save(update_fields=['estado'])
-                print(f"✅ Estado cambiado a: MATRICULADO")
-            else:
-                print(f"ℹ️ Estado ya es MATRICULADO")
+            nuevo_estado = 'matriculado'
         else:
-            if matricula.estado == 'matriculado':
-                matricula.estado = 'pendiente'
-                matricula.save(update_fields=['estado'])
-                print(f"⚠️ Estado cambiado a: PENDIENTE")
-            else:
-                print(f"ℹ️ Estado se mantiene como: {matricula.estado}")
+            nuevo_estado = 'pendiente'
+
+        if matricula.estado != nuevo_estado:
+            matricula.estado = nuevo_estado
+
+            matricula.save(
+                update_fields=['estado']
+            )
 
 
 class CalendarioSerializer(serializers.ModelSerializer):
