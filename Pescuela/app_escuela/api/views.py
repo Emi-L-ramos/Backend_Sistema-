@@ -1621,6 +1621,19 @@ class CalendarioViewSet(viewsets.ModelViewSet):
         if int(horas_totales) % horas_por_dia != 0:
             num_clases += 1
 
+        # Duración individual de cada encuentro. Permite que el último encuentro dure menos horas cuando las horas totales no son divisibles exactamente.
+        duraciones_clases = []
+        horas_restantes = int(horas_totales)
+
+        for _ in range(num_clases):
+            duracion_clase = min(
+                horas_por_dia,
+                horas_restantes
+            )
+
+            duraciones_clases.append(duracion_clase)
+            horas_restantes -= duracion_clase
+
         fechas = []
         actual = data['fecha_inicio']
         es_extraordinario = str(matricula.modalidad).lower() == 'extraordinario'
@@ -1636,11 +1649,22 @@ class CalendarioViewSet(viewsets.ModelViewSet):
 
             actual += timedelta(days=1)
 
-        for fecha_clase in fechas:
+        for fecha_clase, duracion_clase in zip(
+            fechas,
+            duraciones_clases
+        ):
+            hora_fin_clase = (
+                datetime.combine(
+                    date.today(),
+                    hora_inicio
+                )
+                + timedelta(hours=duracion_clase)
+            ).time()
+
             choque = Calendario.objects.filter(
                 instructor=instructor,
                 fecha=fecha_clase,
-                hora_inicio__lt=hora_fin,
+                hora_inicio__lt=hora_fin_clase,
                 hora_fin__gt=hora_inicio,
                 estado__in=['pendiente']
             ).exists()
@@ -1650,7 +1674,8 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                     {
                         'error': (
                             f'El instructor ya tiene ocupado el horario '
-                            f'{hora_inicio.strftime("%H:%M")} - {hora_fin.strftime("%H:%M")} '
+                            f'{hora_inicio.strftime("%H:%M")} - '
+                            f'{hora_fin_clase.strftime("%H:%M")} '
                             f'el día {fecha_clase}.'
                         )
                     },
@@ -1660,13 +1685,30 @@ class CalendarioViewSet(viewsets.ModelViewSet):
         creadas = []
 
         with transaction.atomic():
-            for i, fecha_clase in enumerate(fechas, start=1):
+            for i, (
+                fecha_clase,
+                duracion_clase
+            ) in enumerate(
+                zip(
+                    fechas,
+                    duraciones_clases
+                ),
+                start=1
+            ):
+                hora_fin_clase = (
+                    datetime.combine(
+                        date.today(),
+                        hora_inicio
+                    )
+                    + timedelta(hours=duracion_clase)
+                ).time()
+
                 clase = Calendario.objects.create(
                     matricula=matricula,
                     instructor=instructor,
                     fecha=fecha_clase,
                     hora_inicio=hora_inicio,
-                    hora_fin=hora_fin,
+                    hora_fin=hora_fin_clase,
                     numero_clase=i,
                     estado='pendiente',
                     es_examen=False,
