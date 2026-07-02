@@ -8061,7 +8061,7 @@ def certificado_crear_en_celda(
         celda,
         top=440,
         start=440,
-        bottom=440,
+        bottom=260,
         end=440,
     )
 
@@ -8081,7 +8081,7 @@ def certificado_crear_en_celda(
     )
     certificado_fijar_alto_fila(
         tabla_negra.rows[0],
-        4.87,
+        4.98,
     )
 
     celda_negra = tabla_negra.cell(0, 0)
@@ -8117,7 +8117,7 @@ def certificado_crear_en_celda(
     )
     certificado_fijar_alto_fila(
         tabla_azul.rows[0],
-        4.70,
+        4.82,
     )
 
     celda_azul = tabla_azul.cell(0, 0)
@@ -8133,7 +8133,7 @@ def certificado_crear_en_celda(
         celda_azul,
         top=320,
         start=260,
-        bottom=320,
+        bottom=120,
         end=260,
     )
 
@@ -8151,7 +8151,7 @@ def certificado_crear_en_celda(
     )
     certificado_fijar_alto_fila(
         tabla_interior.rows[0],
-        4.06,
+        4.18,
     )
 
     contenido = tabla_interior.cell(0, 0)
