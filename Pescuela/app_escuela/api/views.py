@@ -8170,11 +8170,7 @@ def certificado_crear_en_celda(
         bottom=0,
         end=20,
     )
-    certificado_bordes_celda(
-        contenido,
-        left=(dorado, "10"),
-        right=(dorado, "10"),
-    )
+   
 
     # Título superior. Se escribe como párrafo independiente para
     # evitar que Word lo recorte en el primer certificado de la hoja.
@@ -8206,7 +8202,7 @@ def certificado_crear_en_celda(
     )
     certificado_fijar_alto_fila(
         encabezado.rows[0],
-        0.28,
+        0.30,
     )
     certificado_fijar_alto_fila(
         encabezado.rows[1],
@@ -8215,6 +8211,9 @@ def certificado_crear_en_celda(
 
     franja = encabezado.cell(0, 0)
     certificado_limpiar_celda(franja)
+    franja.vertical_alignment = (
+        WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    )
     certificado_sombrear_celda(
         franja,
         amarillo,
@@ -8232,7 +8231,7 @@ def certificado_crear_en_celda(
         align=WD_ALIGN_PARAGRAPH.CENTER,
         before=0,
         after=0,
-        line_spacing=14,
+        line_spacing=11,
     )
     certificado_run(
         p_franja,
@@ -8290,7 +8289,7 @@ def certificado_crear_en_celda(
     certificado_agregar_imagen(
         logo_celda,
         logo_path,
-        0.62,
+        0.76,
     )
 
     certificado_limpiar_celda(nombre_celda)
@@ -8450,7 +8449,7 @@ def certificado_crear_en_celda(
     )
     certificado_fijar_columnas(
         tabla_firma,
-        [1.35, 4.30, 1.35],
+        [2.15, 2.70, 2.15],
     )
     certificado_fijar_alto_fila(
         tabla_firma.rows[0],
@@ -8477,8 +8476,21 @@ def certificado_crear_en_celda(
         WD_CELL_VERTICAL_ALIGNMENT.CENTER
     )
 
+    certificado_bordes_celda(
+        firma,
+        top=(negro, "10"),
+    )
+
+    certificado_set_margenes_celda(
+        firma,
+        top=75,
+        start=0,
+        bottom=0,
+        end=0,
+    )
+
     p_director = firma.add_paragraph()
-    certificado_preparar_parrafo(
+        certificado_preparar_parrafo(
         p_director,
         align=WD_ALIGN_PARAGRAPH.CENTER,
         before=0,
