@@ -8490,7 +8490,7 @@ def certificado_crear_en_celda(
     )
 
     p_director = firma.add_paragraph()
-        certificado_preparar_parrafo(
+    certificado_preparar_parrafo(
         p_director,
         align=WD_ALIGN_PARAGRAPH.CENTER,
         before=0,
