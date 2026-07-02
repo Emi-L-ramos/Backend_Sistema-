@@ -7617,22 +7617,69 @@ def certificado_run(parrafo, texto, size=8, bold=False):
     run.bold = bold
     run.font.name = "Arial"
     run.font.size = Pt(size)
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    run._element.get_or_add_rPr().rFonts.set(
+        qn("w:eastAsia"),
+        "Arial",
+    )
     return run
 
 
-def certificado_parrafo(celda, texto="", size=8, bold=False, align=WD_ALIGN_PARAGRAPH.CENTER, after=0):
-    parrafo = celda.add_paragraph()
+def certificado_preparar_parrafo(
+    parrafo,
+    align=WD_ALIGN_PARAGRAPH.CENTER,
+    before=0,
+    after=0,
+    line_spacing=None,
+):
     parrafo.alignment = align
-    parrafo.paragraph_format.space_before = Pt(0)
+    parrafo.paragraph_format.space_before = Pt(before)
     parrafo.paragraph_format.space_after = Pt(after)
-    certificado_run(parrafo, texto, size=size, bold=bold)
+
+    if line_spacing is not None:
+        parrafo.paragraph_format.line_spacing = Pt(line_spacing)
+
     return parrafo
 
 
-def certificado_set_margenes_celda(celda, top=60, start=80, bottom=60, end=80):
-    tc = celda._tc
-    tc_pr = tc.get_or_add_tcPr()
+def certificado_parrafo(
+    celda,
+    texto="",
+    size=8,
+    bold=False,
+    align=WD_ALIGN_PARAGRAPH.CENTER,
+    before=0,
+    after=0,
+    line_spacing=None,
+):
+    parrafo = celda.add_paragraph()
+    certificado_preparar_parrafo(
+        parrafo,
+        align=align,
+        before=before,
+        after=after,
+        line_spacing=line_spacing,
+    )
+    certificado_run(
+        parrafo,
+        texto,
+        size=size,
+        bold=bold,
+    )
+    return parrafo
+
+
+def certificado_limpiar_celda(celda):
+    celda._tc.clear_content()
+
+
+def certificado_set_margenes_celda(
+    celda,
+    top=0,
+    start=0,
+    bottom=0,
+    end=0,
+):
+    tc_pr = celda._tc.get_or_add_tcPr()
     tc_mar = tc_pr.first_child_found_in("w:tcMar")
 
     if tc_mar is None:
@@ -7668,16 +7715,100 @@ def certificado_sombrear_celda(celda, color):
     shd.set(qn("w:fill"), color)
 
 
-def certificado_bordes_tabla(tabla, color="1F4E79", size="14"):
-    tbl = tabla._tbl
-    tbl_pr = tbl.tblPr
+def certificado_fijar_tabla(tabla, ancho_pulgadas):
+    tabla.autofit = False
+    tabla.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+    tbl_pr = tabla._tbl.tblPr
+
+    layout = tbl_pr.find(qn("w:tblLayout"))
+    if layout is None:
+        layout = OxmlElement("w:tblLayout")
+        tbl_pr.append(layout)
+    layout.set(qn("w:type"), "fixed")
+
+    ancho = tbl_pr.find(qn("w:tblW"))
+    if ancho is None:
+        ancho = OxmlElement("w:tblW")
+        tbl_pr.append(ancho)
+    ancho.set(qn("w:w"), str(int(ancho_pulgadas * 1440)))
+    ancho.set(qn("w:type"), "dxa")
+
+    sangria = tbl_pr.find(qn("w:tblInd"))
+    if sangria is None:
+        sangria = OxmlElement("w:tblInd")
+        tbl_pr.append(sangria)
+    sangria.set(qn("w:w"), "0")
+    sangria.set(qn("w:type"), "dxa")
+
+    alineacion = tbl_pr.find(qn("w:jc"))
+    if alineacion is None:
+        alineacion = OxmlElement("w:jc")
+        tbl_pr.append(alineacion)
+    alineacion.set(qn("w:val"), "center")
+
+
+def certificado_fijar_ancho_celda(celda, ancho_pulgadas):
+    celda.width = Inches(ancho_pulgadas)
+
+    tc_pr = celda._tc.get_or_add_tcPr()
+    tc_w = tc_pr.find(qn("w:tcW"))
+
+    if tc_w is None:
+        tc_w = OxmlElement("w:tcW")
+        tc_pr.append(tc_w)
+
+    tc_w.set(qn("w:w"), str(int(ancho_pulgadas * 1440)))
+    tc_w.set(qn("w:type"), "dxa")
+
+
+def certificado_fijar_columnas(tabla, anchos):
+    columnas_grid = tabla._tbl.tblGrid.gridCol_lst
+
+    for columna, ancho in zip(columnas_grid, anchos):
+        columna.set(
+            qn("w:w"),
+            str(int(ancho * 1440)),
+        )
+
+    for fila in tabla.rows:
+        for celda, ancho in zip(fila.cells, anchos):
+            certificado_fijar_ancho_celda(
+                celda,
+                ancho,
+            )
+
+
+def certificado_fijar_alto_fila(fila, alto_pulgadas):
+    fila.height = Inches(alto_pulgadas)
+    fila.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
+
+    tr_pr = fila._tr.get_or_add_trPr()
+
+    if tr_pr.find(qn("w:cantSplit")) is None:
+        tr_pr.append(OxmlElement("w:cantSplit"))
+
+
+def certificado_bordes_tabla(
+    tabla,
+    color=None,
+    size="0",
+):
+    tbl_pr = tabla._tbl.tblPr
     borders = tbl_pr.first_child_found_in("w:tblBorders")
 
     if borders is None:
         borders = OxmlElement("w:tblBorders")
         tbl_pr.append(borders)
 
-    for edge in ["top", "left", "bottom", "right", "insideH", "insideV"]:
+    for edge in [
+        "top",
+        "left",
+        "bottom",
+        "right",
+        "insideH",
+        "insideV",
+    ]:
         tag = qn(f"w:{edge}")
         element = borders.find(tag)
 
@@ -7685,43 +7816,137 @@ def certificado_bordes_tabla(tabla, color="1F4E79", size="14"):
             element = OxmlElement(f"w:{edge}")
             borders.append(element)
 
-        element.set(qn("w:val"), "single")
-        element.set(qn("w:sz"), size)
-        element.set(qn("w:space"), "0")
-        element.set(qn("w:color"), color)
+        if color is None:
+            element.set(qn("w:val"), "nil")
+        else:
+            element.set(qn("w:val"), "single")
+            element.set(qn("w:sz"), str(size))
+            element.set(qn("w:space"), "0")
+            element.set(qn("w:color"), color)
 
 
 def certificado_sin_bordes_tabla(tabla):
-    tbl = tabla._tbl
-    tbl_pr = tbl.tblPr
-    borders = tbl_pr.first_child_found_in("w:tblBorders")
+    certificado_bordes_tabla(
+        tabla,
+        color=None,
+    )
+
+
+def certificado_bordes_celda(
+    celda,
+    top=None,
+    left=None,
+    bottom=None,
+    right=None,
+):
+    tc_pr = celda._tc.get_or_add_tcPr()
+    borders = tc_pr.first_child_found_in("w:tcBorders")
 
     if borders is None:
-        borders = OxmlElement("w:tblBorders")
-        tbl_pr.append(borders)
+        borders = OxmlElement("w:tcBorders")
+        tc_pr.append(borders)
 
-    for edge in ["top", "left", "bottom", "right", "insideH", "insideV"]:
-        tag = qn(f"w:{edge}")
-        element = borders.find(tag)
+    bordes = {
+        "top": top,
+        "left": left,
+        "bottom": bottom,
+        "right": right,
+    }
 
-        if element is None:
-            element = OxmlElement(f"w:{edge}")
-            borders.append(element)
+    for nombre, configuracion in bordes.items():
+        elemento = borders.find(qn(f"w:{nombre}"))
 
-        element.set(qn("w:val"), "nil")
+        if elemento is None:
+            elemento = OxmlElement(f"w:{nombre}")
+            borders.append(elemento)
+
+        if configuracion is None:
+            elemento.set(qn("w:val"), "nil")
+            continue
+
+        color, size = configuracion
+        elemento.set(qn("w:val"), "single")
+        elemento.set(qn("w:sz"), str(size))
+        elemento.set(qn("w:space"), "0")
+        elemento.set(qn("w:color"), color)
 
 
 def certificado_agregar_imagen(celda, ruta, ancho):
     if not os.path.exists(ruta):
         return False
 
-    parrafo = celda.paragraphs[0]
-    parrafo.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    certificado_limpiar_celda(celda)
+
+    parrafo = celda.add_paragraph()
+    certificado_preparar_parrafo(
+        parrafo,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        before=0,
+        after=0,
+    )
 
     run = parrafo.add_run()
-    run.add_picture(ruta, width=Inches(ancho))
+    run.add_picture(
+        ruta,
+        width=Inches(ancho),
+    )
 
     return True
+
+
+def certificado_periodo(fecha_inicio, fecha_fin):
+    if not fecha_inicio and not fecha_fin:
+        return ""
+
+    if not fecha_inicio:
+        return (
+            f"hasta el {certificado_fecha_larga(fecha_fin)}"
+        )
+
+    if not fecha_fin:
+        return (
+            f"desde el {certificado_fecha_larga(fecha_inicio)}"
+        )
+
+    meses = {
+        1: "enero",
+        2: "febrero",
+        3: "marzo",
+        4: "abril",
+        5: "mayo",
+        6: "junio",
+        7: "julio",
+        8: "agosto",
+        9: "septiembre",
+        10: "octubre",
+        11: "noviembre",
+        12: "diciembre",
+    }
+
+    if (
+        fecha_inicio.year == fecha_fin.year
+        and fecha_inicio.month == fecha_fin.month
+    ):
+        return (
+            f"del {fecha_inicio.day:02d} al "
+            f"{fecha_fin.day:02d} de "
+            f"{meses[fecha_fin.month]} del "
+            f"{fecha_fin.year}"
+        )
+
+    if fecha_inicio.year == fecha_fin.year:
+        return (
+            f"del {fecha_inicio.day:02d} de "
+            f"{meses[fecha_inicio.month]} al "
+            f"{fecha_fin.day:02d} de "
+            f"{meses[fecha_fin.month]} del "
+            f"{fecha_fin.year}"
+        )
+
+    return (
+        f"del {certificado_fecha_larga(fecha_inicio)} "
+        f"al {certificado_fecha_larga(fecha_fin)}"
+    )
 
 
 def certificado_obtener_datos(desde, hasta):
@@ -7811,187 +8036,475 @@ def certificado_obtener_datos(desde, hasta):
     return resultados
 
 
-def certificado_crear_en_celda(celda, item, logo_path, auto_path, fecha_emision):
-    celda._tc.clear_content()
-    celda.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-    certificado_set_margenes_celda(celda, top=40, start=70, bottom=40, end=70)
-    certificado_sombrear_celda(celda, "E1A13A")
+def certificado_crear_en_celda(
+    celda,
+    item,
+    logo_path,
+    auto_path,
+    fecha_emision,
+):
+    amarillo = "F6BA00"
+    azul = "090A7A"
+    negro = "000000"
+    dorado = "D8A800"
+    blanco = "FFFFFF"
 
-    tabla_marco = celda.add_table(rows=1, cols=1)
-    tabla_marco.alignment = WD_TABLE_ALIGNMENT.CENTER
-    tabla_marco.autofit = True
-    certificado_bordes_tabla(tabla_marco, color="E1A13A", size="8")
+    certificado_limpiar_celda(celda)
+    celda.vertical_alignment = (
+        WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    )
+    certificado_sombrear_celda(
+        celda,
+        amarillo,
+    )
+    certificado_set_margenes_celda(
+        celda,
+        top=440,
+        start=440,
+        bottom=440,
+        end=440,
+    )
 
-    marco = tabla_marco.cell(0, 0)
-    marco.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-    certificado_sombrear_celda(marco, "FFFFFF")
-    certificado_set_margenes_celda(marco, top=55, start=65, bottom=55, end=65)
+    # Marco negro exterior.
+    tabla_negra = celda.add_table(
+        rows=1,
+        cols=1,
+    )
+    certificado_fijar_tabla(
+        tabla_negra,
+        7.89,
+    )
+    certificado_bordes_tabla(
+        tabla_negra,
+        color=negro,
+        size="18",
+    )
+    certificado_fijar_alto_fila(
+        tabla_negra.rows[0],
+        4.87,
+    )
 
-    tabla_interna = marco.add_table(rows=1, cols=1)
-    tabla_interna.alignment = WD_TABLE_ALIGNMENT.CENTER
-    tabla_interna.autofit = True
-    certificado_bordes_tabla(tabla_interna, color="1F4E79", size="16")
+    celda_negra = tabla_negra.cell(0, 0)
+    certificado_limpiar_celda(celda_negra)
+    celda_negra.vertical_alignment = (
+        WD_CELL_VERTICAL_ALIGNMENT.TOP
+    )
+    certificado_sombrear_celda(
+        celda_negra,
+        blanco,
+    )
+    certificado_set_margenes_celda(
+        celda_negra,
+        top=75,
+        start=75,
+        bottom=75,
+        end=75,
+    )
 
-    contenido = tabla_interna.cell(0, 0)
-    contenido.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-    certificado_sombrear_celda(contenido, "FFFFFF")
-    certificado_set_margenes_celda(contenido, top=45, start=80, bottom=45, end=80)
+    # Marco azul grueso.
+    tabla_azul = celda_negra.add_table(
+        rows=1,
+        cols=1,
+    )
+    certificado_fijar_tabla(
+        tabla_azul,
+        7.70,
+    )
+    certificado_bordes_tabla(
+        tabla_azul,
+        color=azul,
+        size="42",
+    )
+    certificado_fijar_alto_fila(
+        tabla_azul.rows[0],
+        4.70,
+    )
 
-    header = contenido.add_table(rows=2, cols=3)
-    header.alignment = WD_TABLE_ALIGNMENT.CENTER
-    header.autofit = True
-    certificado_sin_bordes_tabla(header)
+    celda_azul = tabla_azul.cell(0, 0)
+    certificado_limpiar_celda(celda_azul)
+    celda_azul.vertical_alignment = (
+        WD_CELL_VERTICAL_ALIGNMENT.TOP
+    )
+    certificado_sombrear_celda(
+        celda_azul,
+        blanco,
+    )
+    certificado_set_margenes_celda(
+        celda_azul,
+        top=320,
+        start=260,
+        bottom=320,
+        end=260,
+    )
 
-    titulo_cell = header.cell(0, 0).merge(header.cell(0, 2))
-    certificado_set_margenes_celda(titulo_cell, top=0, start=5, bottom=5, end=5)
+    # Área interior con las dos líneas doradas verticales.
+    tabla_interior = celda_azul.add_table(
+        rows=1,
+        cols=1,
+    )
+    certificado_fijar_tabla(
+        tabla_interior,
+        7.05,
+    )
+    certificado_sin_bordes_tabla(
+        tabla_interior,
+    )
+    certificado_fijar_alto_fila(
+        tabla_interior.rows[0],
+        4.06,
+    )
 
-    p_titulo = titulo_cell.paragraphs[0]
-    p_titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p_titulo.paragraph_format.space_after = Pt(0)
-    certificado_run(p_titulo, "-ESCUELA DE MANEJO EL CACIQUE ADIACT", size=13, bold=True)
-
-    logo_cell = header.cell(1, 0)
-    texto_cell = header.cell(1, 1)
-    auto_cell = header.cell(1, 2)
-
-    for celda_header in [logo_cell, texto_cell, auto_cell]:
-        certificado_sombrear_celda(celda_header, "E1A13A")
-        certificado_set_margenes_celda(celda_header, top=10, start=10, bottom=10, end=10)
-
-    certificado_agregar_imagen(logo_cell, logo_path, 0.60)
-
-    texto_cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-    texto_cell.paragraphs[0].paragraph_format.space_after = Pt(0)
-    certificado_run(texto_cell.paragraphs[0], "CERTIFICA QUE:", size=12, bold=True)
-
-    certificado_agregar_imagen(auto_cell, auto_path, 0.95)
-
-    certificado_parrafo(
+    contenido = tabla_interior.cell(0, 0)
+    certificado_limpiar_celda(contenido)
+    contenido.vertical_alignment = (
+        WD_CELL_VERTICAL_ALIGNMENT.TOP
+    )
+    certificado_sombrear_celda(
         contenido,
-        item["estudiante"],
+        blanco,
+    )
+    certificado_set_margenes_celda(
+        contenido,
+        top=0,
+        start=20,
+        bottom=0,
+        end=20,
+    )
+    certificado_bordes_celda(
+        contenido,
+        left=(dorado, "10"),
+        right=(dorado, "10"),
+    )
+
+    # Título superior. Se escribe como párrafo independiente para
+    # evitar que Word lo recorte en el primer certificado de la hoja.
+    p_titulo = contenido.add_paragraph()
+    certificado_preparar_parrafo(
+        p_titulo,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        before=0,
+        after=0,
+        line_spacing=15,
+    )
+    certificado_run(
+        p_titulo,
+        "-ESCUELA DE MANEJO EL CACIQUE ADIACT",
+        size=13,
+        bold=True,
+    )
+
+    encabezado = contenido.add_table(
+        rows=2,
+        cols=1,
+    )
+    certificado_fijar_tabla(
+        encabezado,
+        7.00,
+    )
+    certificado_sin_bordes_tabla(
+        encabezado,
+    )
+    certificado_fijar_alto_fila(
+        encabezado.rows[0],
+        0.28,
+    )
+    certificado_fijar_alto_fila(
+        encabezado.rows[1],
+        0.66,
+    )
+
+    franja = encabezado.cell(0, 0)
+    certificado_limpiar_celda(franja)
+    certificado_sombrear_celda(
+        franja,
+        amarillo,
+    )
+    certificado_set_margenes_celda(
+        franja,
+        top=0,
+        start=0,
+        bottom=0,
+        end=0,
+    )
+    p_franja = franja.add_paragraph()
+    certificado_preparar_parrafo(
+        p_franja,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        before=0,
+        after=0,
+        line_spacing=14,
+    )
+    certificado_run(
+        p_franja,
+        "CERTIFICA QUE:",
         size=12,
         bold=True,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        after=0,
     )
 
-    certificado_parrafo(
-        contenido,
-        f"Cédula: {item['cedula']}.",
-        size=9,
-        bold=True,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        after=0,
+    identidad = encabezado.cell(1, 0)
+    certificado_limpiar_celda(identidad)
+    certificado_set_margenes_celda(
+        identidad,
+        top=0,
+        start=0,
+        bottom=0,
+        end=0,
     )
 
-    periodo = ""
-    if item["fecha_inicio"] and item["fecha_egreso"]:
-        periodo = (
-            f"del {certificado_fecha_larga(item['fecha_inicio'])} "
-            f"al {certificado_fecha_larga(item['fecha_egreso'])}"
+    tabla_identidad = identidad.add_table(
+        rows=1,
+        cols=3,
+    )
+    certificado_fijar_tabla(
+        tabla_identidad,
+        7.00,
+    )
+    certificado_sin_bordes_tabla(
+        tabla_identidad,
+    )
+    certificado_fijar_columnas(
+        tabla_identidad,
+        [1.00, 5.00, 1.00],
+    )
+
+    logo_celda = tabla_identidad.cell(0, 0)
+    nombre_celda = tabla_identidad.cell(0, 1)
+    auto_celda = tabla_identidad.cell(0, 2)
+
+    for celda_identidad in [
+        logo_celda,
+        nombre_celda,
+        auto_celda,
+    ]:
+        celda_identidad.vertical_alignment = (
+            WD_CELL_VERTICAL_ALIGNMENT.CENTER
         )
-    elif item["fecha_egreso"]:
-        periodo = f"hasta el {certificado_fecha_larga(item['fecha_egreso'])}"
+        certificado_set_margenes_celda(
+            celda_identidad,
+            top=0,
+            start=0,
+            bottom=0,
+            end=0,
+        )
 
-    p_texto = contenido.add_paragraph()
-    p_texto.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-    p_texto.paragraph_format.space_before = Pt(2)
-    p_texto.paragraph_format.space_after = Pt(0)
+    certificado_agregar_imagen(
+        logo_celda,
+        logo_path,
+        0.62,
+    )
 
+    certificado_limpiar_celda(nombre_celda)
+
+    p_nombre = nombre_celda.add_paragraph()
+    certificado_preparar_parrafo(
+        p_nombre,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        before=0,
+        after=0,
+        line_spacing=12,
+    )
     certificado_run(
-        p_texto,
-        "Ha cumplido con el plan de instrucción teórico y práctico aprobado por la DSTN, "
-        "de principiante, para optar a la Licencia de Conducir de Tipo Ordinaria en la Categoría ",
-        size=8.3,
+        p_nombre,
+        item["estudiante"],
+        size=11.5,
         bold=True,
     )
 
-    certificado_run(
-        p_texto,
-        item["categoria"] or "__________",
-        size=8.3,
-        bold=True,
+    p_cedula = nombre_celda.add_paragraph()
+    certificado_preparar_parrafo(
+        p_cedula,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        before=0,
+        after=0,
+        line_spacing=10,
     )
-
     certificado_run(
-        p_texto,
-        f" impartido en el periodo comprendido {periodo}, habiendo obtenido las siguientes calificaciones:",
-        size=8.3,
-        bold=True,
-    )
-
-    certificado_parrafo(
-        contenido,
-        f"Evaluación Teórica: {int(item['nota_teorica'])} puntos.",
+        p_cedula,
+        f"Cédula: {item['cedula']}.",
         size=8.8,
         bold=True,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        after=0,
+    )
+
+    certificado_agregar_imagen(
+        auto_celda,
+        auto_path,
+        0.95,
+    )
+
+    periodo = certificado_periodo(
+        item.get("fecha_inicio"),
+        item.get("fecha_egreso"),
+    )
+
+    # Word deja un párrafo vacío después de la tabla anterior.
+    # Se reutiliza para que no aparezca un espacio adicional.
+    p_texto = contenido.paragraphs[-1]
+    certificado_preparar_parrafo(
+        p_texto,
+        align=WD_ALIGN_PARAGRAPH.JUSTIFY,
+        before=0,
+        after=1,
+        line_spacing=11.5,
+    )
+
+    certificado_run(
+        p_texto,
+        (
+            "Ha cumplido con el plan de instrucción teórico y "
+            "práctico aprobado por la DSTN, de Principiante, "
+            "para optar a la Licencia de Conducir de Tipo "
+            "Ordinaria en la Categoría "
+        ),
+        size=8.25,
+        bold=True,
+    )
+    certificado_run(
+        p_texto,
+        item.get("categoria") or "__________",
+        size=8.25,
+        bold=True,
+    )
+    certificado_run(
+        p_texto,
+        (
+            f" impartido en el período comprendido {periodo} "
+            "habiendo obtenido las siguientes calificaciones:"
+        ),
+        size=8.25,
+        bold=True,
     )
 
     certificado_parrafo(
         contenido,
-        f"Evaluación Práctica: {int(item['nota_practica'])} puntos.",
-        size=8.8,
+        (
+            "Evaluación Teórica: "
+            f"{int(item['nota_teorica'])} puntos."
+        ),
+        size=8.6,
         bold=True,
         align=WD_ALIGN_PARAGRAPH.CENTER,
+        before=0,
         after=0,
+        line_spacing=10.5,
     )
 
     certificado_parrafo(
         contenido,
-        "Registrado en el Asiento No. __________ del Folio No. __________ del Tomo No. __________.",
-        size=8.2,
+        (
+            "Evaluación Práctica: "
+            f"{int(item['nota_practica'])} puntos."
+        ),
+        size=8.6,
         bold=True,
         align=WD_ALIGN_PARAGRAPH.CENTER,
+        before=0,
         after=0,
+        line_spacing=10.5,
     )
-
-    texto_dia = certificado_dia_letras(fecha_emision.day)
-    texto_mes = certificado_mes_anio(fecha_emision)
 
     certificado_parrafo(
         contenido,
-        f"Dado en la ciudad de León a los {texto_dia} días del mes de {texto_mes}.",
-        size=8.2,
+        (
+            "Registrado en el Asiento No. __________ del "
+            "Folio No. __________ del Libro No. __________."
+        ),
+        size=8.1,
         bold=True,
         align=WD_ALIGN_PARAGRAPH.CENTER,
+        before=4,
         after=0,
+        line_spacing=10,
     )
 
-    tabla_firma = contenido.add_table(rows=1, cols=3)
-    tabla_firma.alignment = WD_TABLE_ALIGNMENT.CENTER
-    tabla_firma.autofit = True
-    certificado_sin_bordes_tabla(tabla_firma)
-
-    firma_cell = tabla_firma.cell(0, 1)
-    certificado_set_margenes_celda(firma_cell, top=5, start=5, bottom=0, end=5)
-
-    certificado_parrafo(
-        firma_cell,
-        "______________________________",
-        size=7.3,
-        bold=True,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        after=0,
+    texto_dia = certificado_dia_letras(
+        fecha_emision.day
+    )
+    texto_mes = certificado_mes_anio(
+        fecha_emision
     )
 
     certificado_parrafo(
-        firma_cell,
-        "LIC. FRANCISCO AGUILERA FERRUFINO.",
-        size=7.3,
+        contenido,
+        (
+            "Dado en la ciudad de León a los "
+            f"{texto_dia} días del mes de {texto_mes}."
+        ),
+        size=8.1,
         bold=True,
         align=WD_ALIGN_PARAGRAPH.CENTER,
+        before=0,
         after=0,
+        line_spacing=10,
     )
 
-    certificado_parrafo(
-        firma_cell,
+    tabla_firma = contenido.add_table(
+        rows=2,
+        cols=3,
+    )
+    certificado_fijar_tabla(
+        tabla_firma,
+        7.00,
+    )
+    certificado_sin_bordes_tabla(
+        tabla_firma,
+    )
+    certificado_fijar_columnas(
+        tabla_firma,
+        [1.35, 4.30, 1.35],
+    )
+    certificado_fijar_alto_fila(
+        tabla_firma.rows[0],
+        0.95,
+    )
+    certificado_fijar_alto_fila(
+        tabla_firma.rows[1],
+        0.46,
+    )
+
+    for fila in tabla_firma.rows:
+        for celda_firma in fila.cells:
+            certificado_set_margenes_celda(
+                celda_firma,
+                top=0,
+                start=0,
+                bottom=0,
+                end=0,
+            )
+
+    firma = tabla_firma.cell(1, 1)
+    certificado_limpiar_celda(firma)
+    firma.vertical_alignment = (
+        WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    )
+
+    p_director = firma.add_paragraph()
+    certificado_preparar_parrafo(
+        p_director,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        before=0,
+        after=0,
+        line_spacing=8,
+    )
+    certificado_run(
+        p_director,
+        "Lic. JOSE FRANCISCO AGUILERA FERRUFINO.",
+        size=7.8,
+        bold=False,
+    )
+
+    p_cargo = firma.add_paragraph()
+    certificado_preparar_parrafo(
+        p_cargo,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        before=0,
+        after=0,
+        line_spacing=8,
+    )
+    certificado_run(
+        p_cargo,
         "Director.",
-        size=7.3,
-        bold=True,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        after=0,
+        size=7.5,
+        bold=False,
     )
 
 
@@ -8001,51 +8514,90 @@ def certificado_crear_word(certificados, fecha_emision):
     section = documento.sections[0]
     section.page_width = Inches(8.5)
     section.page_height = Inches(11)
-    section.top_margin = Inches(0.25)
-    section.bottom_margin = Inches(0.25)
-    section.left_margin = Inches(0.25)
-    section.right_margin = Inches(0.25)
+    section.top_margin = Inches(0)
+    section.bottom_margin = Inches(0)
+    section.left_margin = Inches(0)
+    section.right_margin = Inches(0)
+    section.header_distance = Inches(0)
+    section.footer_distance = Inches(0)
 
-    logo_path = os.path.join(settings.BASE_DIR, "static", "certificados", "logo.png")
-    auto_path = os.path.join(settings.BASE_DIR, "static", "certificados", "auto.png")
+    estilo_normal = documento.styles["Normal"]
+    estilo_normal.font.name = "Arial"
+    estilo_normal.font.size = Pt(8)
+    estilo_normal.paragraph_format.space_before = Pt(0)
+    estilo_normal.paragraph_format.space_after = Pt(0)
+
+    logo_path = os.path.join(
+        settings.BASE_DIR,
+        "static",
+        "certificados",
+        "logo.png",
+    )
+    auto_path = os.path.join(
+        settings.BASE_DIR,
+        "static",
+        "certificados",
+        "auto.png",
+    )
 
     if not os.path.exists(logo_path):
-        raise FileNotFoundError(f"No se encontró el logo en: {logo_path}")
+        raise FileNotFoundError(
+            f"No se encontró el logo en: {logo_path}"
+        )
 
     if not os.path.exists(auto_path):
-        raise FileNotFoundError(f"No se encontró la imagen del auto en: {auto_path}")
+        raise FileNotFoundError(
+            f"No se encontró la imagen del auto en: {auto_path}"
+        )
 
-    for index in range(0, len(certificados), 2):
-        grupo = certificados[index:index + 2]
+    total_filas = len(certificados)
 
-        tabla = documento.add_table(rows=2, cols=1)
-        tabla.alignment = WD_TABLE_ALIGNMENT.CENTER
-        tabla.autofit = True
-        certificado_sin_bordes_tabla(tabla)
+    if total_filas % 2 != 0:
+        total_filas += 1
 
-        for fila_index in range(2):
-            fila = tabla.rows[fila_index]
-            fila.height = Inches(5.25)
-            fila.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
+    tabla = documento.add_table(
+        rows=total_filas,
+        cols=1,
+    )
+    certificado_fijar_tabla(
+        tabla,
+        8.5,
+    )
+    certificado_sin_bordes_tabla(
+        tabla,
+    )
 
-            celda = fila.cells[0]
-            celda.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    for indice, fila in enumerate(tabla.rows):
+        certificado_fijar_alto_fila(
+            fila,
+            5.5,
+        )
 
-            if fila_index < len(grupo):
-                certificado_crear_en_celda(
-                    celda,
-                    grupo[fila_index],
-                    logo_path,
-                    auto_path,
-                    fecha_emision,
-                )
-            else:
-                celda._tc.clear_content()
+        celda = fila.cells[0]
+        certificado_set_margenes_celda(
+            celda,
+            top=0,
+            start=0,
+            bottom=0,
+            end=0,
+        )
 
-        if index + 2 < len(certificados):
-            documento.add_page_break()
+        if indice >= len(certificados):
+            certificado_limpiar_celda(celda)
+            continue
+
+        certificado_crear_en_celda(
+            celda,
+            certificados[indice],
+            logo_path,
+            auto_path,
+            fecha_emision,
+        )
 
     return documento
+
+
+
 
 
 @api_view(["GET"])
