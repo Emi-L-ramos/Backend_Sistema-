@@ -1026,8 +1026,52 @@ class MatriculaSerializer(serializers.ModelSerializer):
 
         return data
 
+    @transaction.atomic
     def create(self, validated_data):
-        tipo_curso = validated_data.get('tipo_curso')
+        tipo_curso = validated_data.get(
+            'tipo_curso'
+        )
+
+        estudiante = validated_data.get(
+            'estudiante'
+        )
+
+        estudiante_bloqueado = (
+            Estudiante.objects
+            .select_for_update()
+            .get(
+                pk=estudiante.pk
+            )
+        )
+
+        matricula_sin_finalizar = (
+            Matricula.objects
+            .filter(
+                estudiante_id=estudiante_bloqueado.id
+            )
+            .exclude(
+                estado='finalizado'
+            )
+            .order_by(
+                '-id'
+            )
+            .first()
+        )
+
+        if matricula_sin_finalizar:
+            raise serializers.ValidationError({
+                'estudiante': (
+                    'Este estudiante ya tiene la matrícula '
+                    f'#{matricula_sin_finalizar.id} en estado '
+                    f'{matricula_sin_finalizar.get_estado_display()}. '
+                    'Debe finalizar esa matrícula antes de '
+                    'crear una nueva.'
+                )
+            })
+
+        validated_data[
+            'estudiante'
+        ] = estudiante_bloqueado
 
         plan_principal = (
             PlanEstudio.objects
