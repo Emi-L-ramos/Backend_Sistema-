@@ -4335,12 +4335,19 @@ class AsistenciaViewSet(viewsets.GenericViewSet):
     def resumen_km(self, request):
         user = request.user
 
-        asistencias = Asistencia.objects.select_related(
-            'As_estudiante',
-            'As_calendario',
-            'As_calendario__instructor'
-        ).filter(
-            estado='asistio'
+        asistencias = (
+            Asistencia.objects
+            .select_related(
+                'As_estudiante',
+                'As_calendario',
+                'As_calendario__instructor',
+            )
+            .defer(
+                'As_calendario__instructor__foto_base64',
+            )
+            .filter(
+                estado='asistio',
+            )
         )
 
         fecha_inicio = request.query_params.get('fecha_inicio')
@@ -4373,7 +4380,9 @@ class AsistenciaViewSet(viewsets.GenericViewSet):
 
         resultado = {}
 
-        for asistencia in asistencias:
+        for asistencia in asistencias.iterator(
+            chunk_size=500
+        ):
             estudiante = asistencia.As_estudiante
             calendario = asistencia.As_calendario
 
