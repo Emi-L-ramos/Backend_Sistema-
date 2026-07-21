@@ -1,9 +1,17 @@
 # app_escuela/api/serializers.py
 
-from decimal import Decimal, ROUND_HALF_UP
+import base64
+import binascii
+from io import BytesIO
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from PIL import Image as PILImage, UnidentifiedImageError
 from rest_framework import serializers
 from django.db import models
-
+from django.utils import timezone
+from django.contrib.auth.password_validation import (
+    validate_password as django_validate_password,
+)
+from django.core.exceptions import ValidationError as DjangoValidationError
 from ..models import (
     Rol,
     Usuario,
@@ -17,7 +25,7 @@ from ..models import (
     Asistencia,
     Notas,
     ValorCurso,
-    TemaPlanEstudio, 
+    TemaPlanEstudio,
     SubtemaPlanEstudio,
     PreguntaExamenTeorico,
     OpcionPreguntaExamenTeorico,
@@ -26,11 +34,98 @@ from ..models import (
     PagoInstructor,
     CargoInstitucional,
 )
-
-
 from django.db import transaction
 from ..models import ProgresoTema, ProgresoClaseTema, HistorialPlanEstudio, Notificacion
 from ..models import PlanEstudio, SubtemaPlanEstudio
+
+def actualizar_estado_matricula_por_notas(matricula):
+    """
+    Finaliza la matrícula cuando existe una nota práctica
+    y la nota teórica es igual o mayor a 80.
+    """
+
+    if matricula is None or not matricula.pk:
+        return False
+
+    with transaction.atomic():
+        matricula_bloqueada = (
+            Matricula.objects
+            .select_for_update()
+            .get(
+                pk=matricula.pk
+            )
+        )
+
+        tiene_nota_practica = (
+            Notas.objects
+            .filter(
+                matricula_id=matricula_bloqueada.id,
+                tipo_nota='practico',
+            )
+            .exists()
+        )
+
+        nota_teorica = (
+            Notas.objects
+            .filter(
+                matricula_id=matricula_bloqueada.id,
+                tipo_nota='teorico',
+            )
+            .order_by(
+                '-fecha_registro',
+                '-id',
+            )
+            .first()
+        )
+
+        if not tiene_nota_practica or not nota_teorica:
+            return False
+
+        try:
+            valor_nota_teorica = Decimal(
+                str(nota_teorica.nota)
+                .strip()
+                .replace(',', '.')
+            )
+        except (
+            InvalidOperation,
+            ValueError,
+            TypeError,
+        ):
+            return False
+
+        if valor_nota_teorica < Decimal('80'):
+            return False
+
+        campos_actualizados = []
+
+        if matricula_bloqueada.estado != 'finalizado':
+            matricula_bloqueada.estado = 'finalizado'
+            campos_actualizados.append(
+                'estado'
+            )
+
+        if not matricula_bloqueada.fecha_finalizacion:
+            matricula_bloqueada.fecha_finalizacion = (
+                timezone.now()
+            )
+
+            campos_actualizados.append(
+                'fecha_finalizacion'
+            )
+
+        if campos_actualizados:
+            matricula_bloqueada.save(
+                update_fields=campos_actualizados
+            )
+
+        matricula.estado = matricula_bloqueada.estado
+
+        matricula.fecha_finalizacion = (
+            matricula_bloqueada.fecha_finalizacion
+        )
+
+        return True
 
 class RolSerializer(serializers.ModelSerializer):
     class Meta:
@@ -50,6 +145,8 @@ class UserSerializer(serializers.ModelSerializer):
     instructor_id = serializers.IntegerField(write_only=True, required=False)
     estudiante_nombre = serializers.SerializerMethodField()
     instructor_nombre = serializers.SerializerMethodField()
+    texto_estado_usuario = serializers.SerializerMethodField()
+    tiene_matricula_activa = serializers.SerializerMethodField()
 
     class Meta:
         model = Usuario
@@ -61,14 +158,35 @@ class UserSerializer(serializers.ModelSerializer):
             'last_name',
             'rol',
             'password',
+            'is_active',
             'matricula_id',
             'instructor_id',
             'estudiante_nombre',
             'instructor_nombre',
+            'texto_estado_usuario',
+            'tiene_matricula_activa',
         ]
         extra_kwargs = {
-            'password': {'write_only': True, 'required': False}
+            'password': {
+                'write_only': True,
+                'required': False,
+            }
         }
+
+    def validate_password(self, password):
+        usuario = self.instance if self.instance else None
+
+        try:
+            django_validate_password(
+                password,
+                user=usuario,
+            )
+        except DjangoValidationError as error:
+            raise serializers.ValidationError(
+                list(error.messages)
+            )
+
+        return password
 
     def get_estudiante_nombre(self, obj):
         if obj.estudiante:
@@ -79,6 +197,82 @@ class UserSerializer(serializers.ModelSerializer):
         if obj.instructor:
             return f"{obj.instructor.nombre or ''} {obj.instructor.apellido or ''}".strip()
         return None
+
+    def obtener_matriculas_usuario(self, obj):
+        if not obj.estudiante:
+            return []
+
+        matriculas_precargadas = getattr(
+            obj.estudiante,
+            'matriculas_usuario_precargadas',
+            None,
+        )
+
+        if matriculas_precargadas is not None:
+            return matriculas_precargadas
+
+        return list(
+            obj.estudiante.matriculas
+            .only(
+                'id',
+                'estudiante_id',
+                'estado',
+            )
+            .order_by('-id')
+        )
+
+    def obtener_matricula_actual_usuario(self, obj):
+        matriculas = self.obtener_matriculas_usuario(obj)
+
+        return matriculas[0] if matriculas else None
+
+    def get_tiene_matricula_activa(self, obj):
+        if not obj.estudiante:
+            return None
+
+        return any(
+            matricula.estado != 'finalizado'
+            for matricula in self.obtener_matriculas_usuario(obj)
+        )
+
+    def get_texto_estado_usuario(self, obj):
+        rol_nombre = str(
+            obj.rol.nombre if obj.rol else ''
+        ).strip().lower()
+
+        if rol_nombre != 'estudiante':
+            return 'Activo' if obj.is_active else 'Inactivo'
+
+        matricula_activa = next(
+            (
+                matricula
+                for matricula in self.obtener_matriculas_usuario(obj)
+                if matricula.estado != 'finalizado'
+            ),
+            None,
+        )
+
+        if matricula_activa:
+            estado = str(
+                matricula_activa.estado or ''
+            ).strip().lower()
+
+            if estado == 'matriculado':
+                return 'Activo'
+
+            if estado == 'pendiente':
+                return 'Pendiente'
+
+            return estado.capitalize()
+
+        matricula_actual = self.obtener_matricula_actual_usuario(
+            obj
+        )
+
+        if matricula_actual and matricula_actual.estado == 'finalizado':
+            return 'Finalizado'
+
+        return 'Inactivo'
 
     def validate(self, data):
         matricula_id = data.get('matricula_id')
@@ -194,20 +388,26 @@ class TemaPlanEstudioSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
 
-        subtemas_activos = instance.subtemas.filter(
-            activo=True
-        ).order_by(
-            'orden',
-            'id'
+        subtemas_activos = sorted(
+            (
+                subtema
+                for subtema in instance.subtemas.all()
+                if subtema.activo
+            ),
+            key=lambda subtema: (
+                subtema.orden or 0,
+                subtema.id,
+            )
         )
 
-        data['subtemas'] = SubtemaPlanEstudioSerializer(
-            subtemas_activos,
-            many=True
-        ).data
+        data['subtemas'] = (
+            SubtemaPlanEstudioSerializer(
+                subtemas_activos,
+                many=True
+            ).data
+        )
 
         return data
-
 
 class PlanEstudioSerializer(serializers.ModelSerializer):
     temas = TemaPlanEstudioSerializer(many=True, required=False)
@@ -225,11 +425,16 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
 
-        temas_activos = instance.temas.filter(
-            activo=True
-        ).order_by(
-            'orden',
-            'id'
+        temas_activos = sorted(
+            (
+                tema
+                for tema in instance.temas.all()
+                if tema.activo
+            ),
+            key=lambda tema: (
+                tema.orden or 0,
+                tema.id,
+            )
         )
 
         data['temas'] = TemaPlanEstudioSerializer(
@@ -241,7 +446,7 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
 
     def limpiar_texto(self, valor):
         return str(valor or '').strip()
-    
+
     def limpiar_id(self, valor):
         if valor in [None, '', 'null', 'undefined']:
             return None
@@ -250,7 +455,6 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
             return int(valor)
         except (TypeError, ValueError):
             return None
-
 
     def limpiar_orden(self, valor, defecto):
         if valor in [None, '', 'null', 'undefined']:
@@ -272,26 +476,6 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
             return valor
 
         return []
-    
-    def validar_un_solo_tema_para_reforzamiento(self, tipo_curso, temas_data):
-        tipo = str(tipo_curso or '').strip().lower()
-
-        if tipo not in ['intermedio', 'avanzado']:
-            return
-
-        temas_validos = [
-            tema for tema in temas_data
-            if isinstance(tema, dict)
-            and self.limpiar_texto(tema.get('titulo'))
-        ]
-
-        if len(temas_validos) > 1:
-            raise serializers.ValidationError({
-                'temas': (
-                    'Los cursos Intermedio y Avanzado solo pueden tener '
-                    'un tema principal. Agregue los contenidos como subtemas.'
-                )
-            })
 
     def obtener_o_crear_tema(self, plan, tema_data, index_tema):
         tema_id = self.limpiar_id(tema_data.get('id'))
@@ -405,11 +589,6 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
         temas_data = validated_data.pop('temas', [])
         temas_data = self.normalizar_lista(temas_data)
 
-        self.validar_un_solo_tema_para_reforzamiento(
-            validated_data.get('tipo_curso'),
-            temas_data
-        )
-
         plan = PlanEstudio.objects.create(**validated_data)
 
         for index_tema, tema_data in enumerate(temas_data, start=1):
@@ -450,11 +629,6 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
             instance.tipo_curso
         )
 
-        self.validar_un_solo_tema_para_reforzamiento(
-            tipo_curso_final,
-            temas_data
-        )
-
         ids_temas_recibidos = []
 
         for index_tema, tema_data in enumerate(temas_data, start=1):
@@ -485,7 +659,7 @@ class PlanEstudioSerializer(serializers.ModelSerializer):
         )
 
         return instance
-    
+
 
 
 class ValorCursoSerializer(serializers.ModelSerializer):
@@ -498,9 +672,11 @@ class CategoriaVehiculoSerializer(serializers.ModelSerializer):
         model = CategoriaVehiculo
         fields = '__all__'
 
-
 class EstudianteSerializer(serializers.ModelSerializer):
     usuario_data = serializers.SerializerMethodField()
+    tiene_matricula_activa = serializers.SerializerMethodField()
+    estado_matricula_actual = serializers.SerializerMethodField()
+    texto_estado_academico = serializers.SerializerMethodField()
 
     class Meta:
         model = Estudiante
@@ -508,7 +684,28 @@ class EstudianteSerializer(serializers.ModelSerializer):
         read_only_fields = ['codigo_estudiante']
 
     def get_usuario_data(self, obj):
-        usuario = obj.usuarios.filter(rol__nombre__iexact='estudiante').first()
+        usuarios_precargados = getattr(
+            obj,
+            'usuarios_estudiante_precargados',
+            None,
+        )
+
+        if usuarios_precargados is not None:
+            usuario = (
+                usuarios_precargados[0]
+                if usuarios_precargados
+                else None
+            )
+        else:
+            usuario = (
+                obj.usuarios
+                .filter(
+                    rol__nombre__iexact='estudiante'
+                )
+                .select_related('rol')
+                .order_by('id')
+                .first()
+            )
 
         if not usuario:
             return None
@@ -522,13 +719,94 @@ class EstudianteSerializer(serializers.ModelSerializer):
             'rol': usuario.rol.nombre if usuario.rol else None,
         }
 
+    def obtener_matriculas(self, obj):
+        matriculas_precargadas = getattr(
+            obj,
+            'matriculas_precargadas',
+            None,
+        )
+
+        if matriculas_precargadas is not None:
+            return matriculas_precargadas
+
+        return list(
+            obj.matriculas
+            .only(
+                'id',
+                'estudiante_id',
+                'estado',
+            )
+            .order_by('-id')
+        )
+
+    def obtener_matricula_actual(self, obj):
+        matriculas = self.obtener_matriculas(obj)
+
+        return matriculas[0] if matriculas else None
+
+    def get_tiene_matricula_activa(self, obj):
+        return any(
+            matricula.estado != 'finalizado'
+            for matricula in self.obtener_matriculas(obj)
+        )
+
+    def get_estado_matricula_actual(self, obj):
+        matricula = self.obtener_matricula_actual(obj)
+
+        if not matricula:
+            return None
+
+        return matricula.estado
+
+    def get_texto_estado_academico(self, obj):
+        matricula_activa = next(
+            (
+                matricula
+                for matricula in self.obtener_matriculas(obj)
+                if matricula.estado != 'finalizado'
+            ),
+            None,
+        )
+
+        if matricula_activa:
+            estado = str(
+                matricula_activa.estado or ''
+            ).strip().lower()
+
+            if estado == 'pendiente':
+                return 'Pendiente'
+
+            if estado == 'matriculado':
+                return 'Activo'
+
+            return estado.capitalize()
+
+        matricula_actual = self.obtener_matricula_actual(obj)
+
+        if (
+            matricula_actual
+            and matricula_actual.estado == 'finalizado'
+        ):
+            return 'Finalizado'
+
+        return 'Sin matrícula'
+
 class InstructorSerializer(serializers.ModelSerializer):
     nombre_completo = serializers.SerializerMethodField()
     categoria_nombre = serializers.SerializerMethodField()
 
+    foto_base64 = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+        write_only=True,
+    )
+
+    tiene_foto = serializers.SerializerMethodField()
+
     class Meta:
         model = Instructor
-        exclude = ['foto_base64']
+        fields = '__all__'
 
     def get_nombre_completo(self, obj):
         nombre = f"{obj.nombre or ''} {obj.apellido or ''}".strip()
@@ -536,7 +814,83 @@ class InstructorSerializer(serializers.ModelSerializer):
 
     def get_categoria_nombre(self, obj):
         return obj.categoria_instructor or ""
-    
+
+    def get_tiene_foto(self, obj):
+        return bool(obj.foto_base64)
+
+    def validate_foto_base64(self, valor):
+        if valor in (None, ""):
+            return valor
+
+        if not isinstance(valor, str) or ',' not in valor:
+            raise serializers.ValidationError(
+                'La fotografía no tiene un formato válido.'
+            )
+
+        encabezado, contenido_codificado = valor.split(',', 1)
+
+        formatos_permitidos = {
+            'data:image/jpeg;base64': 'JPEG',
+            'data:image/png;base64': 'PNG',
+            'data:image/webp;base64': 'WEBP',
+        }
+
+        formato_esperado = formatos_permitidos.get(
+            encabezado.lower()
+        )
+
+        if not formato_esperado:
+            raise serializers.ValidationError(
+                'La fotografía debe ser JPG, PNG o WEBP.'
+            )
+
+        if len(contenido_codificado) > 2_800_000:
+            raise serializers.ValidationError(
+                'La fotografía es demasiado grande.'
+            )
+
+        try:
+            contenido = base64.b64decode(
+                contenido_codificado,
+                validate=True,
+            )
+        except (binascii.Error, ValueError):
+            raise serializers.ValidationError(
+                'La fotografía contiene datos inválidos.'
+            )
+
+        if len(contenido) > 2 * 1024 * 1024:
+            raise serializers.ValidationError(
+                'La fotografía no puede superar 2 MB.'
+            )
+
+        try:
+            imagen = PILImage.open(BytesIO(contenido))
+            formato_real = (imagen.format or '').upper()
+            ancho, alto = imagen.size
+            imagen.verify()
+        except (
+            UnidentifiedImageError,
+            OSError,
+            ValueError,
+            PILImage.DecompressionBombError,
+        ):
+            raise serializers.ValidationError(
+                'El archivo enviado no es una imagen válida.'
+            )
+
+        if formato_real != formato_esperado:
+            raise serializers.ValidationError(
+                'El contenido de la fotografía no coincide con su formato.'
+            )
+
+        if ancho > 2000 or alto > 2000:
+            raise serializers.ValidationError(
+                'La fotografía no puede superar 2000 x 2000 píxeles.'
+            )
+
+        return valor
+
 class InstructorListSerializer(serializers.ModelSerializer):
     nombre_completo = serializers.SerializerMethodField()
     categoria_nombre = serializers.SerializerMethodField()
@@ -552,6 +906,27 @@ class InstructorListSerializer(serializers.ModelSerializer):
     def get_categoria_nombre(self, obj):
         return obj.categoria_instructor or ""
 
+class InstructorCalendarioSerializer(
+    serializers.ModelSerializer
+):
+    nombre_completo = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Instructor
+        fields = [
+            'id',
+            'nombre',
+            'apellido',
+            'nombre_completo',
+            'activo',
+        ]
+
+    def get_nombre_completo(self, obj):
+        nombre = (
+            f"{obj.nombre or ''} {obj.apellido or ''}"
+        ).strip()
+
+        return nombre or f"Instructor {obj.id}"
 
 class MatriculaSerializer(serializers.ModelSerializer):
     estudiante_nombre = serializers.SerializerMethodField()
@@ -578,8 +953,17 @@ class MatriculaSerializer(serializers.ModelSerializer):
         return f"{obj.estudiante.nombre} {obj.estudiante.apellido}"
 
     def get_tiene_usuario(self, obj):
+        usuarios_precargados = getattr(
+            obj.estudiante,
+            'usuarios_precargados',
+            None,
+        )
+
+        if usuarios_precargados is not None:
+            return bool(usuarios_precargados)
+
         return obj.estudiante.usuarios.exists()
-    
+
     def get_usa_checks(self, obj):
         tipo_curso = str(
             getattr(obj, 'tipo_curso', '') or ''
@@ -642,43 +1026,28 @@ class MatriculaSerializer(serializers.ModelSerializer):
 
         return data
 
-
-
     def create(self, validated_data):
         tipo_curso = validated_data.get('tipo_curso')
 
-        if tipo_curso == 'Principiante':
-            tipos_planes = ['Principiante']
-        elif tipo_curso == 'Intermedio':
-            tipos_planes = ['Intermedio']
-        elif tipo_curso == 'Avanzado':
-            tipos_planes = ['Avanzado']
-        else:
-            tipos_planes = [tipo_curso]
-
-        planes = list(
-            PlanEstudio.objects.filter(
-                tipo_curso__in=tipos_planes,
-                activo=True
+        plan_principal = (
+            PlanEstudio.objects
+            .filter(
+                tipo_curso=tipo_curso,
+                activo=True,
             )
+            .order_by(
+                '-id'
+            )
+            .first()
         )
 
-        planes.sort(
-            key=lambda plan: (
-                tipos_planes.index(plan.tipo_curso),
-                plan.id
-            )
-        )
-
-        if not planes:
+        if not plan_principal:
             raise serializers.ValidationError({
-                'plan_de_estudio': f'No existen planes de estudio activos para el curso {tipo_curso}.'
+                'plan_de_estudio': (
+                    'No existe un plan de estudio activo '
+                    f'para el curso {tipo_curso}.'
+                )
             })
-
-        plan_principal = next(
-            (plan for plan in planes if plan.tipo_curso == tipo_curso),
-            planes[0]
-        )
 
         validated_data['plan_de_estudio'] = plan_principal
 
@@ -697,10 +1066,21 @@ class MatriculaSerializer(serializers.ModelSerializer):
                 matricula=matricula,
                 tema=tema,
                 orden_general=orden_general,
-                desbloqueado=False,
+                desbloqueado=(
+                    str(tipo_curso).strip().lower()
+                    in ['intermedio', 'avanzado']
+                ),
                 estudiante_completado=False,
                 instructor_completado=False,
                 completado=False,
+            )
+
+        if matricula.estudiante and not matricula.estudiante.activo:
+            matricula.estudiante.activo = True
+            matricula.estudiante.save(
+                update_fields=[
+                    'activo',
+                ]
             )
 
         return matricula
@@ -810,6 +1190,103 @@ class ReciboSerializer(serializers.ModelSerializer):
         )
 
     def validate(self, data):
+
+        if self.instance:
+            campos_permitidos = {
+                'numero_recibo',
+                'monto_pagado',
+            }
+
+            campos_recibidos = set(
+                self.initial_data.keys()
+            )
+
+            campos_no_permitidos = (
+                campos_recibidos - campos_permitidos
+            )
+
+            if campos_no_permitidos:
+                raise serializers.ValidationError({
+                    'error': (
+                        'Durante la edición solamente se puede '
+                        'modificar el número de recibo y el monto.'
+                    )
+                })
+
+            numero_recibo = data.get(
+                'numero_recibo',
+                self.instance.numero_recibo,
+            )
+
+            monto_pagado = data.get(
+                'monto_pagado',
+                self.instance.monto_pagado,
+            )
+
+            if not str(numero_recibo or '').strip():
+                raise serializers.ValidationError({
+                    'numero_recibo': (
+                        'Debe ingresar el número de recibo.'
+                    )
+                })
+
+            if monto_pagado is None:
+                raise serializers.ValidationError({
+                    'monto_pagado': (
+                        'Debe ingresar el monto pagado.'
+                    )
+                })
+
+            if monto_pagado < 0:
+                raise serializers.ValidationError({
+                    'monto_pagado': (
+                        'El monto no puede ser negativo.'
+                    )
+                })
+
+            if (
+                self.instance.tipo_pago != 'beneficio'
+                and monto_pagado <= 0
+            ):
+                raise serializers.ValidationError({
+                    'monto_pagado': (
+                        'El monto debe ser mayor a cero.'
+                    )
+                })
+
+            matricula = self.instance.matricula
+
+            monto_total = self.calcular_monto_total(
+                matricula
+            )
+
+            total_otros_recibos = (
+                Recibo.objects
+                .filter(matricula=matricula)
+                .exclude(id=self.instance.id)
+                .aggregate(
+                    total=models.Sum('monto_pagado')
+                )['total']
+                or Decimal('0.00')
+            )
+
+            monto_maximo = max(
+                monto_total - total_otros_recibos,
+                Decimal('0.00'),
+            )
+
+            if monto_pagado > monto_maximo:
+                raise serializers.ValidationError({
+                    'monto_pagado': (
+                        'El monto no puede ser mayor a lo que '
+                        'corresponde pagar en esta matrícula. '
+                        f'Máximo permitido para este recibo: '
+                        f'C${monto_maximo}.'
+                    )
+                })
+
+            return data
+
         matricula = (
             data.get('matricula')
             or getattr(
@@ -863,6 +1340,13 @@ class ReciboSerializer(serializers.ModelSerializer):
                 Decimal('0.00'),
             )
         ) or Decimal('0.00')
+
+        if monto_pagado < 0:
+            raise serializers.ValidationError({
+                'monto_pagado': (
+                    'El monto no puede ser negativo.'
+                )
+            })
 
         monto_total = self.calcular_monto_total(
             matricula
@@ -929,16 +1413,6 @@ class ReciboSerializer(serializers.ModelSerializer):
             montos_permitidos = {
                 monto_requerido,
             }
-
-            # Permite reparar recibos antiguos duplicados
-            # mediante la opción Editar.
-            if (
-                self.instance
-                and anticipos_previos.exists()
-            ):
-                montos_permitidos.add(
-                    monto_total
-                )
 
             if monto_pagado not in montos_permitidos:
                 raise serializers.ValidationError({
@@ -1011,6 +1485,8 @@ class ReciboSerializer(serializers.ModelSerializer):
 
         return data
 
+
+
     def preparar_datos_curso(
         self,
         matricula,
@@ -1021,7 +1497,6 @@ class ReciboSerializer(serializers.ModelSerializer):
         )
 
         validated_data['valor_curso'] = valor_curso
-        validated_data['estado'] = 'pagado'
 
         if matricula.tipo_curso == 'Principiante':
             validated_data['cantidad'] = (
@@ -1048,7 +1523,33 @@ class ReciboSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        matricula = validated_data['matricula']
+        matricula_original = validated_data[
+            'matricula'
+        ]
+
+        try:
+            matricula = (
+                Matricula.objects
+                .select_for_update()
+                .get(
+                    id=matricula_original.id
+                )
+            )
+        except Matricula.DoesNotExist:
+            raise serializers.ValidationError({
+                'matricula': (
+                    'La matrícula seleccionada '
+                    'ya no existe.'
+                )
+            })
+
+        validated_data['matricula'] = matricula
+
+        # Se repiten las validaciones después de bloquear
+        # la matrícula para evitar pagos simultáneos.
+        validated_data = self.validate(
+            validated_data
+        )
 
         tipo_pago = validated_data.get(
             'tipo_pago'
@@ -1172,118 +1673,32 @@ class ReciboSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def update(self, instance, validated_data):
-        matricula_anterior = instance.matricula
-
-        matricula_destino = validated_data.get(
-            'matricula',
-            instance.matricula,
+        numero_recibo = validated_data.get(
+            'numero_recibo',
+            instance.numero_recibo,
         )
 
-        # Conserva el valor histórico del curso y evita que el frontend sobrescriba cantidad o precio con el valor activo más reciente.
-        validated_data = self.preparar_datos_curso(
-            matricula_destino,
-            validated_data,
+        monto_pagado = validated_data.get(
+            'monto_pagado',
+            instance.monto_pagado,
         )
 
-        for attr, value in validated_data.items():
-            setattr(
-                instance,
-                attr,
-                value,
-            )
-
-        instance.estado = 'pagado'
-        instance.save()
-
-        matricula = instance.matricula
-
-        monto_total = self.calcular_monto_total(
-            matricula
+        instance.numero_recibo = (
+            str(numero_recibo).strip()
         )
 
-        recibos = Recibo.objects.filter(
-            matricula=matricula
+        instance.monto_pagado = monto_pagado
+
+        instance.save(
+            update_fields=[
+                'numero_recibo',
+                'monto_pagado',
+            ]
         )
 
-        total_pagado = (
-            recibos.aggregate(
-                total=models.Sum('monto_pagado')
-            )['total']
-            or Decimal('0.00')
-        )
-
-        if instance.tipo_pago == 'beneficio':
-            recibos.exclude(
-                id=instance.id
-            ).delete()
-
-            instance.monto_pagado = Decimal(
-                '0.00'
-            )
-
-            instance.estado = 'pagado'
-
-            instance.save(
-                update_fields=[
-                    'monto_pagado',
-                    'estado',
-                ]
-            )
-
-            matricula.estado = 'matriculado'
-
-            matricula.save(
-                update_fields=['estado']
-            )
-
-        elif total_pagado >= monto_total:
-            # Conserva el recibo que se está editando
-            # y elimina los recibos anteriores.
-            recibos.exclude(
-                id=instance.id
-            ).delete()
-
-            instance.tipo_pago = 'completo'
-            instance.monto_pagado = monto_total
-            instance.estado = 'pagado'
-
-            instance.save(
-                update_fields=[
-                    'tipo_pago',
-                    'monto_pagado',
-                    'estado',
-                ]
-            )
-
-            matricula.estado = 'matriculado'
-
-            matricula.save(
-                update_fields=['estado']
-            )
-
-        else:
-            instance.tipo_pago = 'anticipo'
-            instance.estado = 'pagado'
-
-            instance.save(
-                update_fields=[
-                    'tipo_pago',
-                    'estado',
-                ]
-            )
-
-            matricula.estado = 'pendiente'
-
-            matricula.save(
-                update_fields=['estado']
-            )
-
-        if (
-            matricula_anterior.id
-            != matricula.id
-        ):
+        if instance.matricula.estado != 'finalizado':
             self.actualizar_estado_matricula(
-                matricula_anterior
+                instance.matricula
             )
 
         return instance
@@ -1293,6 +1708,20 @@ class ReciboSerializer(serializers.ModelSerializer):
         matricula,
     ):
         if not matricula:
+            return
+
+        tiene_beneficio = matricula.recibos.filter(
+            tipo_pago='beneficio'
+        ).exists()
+
+        if tiene_beneficio:
+            if matricula.estado != 'matriculado':
+                matricula.estado = 'matriculado'
+
+                matricula.save(
+                    update_fields=['estado']
+                )
+
             return
 
         monto_total = self.calcular_monto_total(
@@ -1318,7 +1747,6 @@ class ReciboSerializer(serializers.ModelSerializer):
                 update_fields=['estado']
             )
 
-
 class CalendarioSerializer(serializers.ModelSerializer):
     estudiante_nombre = serializers.SerializerMethodField()
     estudiante_cedula = serializers.CharField(source='matricula.estudiante.cedula', read_only=True)
@@ -1339,21 +1767,18 @@ class CalendarioSerializer(serializers.ModelSerializer):
 
     def get_instructor_nombre(self, obj):
         if not obj.instructor:
-            return ""
+            return ''
 
-        nombre = f"{obj.instructor.nombre or ''} {obj.instructor.apellido or ''}".strip()
+        nombre = (
+            f"{obj.instructor.nombre or ''} "
+            f"{obj.instructor.apellido or ''}"
+        ).strip()
 
-        if nombre:
-            return nombre
+        return (
+            nombre
+            or f'Instructor {obj.instructor.id}'
+        )
 
-        usuario = obj.instructor.usuarios.first()
-
-        if usuario:
-            nombre_usuario = f"{usuario.first_name} {usuario.last_name}".strip()
-            return nombre_usuario or usuario.username
-
-        return f"Instructor {obj.instructor.id}"
-    
     def get_instructor_telefono(self, obj):
         if not obj.instructor:
             return ""
@@ -1422,7 +1847,7 @@ class CrearBloqueCitasSerializer(serializers.Serializer):
             )
 
         return data
-    
+
 class CrearCalendarioManualSerializer(serializers.Serializer):
     instructor_id = serializers.IntegerField()
     matricula_id = serializers.IntegerField()
@@ -1591,6 +2016,11 @@ class NotasSerializer(serializers.ModelSerializer):
         read_only=True
     )
 
+    plan_nombre = serializers.CharField(
+        source='plan_de_estudio.nombre',
+        read_only=True
+    )
+
     class Meta:
         model = Notas
         fields = '__all__'
@@ -1619,16 +2049,35 @@ class NotasSerializer(serializers.ModelSerializer):
 
         if nota is not None:
             try:
-                nota_numero = float(nota)
-            except ValueError:
+                nota_numero = Decimal(
+                    str(nota).strip()
+                )
+            except (
+                InvalidOperation,
+                ValueError,
+                TypeError,
+            ):
                 raise serializers.ValidationError({
                     'nota': 'La nota debe ser numérica.'
+                })
+
+            if not nota_numero.is_finite():
+                raise serializers.ValidationError({
+                    'nota': 'La nota debe ser un número válido.'
                 })
 
             if nota_numero < 0 or nota_numero > 100:
                 raise serializers.ValidationError({
                     'nota': 'La nota debe estar entre 0 y 100.'
                 })
+
+            data['nota'] = format(
+                nota_numero.quantize(
+                    Decimal('0.01'),
+                    rounding=ROUND_HALF_UP,
+                ),
+                'f',
+            )
 
         notas_previas = Notas.objects.filter(
             matricula=matricula,
@@ -1753,7 +2202,7 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
             'estudiante_completado_hoy',
             'instructor_completado_hoy',
             'completado_hoy',
-            'total_clases_diarias', 
+            'total_clases_diarias',
             'checks_diarios_completados',
             'porcentaje_clases_diarias',
         ]
@@ -1768,17 +2217,36 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
         estudiante = obj.matricula.estudiante
         return f"{estudiante.nombre or ''} {estudiante.apellido or ''}".strip()
 
-    def get_subtemas(self, obj):
+    def obtener_subtemas_activos(self, obj):
         if not obj.tema:
             return []
 
-        subtemas = obj.tema.subtemas.filter(
-            activo=True
-        ).order_by(
-            'orden',
-            'id'
+        cache = getattr(
+            obj,
+            '_subtemas_activos_serializer',
+            None
         )
 
+        if cache is not None:
+            return cache
+
+        subtemas = sorted(
+            (
+                subtema
+                for subtema in obj.tema.subtemas.all()
+                if subtema.activo
+            ),
+            key=lambda subtema: (
+                subtema.orden or 0,
+                subtema.id,
+            )
+        )
+
+        obj._subtemas_activos_serializer = subtemas
+
+        return subtemas
+
+    def get_subtemas(self, obj):
         return [
             {
                 'id': subtema.id,
@@ -1786,17 +2254,15 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
                 'titulo': subtema.titulo,
                 'activo': subtema.activo,
             }
-            for subtema in subtemas
+            for subtema
+            in self.obtener_subtemas_activos(obj)
         ]
 
     def get_subtemas_count(self, obj):
-        if not obj.tema:
-            return 0
+        return len(
+            self.obtener_subtemas_activos(obj)
+        )
 
-        return obj.tema.subtemas.filter(
-            activo=True
-        ).count()
-    
     def es_modo_diario(self, obj):
         return False
 
@@ -1852,7 +2318,7 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
 
         check_dia = self.obtener_check_dia(obj)
         return check_dia.completado if check_dia else False
-    
+
     def obtener_clases_validas_diarias(self, obj):
         return Calendario.objects.filter(
             matricula=obj.matricula,
@@ -1893,7 +2359,7 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
         completados = self.get_checks_diarios_completados(obj)
 
         return round((completados / total) * 100)
-    
+
     def get_usa_checks(self, obj):
         tipo_curso = str(
             getattr(obj.matricula, 'tipo_curso', '') or ''
@@ -1901,13 +2367,12 @@ class ProgresoTemaSerializer(serializers.ModelSerializer):
 
         return tipo_curso == 'principiante'
 
-
 class NotificacionSerializer(serializers.ModelSerializer):
     """Serializer para notificaciones del administrador"""
-    
+
     estudiante_nombre = serializers.CharField(source='estudiante.username', read_only=True)
     tema_titulo = serializers.CharField(source='tema.titulo', read_only=True, allow_null=True)
-    
+
     class Meta:
         model = Notificacion  # Asegúrate que el modelo existe
         fields = '__all__'
@@ -1928,7 +2393,6 @@ class HistorialPlanEstudioSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['fecha']
 
-
 class MarcarTemaSerializer(serializers.Serializer):
     progreso_id = serializers.IntegerField()
     tipo = serializers.ChoiceField(choices=['estudiante', 'instructor', 'admin_estudiante', 'admin_instructor'])
@@ -1942,7 +2406,6 @@ class OpcionPreguntaExamenTeoricoSerializer(serializers.ModelSerializer):
             'es_correcta',
         ]
 
-
 class PreguntaExamenTeoricoSerializer(serializers.ModelSerializer):
     opciones = OpcionPreguntaExamenTeoricoSerializer(many=True)
 
@@ -1951,7 +2414,7 @@ class PreguntaExamenTeoricoSerializer(serializers.ModelSerializer):
         fields = [
             'id',
             'texto',
-          
+
             'activa',
             'fecha_creacion',
             'opciones',
@@ -2054,7 +2517,6 @@ class ExamenTeoricoSerializer(serializers.ModelSerializer):
             return None
 
         return f"{obj.habilitado_por.nombre} {obj.habilitado_por.apellido}".strip()
-    
 
 class OpcionExamenEstudianteSerializer(serializers.ModelSerializer):
     class Meta:
@@ -2063,7 +2525,6 @@ class OpcionExamenEstudianteSerializer(serializers.ModelSerializer):
             'id',
             'texto',
         ]
-
 
 class PreguntaExamenEstudianteSerializer(serializers.ModelSerializer):
     opciones = OpcionExamenEstudianteSerializer(many=True, read_only=True)
@@ -2076,51 +2537,88 @@ class PreguntaExamenEstudianteSerializer(serializers.ModelSerializer):
             'opciones',
         ]
 
-class RespuestaEnviarExamenSerializer(serializers.Serializer):
-    respuestas = serializers.ListField(
-        child=serializers.DictField(),
-        allow_empty=False
+class RespuestaIndividualExamenSerializer(
+    serializers.Serializer
+):
+    pregunta_id = serializers.IntegerField(
+        min_value=1,
+    )
+
+    opcion_id = serializers.IntegerField(
+        min_value=1,
+    )
+
+class RespuestaEnviarExamenSerializer(
+    serializers.Serializer
+):
+    respuestas = RespuestaIndividualExamenSerializer(
+        many=True,
+        allow_empty=False,
     )
 
     def validate_respuestas(self, respuestas):
-        for respuesta in respuestas:
-            if 'pregunta_id' not in respuesta:
-                raise serializers.ValidationError(
-                    'Cada respuesta debe incluir pregunta_id.'
-                )
+        preguntas_ids = [
+            respuesta['pregunta_id']
+            for respuesta in respuestas
+        ]
 
-            if 'opcion_id' not in respuesta:
-                raise serializers.ValidationError(
-                    'Cada respuesta debe incluir opcion_id.'
-                )
+        if len(preguntas_ids) != len(set(preguntas_ids)):
+            raise serializers.ValidationError(
+                'Una pregunta fue respondida más de una vez.'
+            )
 
         return respuestas
-    
 
 class RespuestaExamenTeoricoSerializer(serializers.ModelSerializer):
     pregunta_texto = serializers.CharField(
         source='pregunta.texto',
-        read_only=True
+        read_only=True,
     )
 
     opcion_texto = serializers.CharField(
         source='opcion_seleccionada.texto',
-        read_only=True
+        read_only=True,
+    )
+
+    intento_id = serializers.IntegerField(
+        source='intento.id',
+        read_only=True,
+    )
+
+    numero_intento = serializers.IntegerField(
+        source='intento.numero_intento',
+        read_only=True,
     )
 
     class Meta:
         model = RespuestaExamenTeorico
+
         fields = [
             'id',
             'examen',
+            'intento',
+            'intento_id',
+            'numero_intento',
             'pregunta',
             'pregunta_texto',
             'opcion_seleccionada',
             'opcion_texto',
             'correcta',
+            'fecha_respuesta',
         ]
+
         read_only_fields = [
+            'id',
+            'examen',
+            'intento',
+            'intento_id',
+            'numero_intento',
+            'pregunta',
+            'pregunta_texto',
+            'opcion_seleccionada',
+            'opcion_texto',
             'correcta',
+            'fecha_respuesta',
         ]
 
 class PagoInstructorSerializer(serializers.ModelSerializer):

@@ -4,47 +4,57 @@ import logging
 import os
 import base64
 import tempfile
+import random
+import re
 
 from copy import copy
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from io import BytesIO
-
 from django.conf import settings
 from django.contrib.auth import authenticate
-from django.db import models, transaction
-from django.db.models import Q, Sum
-from django.db.models.functions import TruncMonth
+from django.contrib.auth.models import update_last_login
+from django.db import IntegrityError, models, transaction
+from django.db.models import (
+    F,
+    Q,
+    Sum,
+    Count,
+    FloatField,
+    Prefetch,
+    Exists,
+    OuterRef,
+    Subquery,
+)
+from django.db.models.functions import Cast, TruncMonth
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_date
-
 from django_filters.rest_framework import DjangoFilterBackend
-
 from rest_framework import status, viewsets, serializers
 from rest_framework.authtoken.models import Token
-from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.decorators import (
+    action,
+    api_view,
+    authentication_classes,
+    permission_classes,
+    throttle_classes,
+)
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.views import APIView
-
 from openpyxl import Workbook, load_workbook
 from openpyxl.drawing.image import Image as ExcelImage
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-
-from docx import Document
-from docx.shared import Inches, Pt
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import (
-    WD_TABLE_ALIGNMENT,
-    WD_CELL_VERTICAL_ALIGNMENT,
-    WD_ROW_HEIGHT_RULE,
-)
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-
+from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.util import Inches, Pt
+from .pagination import PaginacionOpcional
 from ..models import (
     Rol,
     Usuario,
@@ -61,17 +71,16 @@ from ..models import (
     PreguntaExamenTeorico,
     OpcionPreguntaExamenTeorico,
     ExamenTeorico,
+    IntentoExamenTeorico,
+    PreguntaIntentoExamenTeorico,
     RespuestaExamenTeorico,
     PagoInstructor,
     CargoInstitucional,
-    SubtemaPlanEstudio,
-    TemaPlanEstudio,
     ProgresoTema,
     ProgresoClaseTema,
     Notificacion,
     HistorialPlanEstudio,
 )
-
 from .serializers import (
     RolSerializer,
     UserSerializer,
@@ -79,6 +88,7 @@ from .serializers import (
     EstudianteSerializer,
     InstructorSerializer,
     InstructorListSerializer,
+    InstructorCalendarioSerializer,
     CategoriaVehiculoSerializer,
     MatriculaSerializer,
     ReciboSerializer,
@@ -97,28 +107,65 @@ from .serializers import (
     PlanEstudioSerializer,
     ProgresoTemaSerializer,
     NotificacionSerializer,
+    actualizar_estado_matricula_por_notas,
+)
+from .permissions import (
+    es_administrativo as es_admin,
+    es_estudiante,
+    es_instructor,
+    obtener_rol_usuario as obtener_rol,
 )
 
+logger = logging.getLogger(__name__)
 logging.getLogger("PIL").setLevel(logging.WARNING)
 
-def obtener_rol(user):
-    return str(getattr(user, 'rol_nombre', '') or '').lower()
+MAX_KILOMETRAJE = Decimal('99999999.99')
 
+def validar_kilometraje(valor, nombre_campo):
+    try:
+        kilometraje = Decimal(
+            str(valor).strip()
+        )
+    except (
+        InvalidOperation,
+        ValueError,
+        TypeError,
+    ):
+        raise ValueError(
+            f'El {nombre_campo} debe ser numérico.'
+        )
 
-def es_admin(user):
-    rol = obtener_rol(user)
-    return (
-        rol in ['admin', 'administrador']
-        or user.is_staff
-        or user.is_superuser
-    )
+    if not kilometraje.is_finite():
+        raise ValueError(
+            f'El {nombre_campo} debe ser un número válido.'
+        )
 
-def es_instructor(user):
-    return obtener_rol(user) == 'instructor' and getattr(user, 'instructor_id', None)
+    if kilometraje < 0:
+        raise ValueError(
+            f'El {nombre_campo} no puede ser negativo.'
+        )
 
+    if kilometraje > MAX_KILOMETRAJE:
+        raise ValueError(
+            f'El {nombre_campo} supera el valor permitido.'
+        )
 
-def es_estudiante(user):
-    return obtener_rol(user) == 'estudiante' and getattr(user, 'estudiante_id', None)
+    return kilometraje
+
+class LoginRateThrottle(SimpleRateThrottle):
+    """
+    Limita los intentos de inicio de sesión por dirección IP.
+    La cantidad permitida se configura en settings.py
+    mediante la clave 'login'.
+    """
+
+    scope = 'login'
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {
+            'scope': self.scope,
+            'ident': self.get_ident(request),
+        }
 
 def matricula_usa_checks(matricula):
     """
@@ -148,23 +195,28 @@ def obtener_progresos_plan_actual(matricula):
     )
 
 def validar_plan_completado_para_examen(matricula):
+    """
+    Devuelve información de seguimiento del plan de estudio.
+    Los checks no habilitan ni bloquean el examen teórico.
+    Solamente sirven como control visual/académico.
+    """
+
     tipo = str(
         getattr(matricula, 'tipo_curso', '') or ''
     ).strip().lower()
 
-    # Intermedio y Avanzado no dependen de checks.
     if tipo in ['intermedio', 'avanzado']:
         return {
             'completo': True,
             'error': None,
-            'progreso': 'No aplica',
+            'progreso': None,
             'usa_checks': False,
         }
 
     if tipo != 'principiante':
         return {
-            'completo': False,
-            'error': 'El tipo de curso de la matrícula no es válido.',
+            'completo': True,
+            'error': None,
             'progreso': '0/0',
             'usa_checks': False,
         }
@@ -177,11 +229,8 @@ def validar_plan_completado_para_examen(matricula):
 
     if total_temas == 0:
         return {
-            'completo': False,
-            'error': (
-                'El estudiante no tiene temas activos asignados '
-                'en el plan de estudio de esta matrícula.'
-            ),
+            'completo': True,
+            'error': None,
             'progreso': '0/0',
             'usa_checks': True,
         }
@@ -195,47 +244,12 @@ def validar_plan_completado_para_examen(matricula):
         )
     ).distinct().count()
 
-    completo = completados >= total_temas
-
     return {
-        'completo': completo,
-        'error': (
-            None
-            if completo
-            else (
-                'No se puede habilitar el examen porque el '
-                'plan de estudio todavía no está completo. '
-                f'Progreso: {completados}/{total_temas} temas.'
-            )
-        ),
+        'completo': True,
+        'error': None,
         'progreso': f'{completados}/{total_temas}',
         'usa_checks': True,
     }
-
-def generar_progreso_plan(matricula):
-    if not matricula.plan_de_estudio:
-        return
-
-    temas = TemaPlanEstudio.objects.filter(
-        plan_estudio=matricula.plan_de_estudio,
-        activo=True
-    ).order_by(
-        'orden',
-        'id'
-    )
-
-    for index, tema in enumerate(temas, start=1):
-        ProgresoTema.objects.get_or_create(
-            matricula=matricula,
-            tema=tema,
-            defaults={
-                'orden_general': index,
-                'desbloqueado': index == 1,
-                'estudiante_completado': False,
-                'instructor_completado': False,
-                'completado': False,
-            }
-        )
 
 def obtener_rango_horario(matricula):
     mapeo = {
@@ -243,10 +257,109 @@ def obtener_rango_horario(matricula):
         '08AM': ('08:00', '10:00'),
         '10AM': ('10:00', '12:00'),
         '12PM': ('12:00', '14:00'),
+        '02PM': ('14:00', '16:00'),
         '04PM': ('16:00', '18:00'),
     }
 
     return mapeo.get(matricula.horario)
+
+def crear_clase_recuperacion(clase_faltada):
+    matricula = clase_faltada.matricula
+
+    modalidad = str(
+        matricula.modalidad or ''
+    ).strip().lower()
+
+    def siguiente_fecha_valida(fecha_base):
+        nueva_fecha = fecha_base + timedelta(days=1)
+
+        while True:
+            es_fin_semana = (
+                nueva_fecha.weekday() >= 5
+            )
+
+            if modalidad == 'extraordinario':
+                if es_fin_semana:
+                    return nueva_fecha
+
+            elif modalidad == 'mixto':
+                return nueva_fecha
+
+            elif not es_fin_semana:
+                return nueva_fecha
+
+            nueva_fecha += timedelta(days=1)
+
+    ultima_clase_numero = (
+        Calendario.objects
+        .filter(
+            matricula=matricula,
+            es_examen=False,
+        )
+        .order_by(
+            '-numero_clase',
+            '-id',
+        )
+        .first()
+    )
+
+    ultimo_numero = (
+        ultima_clase_numero.numero_clase
+        if ultima_clase_numero
+        else 0
+    )
+
+    ultima_clase_fecha = (
+        Calendario.objects
+        .filter(
+            matricula=matricula,
+            es_examen=False,
+        )
+        .order_by(
+            '-fecha',
+            '-hora_inicio',
+            '-id',
+        )
+        .first()
+    )
+
+    fecha_base = (
+        ultima_clase_fecha.fecha
+        if ultima_clase_fecha
+        else clase_faltada.fecha
+    )
+
+    fecha_recuperacion = siguiente_fecha_valida(
+        fecha_base
+    )
+
+    while (
+        Calendario.objects
+        .filter(
+            instructor=clase_faltada.instructor,
+            fecha=fecha_recuperacion,
+            hora_inicio__lt=clase_faltada.hora_fin,
+            hora_fin__gt=clase_faltada.hora_inicio,
+        )
+        .exclude(
+            estado='cancelada'
+        )
+        .exists()
+    ):
+        fecha_recuperacion = siguiente_fecha_valida(
+            fecha_recuperacion
+        )
+
+    return Calendario.objects.create(
+        matricula=matricula,
+        instructor=clase_faltada.instructor,
+        fecha=fecha_recuperacion,
+        hora_inicio=clase_faltada.hora_inicio,
+        hora_fin=clase_faltada.hora_fin,
+        numero_clase=ultimo_numero + 1,
+        estado='pendiente',
+        es_examen=False,
+    )
 
 def desactivar_usuario(usuario):
     if not usuario:
@@ -257,7 +370,6 @@ def desactivar_usuario(usuario):
 
     Token.objects.filter(user=usuario).delete()
 
-
 def desactivar_usuarios_estudiante(estudiante):
     usuarios = estudiante.usuarios.all()
 
@@ -267,46 +379,84 @@ def desactivar_usuarios_estudiante(estudiante):
     estudiante.activo = False
     estudiante.save(update_fields=['activo'])
 
-
 def desactivar_usuarios_instructor(instructor):
     usuarios = instructor.usuarios.all()
 
     for usuario in usuarios:
         desactivar_usuario(usuario)
 
-def finalizar_matricula_si_tiene_dos_notas(matricula):
+def obtener_ids_matriculas_egresadas():
+    return (
+        Matricula.objects
+        .filter(
+            estado='finalizado'
+        )
+        .values_list(
+            'id',
+            flat=True,
+        )
+    )
+
+def matricula_tiene_notas_teorica_y_practica(matricula):
     tipos_notas = set(
-        Notas.objects.filter(
+        Notas.objects
+        .filter(
             matricula=matricula,
             tipo_nota__in=[
                 'teorico',
                 'practico',
             ],
-        ).values_list(
+        )
+        .values_list(
             'tipo_nota',
             flat=True,
         )
     )
 
-    tiene_nota_teorica = 'teorico' in tipos_notas
-    tiene_nota_practica = 'practico' in tipos_notas
+    return {
+        'teorico',
+        'practico',
+    }.issubset(tipos_notas)
 
-    if (
-        tiene_nota_teorica
-        and tiene_nota_practica
-        and matricula.estado != 'finalizado'
-    ):
-        matricula.estado = 'finalizado'
-        matricula.save(
-            update_fields=['estado']
+TIPOS_RECIBO_INGRESO = [
+    'completo',
+    'anticipo',
+    'beneficio',
+]
+
+def obtener_rango_mes(
+    anio,
+    mes,
+):
+    inicio_mes = date(
+        anio,
+        mes,
+        1,
+    )
+
+    if mes == 12:
+        inicio_mes_siguiente = date(
+            anio + 1,
+            1,
+            1,
         )
+    else:
+        inicio_mes_siguiente = date(
+            anio,
+            mes + 1,
+            1,
+        )
+
+    return (
+        inicio_mes,
+        inicio_mes_siguiente,
+    )
 
 def obtener_foto_instructor(instructor):
     if not instructor:
         return None
 
     return getattr(instructor, "foto_base64", None)
-
 
 def crear_archivo_temporal_desde_base64(foto_base64):
     if not foto_base64:
@@ -328,7 +478,7 @@ def crear_archivo_temporal_desde_base64(foto_base64):
 
     except Exception:
         return None
-    
+
 def obtener_ruta_foto_instructor_para_excel(instructor):
     if not instructor:
         return None
@@ -341,6 +491,15 @@ class RolViewSet(viewsets.ModelViewSet):
     queryset = Rol.objects.all()
     serializer_class = RolSerializer
     permission_classes = [IsAuthenticated]
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
+
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
@@ -349,7 +508,7 @@ class RolViewSet(viewsets.ModelViewSet):
             )
 
         return super().create(request, *args, **kwargs)
-    
+
     def update(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
@@ -359,7 +518,6 @@ class RolViewSet(viewsets.ModelViewSet):
 
         return super().update(request, *args, **kwargs)
 
-
     def partial_update(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
@@ -368,23 +526,20 @@ class RolViewSet(viewsets.ModelViewSet):
             )
 
         return super().partial_update(request, *args, **kwargs)
-
-
-    def destroy(self, request, *args, **kwargs):
-        if not es_admin(request.user):
-            return Response(
-                {'error': 'No tienes permiso para eliminar este registro.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        return super().destroy(request, *args, **kwargs)
-
-
 
 class CategoriaVehiculoViewSet(viewsets.ModelViewSet):
     queryset = CategoriaVehiculo.objects.all()
     serializer_class = CategoriaVehiculoSerializer
     permission_classes = [IsAuthenticated]
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
+
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
@@ -413,25 +568,55 @@ class CategoriaVehiculoViewSet(viewsets.ModelViewSet):
 
         return super().partial_update(request, *args, **kwargs)
 
-
-    def destroy(self, request, *args, **kwargs):
-        if not es_admin(request.user):
-            return Response(
-                {'error': 'No tienes permiso para eliminar este registro.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        return super().destroy(request, *args, **kwargs)
-
-
 class EstudianteViewSet(viewsets.ModelViewSet):
     queryset = Estudiante.objects.all()
     serializer_class = EstudianteSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = PaginacionOpcional
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
 
     def get_queryset(self):
         user = self.request.user
-        queryset = Estudiante.objects.all().order_by('-id')
+
+        queryset = (
+            Estudiante.objects
+            .prefetch_related(
+                Prefetch(
+                    'usuarios',
+                    queryset=(
+                        Usuario.objects
+                        .filter(
+                            rol__nombre__iexact='estudiante'
+                        )
+                        .select_related('rol')
+                        .order_by('id')
+                    ),
+                    to_attr='usuarios_estudiante_precargados',
+                ),
+                Prefetch(
+                    'matriculas',
+                    queryset=(
+                        Matricula.objects
+                        .only(
+                            'id',
+                            'estudiante_id',
+                            'estado',
+                        )
+                        .order_by('-id')
+                    ),
+                    to_attr='matriculas_precargadas',
+                ),
+            )
+            .order_by('-id')
+        )
+
         buscar = self.request.query_params.get('buscar')
 
         if es_admin(user):
@@ -440,7 +625,11 @@ class EstudianteViewSet(viewsets.ModelViewSet):
         elif es_instructor(user):
             estudiantes_ids = Calendario.objects.filter(
                 instructor_id=user.instructor_id,
-                es_examen=False
+                es_examen=False,
+                matricula__estado__in=[
+                    'pendiente',
+                    'matriculado',
+                ],
             ).exclude(
                 estado='cancelada'
             ).values_list(
@@ -448,7 +637,9 @@ class EstudianteViewSet(viewsets.ModelViewSet):
                 flat=True
             ).distinct()
 
-            queryset = queryset.filter(id__in=estudiantes_ids)
+            queryset = queryset.filter(
+                id__in=estudiantes_ids
+            )
 
         elif es_estudiante(user):
             queryset = queryset.filter(id=user.estudiante_id)
@@ -457,19 +648,92 @@ class EstudianteViewSet(viewsets.ModelViewSet):
             return Estudiante.objects.none()
 
         if buscar:
+            buscar = buscar.strip()
+
             queryset = queryset.filter(
-                Q(nombre__icontains=buscar) |
-                Q(apellido__icontains=buscar) |
-                Q(cedula__icontains=buscar)
+                Q(nombre__icontains=buscar)
+                | Q(apellido__icontains=buscar)
+                | Q(cedula__icontains=buscar)
+                | Q(correo_electronico__icontains=buscar)
+                | Q(telefono_movil__icontains=buscar)
             )
 
         return queryset
-    
+
+    def create(self, request, *args, **kwargs):
+        if not es_admin(request.user):
+            return Response(
+                {
+                    'error': (
+                        'Solo el administrador puede '
+                        'registrar estudiantes.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return super().create(
+            request,
+            *args,
+            **kwargs
+        )
+
+    def update(self, request, *args, **kwargs):
+        if not es_admin(request.user):
+            return Response(
+                {
+                    'error': (
+                        'Solo el administrador puede '
+                        'editar estudiantes.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return super().update(
+            request,
+            *args,
+            **kwargs
+        )
+
+    def partial_update(self, request, *args, **kwargs):
+        if not es_admin(request.user):
+            return Response(
+                {
+                    'error': (
+                        'Solo el administrador puede '
+                        'editar estudiantes.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        return super().partial_update(
+            request,
+            *args,
+            **kwargs
+        )
+
     @action(detail=False, methods=['get'], url_path='resumen')
     def resumen(self, request):
+        if not es_admin(request.user):
+            return Response(
+                {
+                    'error': (
+                        'Solo Administración puede consultar '
+                        'el resumen de estudiantes.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         total = Estudiante.objects.count()
-        activos = Estudiante.objects.filter(activo=True).count()
-        inactivos = Estudiante.objects.filter(activo=False).count()
+        activos = Estudiante.objects.filter(
+            activo=True
+        ).count()
+        inactivos = Estudiante.objects.filter(
+            activo=False
+        ).count()
 
         return Response({
             'total': total,
@@ -478,8 +742,15 @@ class EstudianteViewSet(viewsets.ModelViewSet):
         })
 
 class PlanEstudioViewSet(viewsets.ModelViewSet):
-
     permission_classes = [IsAuthenticated]
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
 
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
@@ -489,7 +760,7 @@ class PlanEstudioViewSet(viewsets.ModelViewSet):
             )
 
         return super().create(request, *args, **kwargs)
-    
+
     def update(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
@@ -508,16 +779,6 @@ class PlanEstudioViewSet(viewsets.ModelViewSet):
             )
 
         return super().partial_update(request, *args, **kwargs)
-
-
-    def destroy(self, request, *args, **kwargs):
-        if not es_admin(request.user):
-            return Response(
-                {'error': 'No tienes permiso para eliminar este registro.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        return super().destroy(request, *args, **kwargs)
 
     queryset = PlanEstudio.objects.prefetch_related(
         'temas',
@@ -534,32 +795,18 @@ class PlanEstudioViewSet(viewsets.ModelViewSet):
             {'value': 'Avanzado', 'label': 'Avanzado'},
         ])
 
-    @action(detail=True, methods=['get'], url_path='debug-temas')
-    def debug_temas(self, request, pk=None):
-        plan = self.get_object()
-        temas = plan.temas.all()
-
-        data = {
-            'plan_id': plan.id,
-            'plan_nombre': plan.nombre,
-            'total_temas': temas.count(),
-            'temas': [
-                {
-                    'id': tema.id,
-                    'titulo': tema.titulo,
-                    'activo': tema.activo,
-                    'orden': tema.orden,
-                    'subtemas_count': tema.subtemas.count()
-                }
-                for tema in temas
-            ]
-        }
-        return Response(data)
-
 class ValorCursoViewSet(viewsets.ModelViewSet):
     queryset = ValorCurso.objects.all().order_by('-fecha_modificacion')
     serializer_class = ValorCursoSerializer
     permission_classes = [IsAuthenticated]
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
 
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
@@ -587,15 +834,6 @@ class ValorCursoViewSet(viewsets.ModelViewSet):
             )
 
         return super().partial_update(request, *args, **kwargs)
-
-    def destroy(self, request, *args, **kwargs):
-        if not es_admin(request.user):
-            return Response(
-                {'error': 'No tienes permiso para eliminar este registro.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        return super().destroy(request, *args, **kwargs)
 
     def get_queryset(self):
         queryset = ValorCurso.objects.all().order_by('-fecha_modificacion')
@@ -618,13 +856,26 @@ class InstructorViewSet(viewsets.ModelViewSet):
     queryset = Instructor.objects.all()
     serializer_class = InstructorSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = PaginacionOpcional
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
     parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def get_serializer_class(self):
+        if es_estudiante(self.request.user):
+            return InstructorCalendarioSerializer
+
         if self.action == 'list':
             return InstructorListSerializer
 
         return InstructorSerializer
+
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
@@ -653,30 +904,76 @@ class InstructorViewSet(viewsets.ModelViewSet):
 
         return super().partial_update(request, *args, **kwargs)
 
+    def get_queryset(self):
+        user = self.request.user
+        queryset = Instructor.objects.order_by('-id')
 
-    def destroy(self, request, *args, **kwargs):
-        if not es_admin(request.user):
-            return Response(
-                {'error': 'No tienes permiso para eliminar este registro.'},
-                status=status.HTTP_403_FORBIDDEN
+        if self.action == 'list':
+            queryset = queryset.defer('foto_base64')
+
+        if es_admin(user):
+            pass
+
+        elif es_instructor(user):
+            queryset = queryset.filter(
+                id=user.instructor_id
             )
 
-        return super().destroy(request, *args, **kwargs)
+        elif es_estudiante(user):
+            instructores_ids = Calendario.objects.filter(
+                matricula__estudiante_id=user.estudiante_id
+            ).exclude(
+                estado='cancelada'
+            ).values_list(
+                'instructor_id',
+                flat=True
+            ).distinct()
 
-    def get_queryset(self):
-        queryset = Instructor.objects.all().order_by('-id')
+            queryset = queryset.filter(
+                id__in=instructores_ids
+            )
+
+        else:
+            return Instructor.objects.none()
+
+        buscar = self.request.query_params.get('buscar')
+
+        if buscar:
+            buscar = buscar.strip()
+
+            queryset = queryset.filter(
+                Q(nombre__icontains=buscar)
+                | Q(apellido__icontains=buscar)
+                | Q(cedula__icontains=buscar)
+                | Q(numero_telefono__icontains=buscar)
+                | Q(categoria_instructor__icontains=buscar)
+            )
+
         activo = self.request.query_params.get('activo')
 
-        if activo == 'true':
-            queryset = queryset.filter(activo=True)
+        if activo is not None:
+            activo = activo.strip().lower()
 
-        if activo == 'false':
-            queryset = queryset.filter(activo=False)
+            if activo == 'true':
+                queryset = queryset.filter(activo=True)
+            elif activo == 'false':
+                queryset = queryset.filter(activo=False)
 
         return queryset
 
-    @action(detail=True, methods=['post'], url_path='despedir')
+    @action(detail=True, methods=['post'], url_path='desactivar')
     def despedir(self, request, pk=None):
+        if not es_admin(request.user):
+            return Response(
+                {
+                    'error': (
+                        'Solo el administrador puede '
+                        'desactivar instructores.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         instructor = self.get_object()
 
         fecha_salida = request.data.get('fecha_salida') or timezone.now().date()
@@ -699,13 +996,41 @@ class MatriculaViewSet(viewsets.ModelViewSet):
     queryset = Matricula.objects.select_related('estudiante').all()
     serializer_class = MatriculaSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = PaginacionOpcional
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
 
     def get_queryset(self):
         user = self.request.user
 
-        queryset = Matricula.objects.select_related(
-            'estudiante'
-        ).all().order_by('-id')
+        queryset = (
+            Matricula.objects
+            .select_related(
+                'estudiante',
+                'categoria',
+                'plan_de_estudio',
+            )
+            .prefetch_related(
+                Prefetch(
+                    'estudiante__usuarios',
+                    queryset=(
+                        Usuario.objects
+                        .only(
+                            'id',
+                            'estudiante_id',
+                        )
+                    ),
+                    to_attr='usuarios_precargados',
+                )
+            )
+            .order_by('-id')
+        )
 
         if es_admin(user):
             pass
@@ -713,7 +1038,7 @@ class MatriculaViewSet(viewsets.ModelViewSet):
         elif es_instructor(user):
             matriculas_ids = Calendario.objects.filter(
                 instructor_id=user.instructor_id,
-                es_examen=False
+                es_examen=False,
             ).exclude(
                 estado='cancelada'
             ).values_list(
@@ -721,29 +1046,80 @@ class MatriculaViewSet(viewsets.ModelViewSet):
                 flat=True
             ).distinct()
 
-            queryset = queryset.filter(id__in=matriculas_ids)
+            queryset = queryset.filter(
+                id__in=matriculas_ids
+            )
 
         elif es_estudiante(user):
-            queryset = queryset.filter(estudiante_id=user.estudiante_id)
+            queryset = queryset.filter(
+                estudiante_id=user.estudiante_id
+            )
 
         else:
             return Matricula.objects.none()
 
         buscar = self.request.query_params.get('buscar')
+        solo_activos = self.request.query_params.get(
+            'solo_activos'
+        )
         estado = self.request.query_params.get('estado')
 
         if buscar:
+            buscar = buscar.strip()
+
             queryset = queryset.filter(
-                Q(estudiante__cedula__icontains=buscar) |
-                Q(estudiante__nombre__icontains=buscar) |
-                Q(estudiante__apellido__icontains=buscar)
+                Q(estudiante__cedula__icontains=buscar)
+                | Q(estudiante__nombre__icontains=buscar)
+                | Q(estudiante__apellido__icontains=buscar)
+                | Q(estudiante__telefono_movil__icontains=buscar)
+                | Q(tipo_curso__icontains=buscar)
+                | Q(categoria__nombre__icontains=buscar)
+                | Q(estado__icontains=buscar)
+            )
+
+        if (
+            solo_activos
+            and solo_activos.strip().lower() == 'true'
+        ):
+            queryset = queryset.exclude(
+                estado='finalizado'
             )
 
         if estado:
-            queryset = queryset.filter(estado=estado)
+            queryset = queryset.filter(
+                estado=estado
+            )
 
         return queryset
-    
+
+    @action(detail=False, methods=['get'], url_path='resumen')
+    def resumen(self, request):
+        if not es_admin(request.user):
+            return Response(
+                {
+                    'error': (
+                        'Solo Administración puede consultar '
+                        'el resumen de matrículas.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        queryset = Matricula.objects.all()
+
+        return Response({
+            'total': queryset.count(),
+            'matriculados': queryset.filter(
+                estado='matriculado'
+            ).count(),
+            'pendientes': queryset.filter(
+                estado='pendiente'
+            ).count(),
+            'finalizados': queryset.filter(
+                estado='finalizado'
+            ).count(),
+        })
+
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
@@ -752,7 +1128,6 @@ class MatriculaViewSet(viewsets.ModelViewSet):
             )
 
         return super().create(request, *args, **kwargs)
-
 
     def update(self, request, *args, **kwargs):
         if not es_admin(request.user):
@@ -772,18 +1147,6 @@ class MatriculaViewSet(viewsets.ModelViewSet):
             )
 
         return super().partial_update(request, *args, **kwargs)
-
-
-    def destroy(self, request, *args, **kwargs):
-        if not es_admin(request.user):
-            return Response(
-                {'error': 'Solo el administrador puede eliminar matrículas.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        return super().destroy(request, *args, **kwargs)
-    
-
 
     @action(detail=False, methods=['get'], url_path='buscar-estudiante')
     def buscar_estudiante(self, request):
@@ -831,7 +1194,6 @@ class MatriculaViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='para-examen')
     def para_examen(self, request):
-
         user = request.user
 
         if not es_instructor(user):
@@ -840,101 +1202,123 @@ class MatriculaViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_200_OK
             )
 
-        matriculas_ids = Calendario.objects.filter(
-            instructor_id=user.instructor_id,
-            es_examen=False,
-            matricula__estado__in=[
-                'matriculado',
-                'finalizado',
-            ],
-        ).exclude(
-            estado='cancelada'
-        ).values_list(
-            'matricula_id',
-            flat=True
-        ).distinct()
+        matriculas_ids = (
+            Calendario.objects
+            .filter(
+                instructor_id=user.instructor_id,
+                es_examen=False,
+                matricula__estado__in=[
+                    'matriculado',
+                    'finalizado',
+                ],
+            )
+            .exclude(estado='cancelada')
+            .values_list(
+                'matricula_id',
+                flat=True
+            )
+            .distinct()
+        )
 
-        matriculas = Matricula.objects.select_related(
-            'estudiante'
-        ).filter(
-            id__in=matriculas_ids,
-            estado__in=[
-                'matriculado',
-                'finalizado',
-            ],
-            estudiante__activo=True,
-        ).order_by(
-            'estudiante__nombre',
-            'estudiante__apellido',
+        clases_regulares = (
+            Calendario.objects
+            .filter(
+                matricula_id=OuterRef('pk'),
+                es_examen=False,
+            )
+            .exclude(estado='cancelada')
+        )
+
+        clases_pendientes = clases_regulares.exclude(
+            estado='completada'
+        )
+
+        examenes = Calendario.objects.filter(
+            matricula_id=OuterRef('pk'),
+            es_examen=True,
+        )
+
+        examenes_vigentes = examenes.exclude(
+            estado='cancelada'
+        )
+
+        notas_teoricas = Notas.objects.filter(
+            matricula_id=OuterRef('pk'),
+            tipo_nota='teorico',
+        )
+
+        notas_practicas = Notas.objects.filter(
+            matricula_id=OuterRef('pk'),
+            tipo_nota='practico',
+        )
+
+        matriculas = (
+            Matricula.objects
+            .select_related('estudiante')
+            .filter(
+                id__in=matriculas_ids,
+                estado__in=[
+                    'matriculado',
+                    'finalizado',
+                ],
+            )
+            .filter(
+                Q(tipo_curso__iexact='Principiante')
+                | (
+                    Q(tipo_curso__iexact='Intermedio')
+                    & Q(incluye_examen_policial=True)
+                )
+                | (
+                    Q(tipo_curso__iexact='Avanzado')
+                    & Q(incluye_examen_policial=True)
+                )
+            )
+            .annotate(
+                tiene_clases_regulares=Exists(
+                    clases_regulares
+                ),
+                tiene_clases_pendientes=Exists(
+                    clases_pendientes
+                ),
+                tiene_nota_teorica=Exists(
+                    notas_teoricas
+                ),
+                tiene_nota_practica=Exists(
+                    notas_practicas
+                ),
+                total_examenes_asignados=Count(
+                    'clases',
+                    filter=Q(
+                        clases__es_examen=True
+                    ),
+                    distinct=True,
+                ),
+                tiene_examen_vigente=Exists(
+                    examenes_vigentes
+                ),
+            )
+            .filter(
+                tiene_clases_regulares=True,
+                tiene_clases_pendientes=False,
+                tiene_nota_teorica=True,
+                tiene_nota_practica=True,
+                total_examenes_asignados__lt=3,
+                tiene_examen_vigente=False,
+            )
+            .order_by(
+                'estudiante__nombre',
+                'estudiante__apellido',
+            )
         )
 
         resultados = []
 
         for matricula in matriculas:
-            tipo_curso = str(
-                matricula.tipo_curso or ''
-            ).strip().lower()
-
-            if tipo_curso not in [
-                'principiante',
-                'intermedio',
-                'avanzado',
-            ]:
-                continue
-
-            # Principiante siempre puede tener examen policial.
-            # Intermedio y Avanzado necesitan el check.
-            if (
-                tipo_curso in ['intermedio', 'avanzado']
-                and not matricula.incluye_examen_policial
-            ):
-                continue
-
-            clases_regulares = Calendario.objects.filter(
-                matricula=matricula,
-                es_examen=False,
-            ).exclude(
-                estado='cancelada'
-            )
-
-            if not clases_regulares.exists():
-                continue
-
-            tiene_clases_pendientes = clases_regulares.exclude(
-                estado='completada'
-            ).exists()
-
-            if tiene_clases_pendientes:
-                continue
-
-            examenes_del_estudiante = Calendario.objects.filter(
-                matricula=matricula,
-                es_examen=True,
-            )
-
-            total_examenes_asignados = (
-                examenes_del_estudiante.count()
-            )
-
-            if total_examenes_asignados >= 3:
-                continue
-
-            # Un examen pendiente o completado impide crear otro.
-            # Uno cancelado permite volver a programar.
-            tiene_examen_vigente = (
-                examenes_del_estudiante.exclude(
-                    estado='cancelada'
-                ).exists()
-            )
-
-            if tiene_examen_vigente:
-                continue
-
             resultados.append({
                 'id': matricula.id,
                 'estudiante_nombre': (
-                    f"{matricula.estudiante.nombre} "
-                    f"{matricula.estudiante.apellido}"
+                    f'{matricula.estudiante.nombre} '
+                    f'{matricula.estudiante.apellido}'
                 ).strip(),
                 'estudiante_cedula': (
                     matricula.estudiante.cedula
@@ -944,27 +1328,45 @@ class MatriculaViewSet(viewsets.ModelViewSet):
                     matricula.incluye_examen_policial
                 ),
                 'examenes_asignados': (
-                    total_examenes_asignados
+                    matricula.total_examenes_asignados
                 ),
                 'examenes_disponibles': (
-                    3 - total_examenes_asignados
+                    3 - matricula.total_examenes_asignados
                 ),
             })
 
-        return Response(resultados)     
-    
+        return Response(resultados)
+
     @action(detail=False, methods=['get'], url_path='asignadas-instructor')
     def asignadas_instructor(self, request):
         user = request.user
-        rol = user.rol_nombre
 
-        matriculas = Matricula.objects.select_related(
-            'estudiante'
-        ).filter(
-            estado='matriculado'
+        if not es_admin(user) and not es_instructor(user):
+            return Response(
+                {
+                    'error': (
+                        'Solo el administrador o un instructor '
+                        'pueden consultar las matrículas asignadas.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        examenes = Calendario.objects.filter(
+            matricula_id=OuterRef('pk'),
+            es_examen=True,
         )
 
-        if rol == 'instructor':
+        matriculas = (
+            Matricula.objects
+            .select_related('estudiante')
+            .filter(estado='matriculado')
+            .annotate(
+                tiene_examen=Exists(examenes)
+            )
+        )
+
+        if es_instructor(user):
             if not user.instructor_id:
                 return Response([], status=200)
 
@@ -981,10 +1383,6 @@ class MatriculaViewSet(viewsets.ModelViewSet):
         resultados = []
 
         for matricula in matriculas:
-            tiene_examen = Calendario.objects.filter(
-                matricula=matricula,
-                es_examen=True,
-            ).exists()
 
             resultados.append({
                 'id': matricula.id,
@@ -993,7 +1391,7 @@ class MatriculaViewSet(viewsets.ModelViewSet):
                     f"{matricula.estudiante.apellido}"
                 ).strip(),
                 'estudiante_cedula': matricula.estudiante.cedula,
-                'tiene_examen': tiene_examen,
+                'tiene_examen': matricula.tiene_examen,
             })
 
         return Response(resultados)
@@ -1016,6 +1414,23 @@ def saldo(request):
             {'error': 'La matrícula no existe.'},
             status=404
         )
+
+    if not es_admin(request.user):
+        es_propietario = (
+            es_estudiante(request.user)
+            and matricula.estudiante_id == request.user.estudiante_id
+        )
+
+        if not es_propietario:
+            return Response(
+                {
+                    'error': (
+                        'No tienes permiso para consultar '
+                        'el saldo de esta matrícula.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
 
     def calcular_monto_total(matricula):
         primer_recibo = Recibo.objects.filter(
@@ -1111,6 +1526,15 @@ class ReciboViewSet(viewsets.ModelViewSet):
     queryset = Recibo.objects.all()
     serializer_class = ReciboSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = PaginacionOpcional
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
 
     def get_queryset(self):
         user = self.request.user
@@ -1120,6 +1544,26 @@ class ReciboViewSet(viewsets.ModelViewSet):
             'matricula__estudiante',
             'valor_curso',
         ).all().order_by('-id')
+
+        buscar = self.request.query_params.get(
+            'buscar'
+        )
+
+        if buscar:
+            buscar = buscar.strip()
+
+            queryset = queryset.filter(
+                Q(numero_recibo__icontains=buscar)
+                | Q(
+                    matricula__estudiante__nombre__icontains=buscar
+                )
+                | Q(
+                    matricula__estudiante__apellido__icontains=buscar
+                )
+                | Q(
+                    matricula__estudiante__cedula__icontains=buscar
+                )
+            )
 
         if es_admin(user):
             return queryset
@@ -1137,8 +1581,25 @@ class ReciboViewSet(viewsets.ModelViewSet):
                 {'error': 'Solo el administrador puede registrar recibos.'},
                 status=status.HTTP_403_FORBIDDEN
             )
-
-        return super().create(request, *args, **kwargs)
+        try:
+            return super().create(
+                request,
+                *args,
+                **kwargs
+            )
+        except IntegrityError:
+            return Response(
+                {
+                    'numero_recibo': [
+                        (
+                            'Ya existe un recibo con este '
+                            'número. Verifique el número '
+                            'e inténtelo nuevamente.'
+                        )
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
     def update(self, request, *args, **kwargs):
         if not es_admin(request.user):
@@ -1146,8 +1607,25 @@ class ReciboViewSet(viewsets.ModelViewSet):
                 {'error': 'Solo el administrador puede editar recibos.'},
                 status=status.HTTP_403_FORBIDDEN
             )
+        try:
+            return super().update(
+                request,
+                *args,
+                **kwargs
+            )
+        except IntegrityError:
+            return Response(
+                {
+                    'numero_recibo': [
+                        (
+                            'Ya existe otro recibo con '
+                            'este número.'
+                        )
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
         if not es_admin(request.user):
@@ -1155,42 +1633,152 @@ class ReciboViewSet(viewsets.ModelViewSet):
                 {'error': 'Solo el administrador puede editar recibos.'},
                 status=status.HTTP_403_FORBIDDEN
             )
+        try:
+            return super().partial_update(
+                request,
+                *args,
+                **kwargs
+            )
+        except IntegrityError:
+            return Response(
+                {
+                    'numero_recibo': [
+                        (
+                            'Ya existe otro recibo con '
+                            'este número.'
+                        )
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        return super().partial_update(request, *args, **kwargs)
-
-    def destroy(self, request, *args, **kwargs):
+    @action(detail=False, methods=['get'], url_path='resumen')
+    def resumen(self, request):
         if not es_admin(request.user):
             return Response(
-                {'error': 'Solo el administrador puede eliminar recibos.'},
+                {
+                    'error': (
+                        'Solo el administrador puede ver '
+                        'el resumen de recibos.'
+                    )
+                },
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        return super().destroy(request, *args, **kwargs)
-    
+        hoy = timezone.localdate()
+
+        inicio_mes, inicio_mes_siguiente = obtener_rango_mes(
+            hoy.year,
+            hoy.month,
+        )
+
+        queryset = self.get_queryset().filter(
+            tipo_pago__in=TIPOS_RECIBO_INGRESO,
+        )
+
+        ingresos_mes = (
+            queryset
+            .filter(
+                fecha_pago__gte=inicio_mes,
+                fecha_pago__lt=inicio_mes_siguiente,
+            )
+            .aggregate(
+                total=Sum('monto_pagado')
+            )['total']
+            or Decimal('0')
+        )
+
+        ingresos_totales = (
+            queryset
+            .aggregate(
+                total=Sum('monto_pagado')
+            )['total']
+            or Decimal('0')
+        )
+
+        recibos_mes = (
+            queryset
+            .filter(
+                fecha_pago__gte=inicio_mes,
+                fecha_pago__lt=inicio_mes_siguiente,
+            )
+            .count()
+        )
+
+        return Response({
+            'ingresos_mes': float(ingresos_mes),
+            'ingresos_totales': float(ingresos_totales),
+            'recibos_mes': recibos_mes,
+        })
 
 class UserViewSet(viewsets.ModelViewSet):
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
-    pagination_class = None
+    pagination_class = PaginacionOpcional
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
 
     def get_queryset(self):
         user = self.request.user
 
-        queryset = Usuario.objects.select_related(
-            'rol',
-            'estudiante',
-            'instructor',
-        ).all().order_by('id')
+        queryset = (
+            Usuario.objects
+            .select_related(
+                'rol',
+                'estudiante',
+                'instructor',
+            )
+            .prefetch_related(
+                Prefetch(
+                    'estudiante__matriculas',
+                    queryset=(
+                        Matricula.objects
+                        .only(
+                            'id',
+                            'estudiante_id',
+                            'estado',
+                        )
+                        .order_by('-id')
+                    ),
+                    to_attr='matriculas_usuario_precargadas',
+                )
+            )
+            .order_by('id')
+        )
 
-        if es_admin(user):
-            return queryset
+        if not es_admin(user):
+            return queryset.filter(id=user.id)
 
-        return queryset.filter(id=user.id)
+        rol_param = str(
+            self.request.query_params.get('rol') or ''
+        ).strip()
 
-    def list(self, request, *args, **kwargs):
-        queryset = self.get_queryset()
-        serializer = self.get_serializer(queryset, many=True)
-        return Response(serializer.data)
+        buscar = str(
+            self.request.query_params.get('buscar') or ''
+        ).strip()[:100]
+
+        if rol_param:
+            queryset = queryset.filter(
+                rol__nombre__iexact=rol_param
+            )
+
+        if buscar:
+            queryset = queryset.filter(
+                Q(username__icontains=buscar)
+                | Q(email__icontains=buscar)
+                | Q(first_name__icontains=buscar)
+                | Q(last_name__icontains=buscar)
+                | Q(estudiante__nombre__icontains=buscar)
+                | Q(estudiante__apellido__icontains=buscar)
+            )
+
+        return queryset
 
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
@@ -1219,23 +1807,6 @@ class UserViewSet(viewsets.ModelViewSet):
 
         return super().partial_update(request, *args, **kwargs)
 
-    def destroy(self, request, *args, **kwargs):
-        if not es_admin(request.user):
-            return Response(
-                {'error': 'Solo el administrador puede eliminar usuarios.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        usuario = self.get_object()
-        instructor = getattr(usuario, 'instructor', None)
-
-        self.perform_destroy(usuario)
-
-        if instructor:
-            instructor.delete()
-
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
     @action(detail=False, methods=['post'], url_path='crear-estudiante')
     def crear_usuario_estudiante(self, request):
         if not es_admin(request.user):
@@ -1243,7 +1814,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 {'error': 'Solo el administrador puede crear usuarios de estudiantes.'},
                 status=status.HTTP_403_FORBIDDEN
             )
-        
+
         matricula_id = request.data.get('matricula_id')
 
         if not matricula_id:
@@ -1266,19 +1837,70 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if matricula.estudiante.usuarios.filter(
-            rol__nombre__iexact='estudiante'
-        ).exists():
+        usuario_estudiante = (
+            matricula.estudiante.usuarios
+            .filter(
+                rol__nombre__iexact='estudiante'
+            )
+            .order_by(
+                '-id'
+            )
+            .first()
+        )
+
+        if usuario_estudiante:
+            if usuario_estudiante.is_active:
+                return Response(
+                    {
+                        'error': (
+                            'Este estudiante ya tiene un usuario activo.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            password = request.data.get('password')
+
+            if password:
+                usuario_estudiante.set_password(password)
+
+            usuario_estudiante.is_active = True
+
+            if not usuario_estudiante.estudiante_id:
+                usuario_estudiante.estudiante = matricula.estudiante
+
+            usuario_estudiante.save()
+
+            if not matricula.estudiante.activo:
+                matricula.estudiante.activo = True
+                matricula.estudiante.save(
+                    update_fields=[
+                        'activo',
+                    ]
+                )
+
+            Token.objects.filter(
+                user=usuario_estudiante
+            ).delete()
+
             return Response(
-                {'error': 'Este estudiante ya tiene usuario.'},
-                status=status.HTTP_400_BAD_REQUEST
+                self.get_serializer(usuario_estudiante).data,
+                status=status.HTTP_200_OK
             )
 
         data = request.data.copy()
         data['matricula_id'] = matricula.id
         data.setdefault('first_name', matricula.estudiante.nombre)
         data.setdefault('last_name', matricula.estudiante.apellido)
-        data.setdefault('email', matricula.estudiante.correo_electronico)
+        correo_estudiante = str(
+            matricula.estudiante.correo_electronico
+            or ''
+        ).strip().lower()
+
+        if correo_estudiante:
+            data['email'] = correo_estudiante
+        else:
+            data.pop('email', None)
 
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
@@ -1291,17 +1913,31 @@ class UserViewSet(viewsets.ModelViewSet):
 
 
 class CalendarioViewSet(viewsets.ModelViewSet):
-    queryset = Calendario.objects.select_related(
-        'matricula',
-        'matricula__estudiante',
-        'matricula__categoria',
-        'instructor',
-        'modulo',
-    ).all()
+    queryset = (
+        Calendario.objects
+        .select_related(
+            'matricula',
+            'matricula__estudiante',
+            'matricula__categoria',
+            'instructor',
+        )
+        .defer(
+            'instructor__foto_base64'
+        )
+    )
     serializer_class = CalendarioSerializer
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['instructor', 'fecha']
     permission_classes = [IsAuthenticated]
+    pagination_class = PaginacionOpcional
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
 
     def get_queryset(self):
         user = self.request.user
@@ -1311,19 +1947,56 @@ class CalendarioViewSet(viewsets.ModelViewSet):
         instructor_param = self.request.query_params.get('instructor')
 
         if mes:
-            try:
-                anio, m = map(int, mes.split('-'))
-                inicio = date(anio, m, 1)
-                fin = date(anio + 1, 1, 1) if m == 12 else date(anio, m + 1, 1)
-                qs = qs.filter(fecha__gte=inicio, fecha__lt=fin)
-            except ValueError:
-                pass
+            mes = mes.strip()
+
+            if not re.fullmatch(
+                r'\d{4}-(0[1-9]|1[0-2])',
+                mes,
+            ):
+                raise serializers.ValidationError({
+                    'mes': (
+                        'El mes debe tener el formato '
+                        'AAAA-MM, por ejemplo 2026-07.'
+                    )
+                })
+
+            anio, numero_mes = map(int, mes.split('-'))
+            inicio = date(anio, numero_mes, 1)
+
+            if numero_mes == 12:
+                fin = date(anio + 1, 1, 1)
+            else:
+                fin = date(anio, numero_mes + 1, 1)
+
+            qs = qs.filter(
+                fecha__gte=inicio,
+                fecha__lt=fin,
+            )
 
         if instructor_param and instructor_param != 'all':
-            qs = qs.filter(instructor_id=instructor_param)
+            try:
+                instructor_id = int(instructor_param)
+            except (TypeError, ValueError):
+                raise serializers.ValidationError({
+                    'instructor': (
+                        'El instructor debe ser un identificador válido.'
+                    )
+                })
 
-        if user.is_superuser or getattr(user, 'rol_nombre', '') == 'admin':
-            return qs.order_by('fecha', 'hora_inicio')
+            if instructor_id <= 0:
+                raise serializers.ValidationError({
+                    'instructor': (
+                        'El instructor debe ser un identificador válido.'
+                    )
+                })
+
+            qs = qs.filter(instructor_id=instructor_id)
+
+        if es_admin(user):
+            return qs.order_by(
+                'fecha',
+                'hora_inicio'
+            )
 
         if getattr(user, 'instructor_id', None):
             return qs.filter(instructor_id=user.instructor_id).order_by('fecha', 'hora_inicio')
@@ -1332,48 +2005,159 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return qs.filter(matricula__estudiante_id=user.estudiante_id).order_by('fecha', 'hora_inicio')
 
         return qs.none()
-    
+
+    @transaction.atomic
+    def crear_clases_regulares_seguras(
+        self,
+        matricula_id,
+        instructor_id,
+        fechas,
+        duraciones_clases,
+        hora_inicio,
+    ):
+        matricula = (
+            Matricula.objects
+            .select_for_update()
+            .select_related(
+                'estudiante',
+                'categoria',
+            )
+            .get(id=matricula_id)
+        )
+
+        instructor = (
+            Instructor.objects
+            .select_for_update()
+            .get(id=instructor_id)
+        )
+
+        if not instructor.activo:
+            raise serializers.ValidationError({
+                'error': (
+                    'El instructor está inactivo y no '
+                    'puede recibir nuevas clases.'
+                )
+            })
+
+        calendario_existente = (
+            Calendario.objects
+            .filter(
+                matricula=matricula,
+                es_examen=False,
+            )
+            .exclude(
+                estado='cancelada'
+            )
+            .exists()
+        )
+
+        if calendario_existente:
+            raise serializers.ValidationError({
+                'error': (
+                    'La matrícula ya tiene un calendario '
+                    'regular asignado.'
+                )
+            })
+
+        planes = []
+
+        for fecha_clase, duracion_clase in zip(
+            fechas,
+            duraciones_clases,
+        ):
+            hora_fin_clase = (
+                datetime.combine(
+                    date.today(),
+                    hora_inicio,
+                )
+                + timedelta(
+                    hours=duracion_clase
+                )
+            ).time()
+
+            choque = (
+                Calendario.objects
+                .filter(
+                    instructor=instructor,
+                    fecha=fecha_clase,
+                    hora_inicio__lt=hora_fin_clase,
+                    hora_fin__gt=hora_inicio,
+                )
+                .exclude(
+                    estado='cancelada'
+                )
+                .exists()
+            )
+
+            if choque:
+                raise serializers.ValidationError({
+                    'error': (
+                        'El instructor ya tiene ocupado '
+                        f'el horario '
+                        f'{hora_inicio.strftime("%H:%M")} - '
+                        f'{hora_fin_clase.strftime("%H:%M")} '
+                        f'el día '
+                        f'{fecha_clase.strftime("%d/%m/%Y")}.'
+                    )
+                })
+
+            planes.append({
+                'fecha': fecha_clase,
+                'hora_fin': hora_fin_clase,
+            })
+
+        creadas = []
+
+        for numero_clase, plan in enumerate(
+            planes,
+            start=1,
+        ):
+            clase = Calendario.objects.create(
+                matricula=matricula,
+                instructor=instructor,
+                fecha=plan['fecha'],
+                hora_inicio=hora_inicio,
+                hora_fin=plan['hora_fin'],
+                numero_clase=numero_clase,
+                estado='pendiente',
+                es_examen=False,
+            )
+
+            creadas.append(clase)
+
+        if matricula_usa_checks(matricula):
+            ProgresoTema.objects.filter(
+                matricula=matricula,
+                completado=False,
+            ).update(
+                desbloqueado=False
+            )
+
+        return creadas
+
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
                 {
                     'error': (
                         'Solo el administrador puede '
-                        'crear citas normales.'
+                        'crear calendarios.'
                     )
                 },
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        es_examen_solicitado = request.data.get(
-            'es_examen',
-            False
+        return Response(
+            {
+                'error': (
+                    'No se permite crear encuentros directamente '
+                    'desde esta ruta. Utilice la creación por bloque '
+                    'o la creación manual del calendario.'
+                )
+            },
+            status=status.HTTP_405_METHOD_NOT_ALLOWED
         )
 
-        es_examen_solicitado = (
-            es_examen_solicitado is True
-            or str(es_examen_solicitado).strip().lower()
-            in ['true', '1']
-        )
-
-        if es_examen_solicitado:
-            return Response(
-                {
-                    'error': (
-                        'Los exámenes policiales solo pueden '
-                        'ser programados por un instructor '
-                        'desde la opción Examen Policial.'
-                    )
-                },
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        return super().create(
-            request,
-            *args,
-            **kwargs
-        )
-    
     def update(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
@@ -1386,57 +2170,16 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        instance = self.get_object()
-
-        if instance.es_examen:
-            return Response(
-                {
-                    'error': (
-                        'Los exámenes policiales no pueden '
-                        'modificarse desde la edición normal.'
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        return super().update(
-            request,
-            *args,
-            **kwargs
+        return Response(
+            {
+                'error': (
+                    'La edición completa mediante PUT no está '
+                    'permitida. Utilice PATCH para modificar '
+                    'fecha, horario o instructor.'
+                )
+            },
+            status=status.HTTP_405_METHOD_NOT_ALLOWED
         )
-    
-    def destroy(self, request, *args, **kwargs):
-        if not es_admin(request.user):
-            return Response(
-                {
-                    'error': (
-                        'Solo el administrador puede '
-                        'eliminar citas normales.'
-                    )
-                },
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        instance = self.get_object()
-
-        if instance.es_examen:
-            return Response(
-                {
-                    'error': (
-                        'Los exámenes policiales no pueden '
-                        'eliminarse. Deben marcarse como '
-                        'Asistieron o Cancelado.'
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        return super().destroy(
-            request,
-            *args,
-            **kwargs
-        )
-
 
     @action(detail=False, methods=['get'], url_path='hoy')
     def citas_hoy(self, request):
@@ -1450,7 +2193,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             'count': citas.count(),
             'fecha': hoy.isoformat(),
         })
-    
+
     @action(detail=True, methods=['post'], url_path='resultado-examen')
     def resultado_examen(self, request, pk=None):
         calendario = self.get_object()
@@ -1516,35 +2259,42 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             if resultado == 'cancelado':
                 calendario.estado = 'cancelada'
                 calendario.save(
-                    update_fields=['estado']
+                    update_fields=[
+                        'estado',
+                    ]
                 )
 
                 mensaje = (
                     'El examen policial fue cancelado. '
-                    'El estudiante puede volver a ser programado.'
+                    'Este resultado ya no puede modificarse. '
+                    'El estudiante puede volver a ser programado '
+                    'si todavía no alcanzó las 3 asignaciones.'
                 )
 
             else:
                 calendario.estado = 'completada'
                 calendario.save(
-                    update_fields=['estado']
+                    update_fields=[
+                        'estado',
+                    ]
                 )
 
+                matricula = calendario.matricula
+
                 desactivar_usuarios_estudiante(
-                    calendario.matricula.estudiante
+                    matricula.estudiante
                 )
 
                 mensaje = (
-                    'La asistencia al examen policial fue '
-                    'confirmada. El usuario del estudiante '
-                    'fue desactivado.'
+                    'El examen policial fue marcado como asistido. '
+                    'El acceso del estudiante fue desactivado '
+                    'correctamente.'
                 )
 
         calendario.refresh_from_db()
 
         return Response({
             'message': mensaje,
-            'resultado': resultado,
             'calendario': CalendarioSerializer(
                 calendario
             ).data,
@@ -1561,7 +2311,21 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             'categoria',
         ).get(id=data['matricula_id'])
 
-        instructor = Instructor.objects.get(id=data['instructor_id'])
+        try:
+            instructor = Instructor.objects.get(
+                id=data['instructor_id'],
+                activo=True,
+            )
+        except Instructor.DoesNotExist:
+            return Response(
+                {
+                    'error': (
+                        'El instructor seleccionado no existe '
+                        'o se encuentra desactivado.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         rango = obtener_rango_horario(matricula)
 
@@ -1586,11 +2350,9 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        hora_inicio = datetime.strptime(rango[0], '%H:%M').time()
-
-        hora_fin = (
-            datetime.combine(date.today(), hora_inicio) +
-            timedelta(hours=horas_por_dia)
+        hora_inicio = datetime.strptime(
+            rango[0],
+            '%H:%M'
         ).time()
 
         if matricula.tipo_curso in ['Intermedio', 'Avanzado']:
@@ -1649,110 +2411,40 @@ class CalendarioViewSet(viewsets.ModelViewSet):
 
             actual += timedelta(days=1)
 
-        for fecha_clase, duracion_clase in zip(
-            fechas,
-            duraciones_clases
-        ):
-            hora_fin_clase = (
-                datetime.combine(
-                    date.today(),
-                    hora_inicio
-                )
-                + timedelta(hours=duracion_clase)
-            ).time()
-
-            choque = Calendario.objects.filter(
-                instructor=instructor,
-                fecha=fecha_clase,
-                hora_inicio__lt=hora_fin_clase,
-                hora_fin__gt=hora_inicio,
-                estado__in=['pendiente']
-            ).exists()
-
-            if choque:
-                return Response(
-                    {
-                        'error': (
-                            f'El instructor ya tiene ocupado el horario '
-                            f'{hora_inicio.strftime("%H:%M")} - '
-                            f'{hora_fin_clase.strftime("%H:%M")} '
-                            f'el día {fecha_clase}.'
-                        )
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-        creadas = []
-
-        with transaction.atomic():
-            for i, (
-                fecha_clase,
-                duracion_clase
-            ) in enumerate(
-                zip(
-                    fechas,
-                    duraciones_clases
-                ),
-                start=1
-            ):
-                hora_fin_clase = (
-                    datetime.combine(
-                        date.today(),
-                        hora_inicio
-                    )
-                    + timedelta(hours=duracion_clase)
-                ).time()
-
-                clase = Calendario.objects.create(
-                    matricula=matricula,
-                    instructor=instructor,
-                    fecha=fecha_clase,
-                    hora_inicio=hora_inicio,
-                    hora_fin=hora_fin_clase,
-                    numero_clase=i,
-                    estado='pendiente',
-                    es_examen=False,
-                )
-
-                creadas.append(clase)
-
-            if matricula_usa_checks(matricula):
-                progresos = list(
-                    ProgresoTema.objects.filter(
-                        matricula=matricula
-                    ).select_related(
-                        'tema',
-                        'tema__plan_estudio'
-                    ).order_by(
-                        'orden_general',
-                        'id'
-                    )
-                )
-
-                pendientes = [
-                    progreso for progreso in progresos
-                    if not progreso.completado
-                ]
-
-                for progreso in pendientes:
-                    progreso.desbloqueado = False
-                    progreso.save(
-                        update_fields=['desbloqueado']
-                    )
+        creadas = (
+            self.crear_clases_regulares_seguras(
+                matricula_id=matricula.id,
+                instructor_id=instructor.id,
+                fechas=fechas,
+                duraciones_clases=duraciones_clases,
+                hora_inicio=hora_inicio,
+            )
+        )
 
         return Response(
             {
-                'message': f'Bloque de {len(creadas)} clases creado correctamente.',
-                'fecha_inicio': fechas[0],
-                'fecha_fin': fechas[-1],
+                'message': (
+                    f'Bloque de {len(creadas)} clases '
+                    f'creado correctamente.'
+                ),
+                'fecha_inicio': creadas[0].fecha if creadas else None,
+                'fecha_fin': creadas[-1].fecha if creadas else None,
                 'clases_creadas': len(creadas),
+                'horas_totales': horas_totales,
                 'hora_inicio': hora_inicio.strftime('%H:%M'),
-                'hora_fin': hora_fin.strftime('%H:%M'),
-                'citas': CalendarioSerializer(creadas, many=True).data,
+                'hora_fin_ultima_clase': (
+                    creadas[-1].hora_fin.strftime('%H:%M')
+                    if creadas
+                    else None
+                ),
+                'citas': CalendarioSerializer(
+                    creadas,
+                    many=True
+                ).data,
             },
             status=status.HTTP_201_CREATED
         )
-    
+
     @action(detail=False, methods=['post'], url_path='crear-manual')
     def crear_calendario_manual(self, request):
         if not es_admin(request.user):
@@ -1770,7 +2462,21 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             'categoria',
         ).get(id=data['matricula_id'])
 
-        instructor = Instructor.objects.get(id=data['instructor_id'])
+        try:
+            instructor = Instructor.objects.get(
+                id=data['instructor_id'],
+                activo=True,
+            )
+        except Instructor.DoesNotExist:
+            return Response(
+                {
+                    'error': (
+                        'El instructor seleccionado no existe '
+                        'o se encuentra desactivado.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         rango = obtener_rango_horario(matricula)
 
@@ -1788,282 +2494,573 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        hora_inicio = datetime.strptime(rango[0], '%H:%M').time()
-
-        hora_fin = (
-            datetime.combine(date.today(), hora_inicio) +
-            timedelta(hours=horas_por_dia)
+        hora_inicio = datetime.strptime(
+            rango[0],
+            '%H:%M'
         ).time()
 
-        fechas = sorted(data['fechas'])
+        fechas = sorted(
+            data['fechas']
+        )
 
-        for fecha_clase in fechas:
-            choque = Calendario.objects.filter(
-                instructor=instructor,
-                fecha=fecha_clase,
-                hora_inicio__lt=hora_fin,
-                hora_fin__gt=hora_inicio,
-            ).exclude(
-                estado='cancelada'
-            ).exists()
+        if matricula.tipo_curso in [
+            'Intermedio',
+            'Avanzado',
+        ]:
+            horas_totales = int(
+                matricula.horas_reforzamiento or 0
+            )
 
-            if choque:
+            if horas_totales <= 0:
                 return Response(
                     {
                         'error': (
-                            f'El instructor ya tiene ocupado el horario '
-                            f'{hora_inicio.strftime("%H:%M")} - {hora_fin.strftime("%H:%M")} '
-                            f'el día {fecha_clase}.'
+                            'La matrícula no tiene horas asignadas '
+                            'para este curso.'
                         )
                     },
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-        creadas = []
+            if matricula.incluye_examen_policial:
+                horas_totales -= 2
 
-        with transaction.atomic():
-            for i, fecha_clase in enumerate(fechas, start=1):
-                clase = Calendario.objects.create(
-                    matricula=matricula,
-                    instructor=instructor,
-                    fecha=fecha_clase,
-                    hora_inicio=hora_inicio,
-                    hora_fin=hora_fin,
-                    numero_clase=i,
-                    estado='pendiente',
-                    es_examen=False,
-                )
+        else:
+            # Principiante mantiene 16 horas operativas en calendario.
+            horas_totales = 16
 
-                creadas.append(clase)
-
-            if matricula_usa_checks(matricula):
-                progresos = list(
-                    ProgresoTema.objects.filter(
-                        matricula=matricula
-                    ).select_related(
-                        'tema',
-                        'tema__plan_estudio'
-                    ).order_by(
-                        'orden_general',
-                        'id'
-                    )
-                )
-
-                pendientes = [
-                    progreso for progreso in progresos
-                    if not progreso.completado
-                ]
-
-                for progreso in pendientes:
-                    progreso.desbloqueado = False
-                    progreso.save(
-                        update_fields=['desbloqueado']
-                    )
-
-        return Response(
-            {
-                'message': f'Calendario manual de {len(creadas)} clases creado correctamente.',
-                'fecha_inicio': fechas[0],
-                'fecha_fin': fechas[-1],
-                'clases_creadas': len(creadas),
-                'hora_inicio': hora_inicio.strftime('%H:%M'),
-                'hora_fin': hora_fin.strftime('%H:%M'),
-                'citas': CalendarioSerializer(creadas, many=True).data,
-            },
-            status=status.HTTP_201_CREATED
-        )
-    
-    def partial_update(self, request, *args, **kwargs):
-        instance = self.get_object()
-
-        aplicar_a = request.data.get('aplicar_a', 'solo')
-        instructor_id = request.data.get('instructor')
-        nueva_fecha = request.data.get('fecha')
-        nueva_hora_inicio = request.data.get('hora_inicio')
-        nueva_hora_fin = request.data.get('hora_fin')
-
-        if not es_admin(request.user):
-            return Response(
-                {'error': 'Solo el administrador puede modificar el calendario.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        if instance.es_examen:
+        if horas_totales <= 0:
             return Response(
                 {
                     'error': (
-                        'Los exámenes policiales no pueden '
-                        'modificarse desde la edición normal.'
+                        'Las horas de práctica deben ser mayores a cero.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        def convertir_hora(valor, campo):
-            if valor in [None, '']:
-                return None
+        duraciones_clases = []
+        horas_restantes = int(
+            horas_totales
+        )
 
-            valor = str(valor).strip()
+        for _ in fechas:
+            if horas_restantes <= 0:
+                break
 
-            try:
-                if len(valor) == 5:
-                    return datetime.strptime(valor, '%H:%M').time()
+            duracion_clase = min(
+                horas_por_dia,
+                horas_restantes
+            )
 
-                return datetime.strptime(valor, '%H:%M:%S').time()
-            except ValueError:
-                raise serializers.ValidationError({
-                    campo: 'La hora debe tener formato HH:MM.'
-                })
+            duraciones_clases.append(
+                duracion_clase
+            )
 
-        try:
-            hora_inicio_obj = convertir_hora(nueva_hora_inicio, 'hora_inicio')
-            hora_fin_obj = convertir_hora(nueva_hora_fin, 'hora_fin')
-        except serializers.ValidationError as error:
-            return Response(error.detail, status=status.HTTP_400_BAD_REQUEST)
+            horas_restantes -= duracion_clase
 
-        cambia_hora = hora_inicio_obj is not None or hora_fin_obj is not None
-
-        if cambia_hora and (hora_inicio_obj is None or hora_fin_obj is None):
+        if horas_restantes > 0:
             return Response(
-                {'error': 'Debe enviar hora de inicio y hora fin para cambiar el horario.'},
+                {
+                    'error': (
+                        f'Las fechas seleccionadas no cubren las {horas_totales} '
+                        f'horas requeridas. Selecciona más fechas.'
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if cambia_hora and hora_fin_obj <= hora_inicio_obj:
+        if len(fechas) > len(duraciones_clases):
             return Response(
-                {'error': 'La hora fin debe ser mayor que la hora inicio.'},
+                {
+                    'error': (
+                        f'Seleccionaste {len(fechas)} fechas, pero solo se necesitan '
+                        f'{len(duraciones_clases)} clases para cubrir las '
+                        f'{horas_totales} horas requeridas.'
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        fecha_obj = None
+        creadas = (
+            self.crear_clases_regulares_seguras(
+                matricula_id=matricula.id,
+                instructor_id=instructor.id,
+                fechas=fechas,
+                duraciones_clases=duraciones_clases,
+                hora_inicio=hora_inicio,
+            )
+        )
 
-        if nueva_fecha not in [None, '']:
-            fecha_obj = parse_date(str(nueva_fecha))
+        return Response(
+            {
+                'message': (
+                    f'Calendario manual de {len(creadas)} clases '
+                    f'creado correctamente.'
+                ),
+                'fecha_inicio': creadas[0].fecha if creadas else None,
+                'fecha_fin': creadas[-1].fecha if creadas else None,
+                'clases_creadas': len(creadas),
+                'horas_totales': horas_totales,
+                'hora_inicio': hora_inicio.strftime('%H:%M'),
+                'hora_fin_ultima_clase': (
+                    creadas[-1].hora_fin.strftime('%H:%M')
+                    if creadas
+                    else None
+                ),
+                'citas': CalendarioSerializer(
+                    creadas,
+                    many=True
+                ).data,
+            },
+            status=status.HTTP_201_CREATED
+        )
 
-            if not fecha_obj:
-                return Response(
-                    {'error': 'La fecha debe tener formato YYYY-MM-DD.'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+    def partial_update(self, request, *args, **kwargs):
+        def error(
+            mensaje,
+            codigo=status.HTTP_400_BAD_REQUEST
+        ):
+            return Response(
+                {'error': mensaje},
+                status=codigo
+            )
+
+        if not es_admin(request.user):
+            return error(
+                'Solo el administrador puede modificar '
+                'el calendario.',
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        instance = self.get_object()
+
+        if instance.es_examen:
+            return error(
+                'Los exámenes policiales no pueden '
+                'modificarse desde la edición normal.'
+            )
+
+        aplicar_a = str(
+            request.data.get(
+                'aplicar_a',
+                'solo'
+            )
+            or 'solo'
+        ).strip().lower()
+
+        if aplicar_a not in [
+            'solo',
+            'pendientes',
+        ]:
+            return error(
+                'La opción aplicar_a debe ser '
+                '"solo" o "pendientes".'
+            )
+
+        instructor_id = request.data.get(
+            'instructor'
+        )
+        nueva_fecha = request.data.get(
+            'fecha'
+        )
+        nueva_hora_inicio = request.data.get(
+            'hora_inicio'
+        )
+        nueva_hora_fin = request.data.get(
+            'hora_fin'
+        )
 
         if instructor_id in ['', None]:
             instructor_id = None
         else:
             try:
-                instructor_id = int(instructor_id)
+                instructor_id = int(
+                    instructor_id
+                )
             except (TypeError, ValueError):
-                return Response(
-                    {'error': 'El instructor enviado no es válido.'},
-                    status=status.HTTP_400_BAD_REQUEST
+                return error(
+                    'El instructor enviado no es válido.'
                 )
 
-            if not Instructor.objects.filter(id=instructor_id).exists():
-                return Response(
-                    {'error': 'El instructor seleccionado no existe.'},
-                    status=status.HTTP_404_NOT_FOUND
+            if not Instructor.objects.filter(
+                id=instructor_id,
+                activo=True,
+            ).exists():
+                return error(
+                    (
+                        'El instructor seleccionado no existe '
+                        'o se encuentra desactivado.'
+                    ),
+                    status.HTTP_400_BAD_REQUEST,
                 )
 
-        if aplicar_a == 'pendientes' and not instance.es_examen:
-            clases = Calendario.objects.filter(
-                matricula=instance.matricula,
-                estado__in=[
-                    'pendiente',
-                    'reprogramada',
-                ],
-                es_examen=False,
-            ).order_by(
-                'fecha',
-                'hora_inicio',
-                'id',
-            )
-        else:
-            clases = Calendario.objects.filter(
-                id=instance.id
+        fecha_obj = None
+
+        if nueva_fecha not in [None, '']:
+            fecha_obj = parse_date(
+                str(nueva_fecha)
             )
 
-        if not clases.exists():
-            return Response(
-                {'error': 'No hay clases disponibles para actualizar.'},
-                status=status.HTTP_400_BAD_REQUEST
+            if not fecha_obj:
+                return error(
+                    'La fecha debe tener formato '
+                    'YYYY-MM-DD.'
+                )
+
+        def convertir_hora(valor):
+            if valor in [None, '']:
+                return None
+
+            valor = str(valor).strip()
+
+            formato = (
+                '%H:%M'
+                if len(valor) == 5
+                else '%H:%M:%S'
             )
 
-        for clase in clases:
-            instructor_destino_id = instructor_id or clase.instructor_id
+            try:
+                return datetime.strptime(
+                    valor,
+                    formato
+                ).time()
+            except ValueError:
+                return None
 
-            if not instructor_destino_id:
-                return Response(
-                    {'error': 'La clase no tiene instructor asignado.'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+        hora_inicio_obj = convertir_hora(
+            nueva_hora_inicio
+        )
+        hora_fin_obj = convertir_hora(
+            nueva_hora_fin
+        )
 
-            if aplicar_a == 'pendientes' and not instance.es_examen:
-                fecha_destino = clase.fecha
-            else:
-                fecha_destino = fecha_obj or clase.fecha
+        envio_alguna_hora = (
+            nueva_hora_inicio not in [None, '']
+            or nueva_hora_fin not in [None, '']
+        )
 
-            hora_inicio_destino = hora_inicio_obj or clase.hora_inicio
-            hora_fin_destino = hora_fin_obj or clase.hora_fin
+        if (
+            envio_alguna_hora
+            and (
+                hora_inicio_obj is None
+                or hora_fin_obj is None
+            )
+        ):
+            return error(
+                'Debe enviar hora de inicio y hora fin '
+                'con formato HH:MM.'
+            )
 
-            choque = Calendario.objects.filter(
-                instructor_id=instructor_destino_id,
-                fecha=fecha_destino,
-                hora_inicio__lt=hora_fin_destino,
-                hora_fin__gt=hora_inicio_destino,
-                estado__in=['pendiente', 'reprogramada', 'inasistencia']
-            ).exclude(
-                id=clase.id
-            ).exists()
-
-            if choque:
-                return Response(
-                    {
-                        'error': (
-                            f'El instructor ya tiene ocupado el horario '
-                            f'{hora_inicio_destino.strftime("%H:%M")} - {hora_fin_destino.strftime("%H:%M")} '
-                            f'el día {fecha_destino}.'
-                        )
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+        if (
+            envio_alguna_hora
+            and hora_fin_obj <= hora_inicio_obj
+        ):
+            return error(
+                'La hora fin debe ser mayor '
+                'que la hora inicio.'
+            )
 
         with transaction.atomic():
-            for clase in clases:
-                campos_actualizados = []
+            Matricula.objects.select_for_update().get(
+                id=instance.matricula_id
+            )
 
-                if instructor_id:
-                    clase.instructor_id = instructor_id
-                    campos_actualizados.append(
-                        'instructor'
+            ids_instructores = set(
+                Calendario.objects.filter(
+                    matricula_id=(
+                        instance.matricula_id
+                    ),
+                    es_examen=False,
+                    estado='pendiente',
+                    numero_clase__gte=(
+                        instance.numero_clase
+                    ),
+                ).values_list(
+                    'instructor_id',
+                    flat=True
+                )
+            )
+
+            if instructor_id is not None:
+                ids_instructores.add(
+                    instructor_id
+                )
+
+            list(
+                Instructor.objects
+                .select_for_update()
+                .filter(
+                    id__in=sorted(
+                        ids_instructores
                     )
+                )
+                .order_by('id')
+            )
 
-                if aplicar_a != 'pendientes' or instance.es_examen:
-                    if fecha_obj:
-                        clase.fecha = fecha_obj
-                        campos_actualizados.append(
-                            'fecha'
-                        )
+            instance = (
+                Calendario.objects
+                .select_for_update()
+                .select_related('matricula')
+                .get(id=instance.id)
+            )
 
-                if cambia_hora:
-                    clase.hora_inicio = hora_inicio_obj
-                    clase.hora_fin = hora_fin_obj
+            if instance.es_examen:
+                return error(
+                    'Los exámenes policiales no pueden '
+                    'modificarse desde la edición normal.'
+                )
 
-                    campos_actualizados.extend([
+            if instance.estado != 'pendiente':
+                return error(
+                    'Solo se pueden modificar encuentros '
+                    'que todavía estén pendientes.'
+                )
+
+            if Asistencia.objects.filter(
+                As_calendario=instance
+            ).exists():
+                return error(
+                    'Este encuentro ya tiene una '
+                    'asistencia registrada.'
+                )
+
+            cambia_fecha = (
+                fecha_obj is not None
+                and fecha_obj != instance.fecha
+            )
+
+            incluir_pendientes = (
+                aplicar_a == 'pendientes'
+                or cambia_fecha
+            )
+
+            if incluir_pendientes:
+                clases = list(
+                    Calendario.objects
+                    .select_for_update()
+                    .filter(
+                        matricula=instance.matricula,
+                        es_examen=False,
+                        estado='pendiente',
+                        numero_clase__gte=(
+                            instance.numero_clase
+                        ),
+                    )
+                    .order_by(
+                        'numero_clase',
+                        'fecha',
                         'hora_inicio',
-                        'hora_fin',
-                    ])
+                        'id',
+                    )
+                )
+            else:
+                clases = [instance]
 
-                if campos_actualizados:
-                    clase.save(
-                        update_fields=list(
-                            dict.fromkeys(campos_actualizados)
-                        )
+            if not clases:
+                return error(
+                    'No hay encuentros pendientes disponibles para actualizar.'
+                )
+
+            ids_clases = [
+                clase.id
+                for clase in clases
+            ]
+
+            if Asistencia.objects.filter(
+                As_calendario_id__in=ids_clases
+            ).exists():
+                return error(
+                    'Uno de los encuentros pendientes '
+                    'ya tiene asistencia registrada.'
+                )
+
+            fechas_destino = {}
+
+            if cambia_fecha:
+                fechas_originales = [
+                    clase.fecha
+                    for clase in clases
+                ]
+
+                nuevas_fechas = [
+                    fecha_obj,
+                    *fechas_originales[:-1],
+                ]
+
+                fechas_destino = {
+                    clase.id: destino
+                    for clase, destino in zip(
+                        clases,
+                        nuevas_fechas
+                    )
+                }
+
+            planes = []
+
+            for clase in clases:
+                aplicar_datos = (
+                    aplicar_a == 'pendientes'
+                    or clase.id == instance.id
+                )
+
+                instructor_destino = (
+                    instructor_id
+                    if (
+                        aplicar_datos
+                        and instructor_id is not None
+                    )
+                    else clase.instructor_id
+                )
+
+                if not instructor_destino:
+                    return error(
+                        'Uno de los encuentros no tiene '
+                        'instructor asignado.'
                     )
 
-            # Cuando se cambia oficialmente al estudiante de instructor, tambien se actualiza el instructor usado por el informe de induccion.
+                planes.append({
+                    'clase': clase,
+                    'instructor_id': (
+                        instructor_destino
+                    ),
+                    'fecha': fechas_destino.get(
+                        clase.id,
+                        clase.fecha
+                    ),
+                    'hora_inicio': (
+                        hora_inicio_obj
+                        if (
+                            aplicar_datos
+                            and envio_alguna_hora
+                        )
+                        else clase.hora_inicio
+                    ),
+                    'hora_fin': (
+                        hora_fin_obj
+                        if (
+                            aplicar_datos
+                            and envio_alguna_hora
+                        )
+                        else clase.hora_fin
+                    ),
+                })
+
+            # Evita choques entre los propios
+            # encuentros que serán desplazados.
+            for indice, plan in enumerate(planes):
+                for otro in planes[indice + 1:]:
+                    chocan_entre_si = (
+                        plan['instructor_id']
+                        == otro['instructor_id']
+                        and plan['fecha']
+                        == otro['fecha']
+                        and plan['hora_inicio']
+                        < otro['hora_fin']
+                        and plan['hora_fin']
+                        > otro['hora_inicio']
+                    )
+
+                    if chocan_entre_si:
+                        return error(
+                            'Los cambios producirían dos '
+                            'encuentros en el mismo horario '
+                            f'el día {plan["fecha"]}.'
+                        )
+
+            # Comprueba choques con otras matrículas
+            # y con exámenes policiales.
+            for plan in planes:
+                choque = (
+                    Calendario.objects
+                    .select_for_update()
+                    .filter(
+                        instructor_id=(
+                            plan['instructor_id']
+                        ),
+                        fecha=plan['fecha'],
+                        hora_inicio__lt=(
+                            plan['hora_fin']
+                        ),
+                        hora_fin__gt=(
+                            plan['hora_inicio']
+                        ),
+                    )
+                    .exclude(
+                        id__in=ids_clases
+                    )
+                    .exclude(
+                        estado='cancelada'
+                    )
+                    .exists()
+                )
+
+                if choque:
+                    inicio = (
+                        plan['hora_inicio']
+                        .strftime('%H:%M')
+                    )
+                    fin = (
+                        plan['hora_fin']
+                        .strftime('%H:%M')
+                    )
+
+                    return error(
+                        'El instructor ya tiene ocupado '
+                        f'el horario {inicio} - {fin} '
+                        f'el día {plan["fecha"]}.'
+                    )
+
+            clases_actualizadas = 0
+            fechas_desplazadas = 0
+
+            for plan in planes:
+                clase = plan['clase']
+                campos = []
+
+                if (
+                    clase.instructor_id
+                    != plan['instructor_id']
+                ):
+                    clase.instructor_id = (
+                        plan['instructor_id']
+                    )
+                    campos.append('instructor')
+
+                if clase.fecha != plan['fecha']:
+                    clase.fecha = plan['fecha']
+                    campos.append('fecha')
+                    fechas_desplazadas += 1
+
+                if (
+                    clase.hora_inicio
+                    != plan['hora_inicio']
+                ):
+                    clase.hora_inicio = (
+                        plan['hora_inicio']
+                    )
+                    campos.append('hora_inicio')
+
+                if (
+                    clase.hora_fin
+                    != plan['hora_fin']
+                ):
+                    clase.hora_fin = (
+                        plan['hora_fin']
+                    )
+                    campos.append('hora_fin')
+
+                if campos:
+                    clase.save(
+                        update_fields=campos
+                    )
+                    clases_actualizadas += 1
+
+            # Conserva el instructor histórico utilizado
+            # por el reporte de inducción.
             if (
-                instructor_id
+                instructor_id is not None
                 and aplicar_a == 'pendientes'
-                and not instance.es_examen
             ):
                 Notas.objects.filter(
                     matricula=instance.matricula,
@@ -2076,18 +3073,21 @@ class CalendarioViewSet(viewsets.ModelViewSet):
 
         instance.refresh_from_db()
 
-        serializer = self.get_serializer(
-            instance
-        )
-
         return Response({
             'message': (
-                'La clase y el instructor fueron '
-                'actualizados correctamente.'
+                'Calendario actualizado correctamente.'
             ),
-            'calendario': serializer.data,
+            'clases_actualizadas': (
+                clases_actualizadas
+            ),
+            'fechas_desplazadas': (
+                fechas_desplazadas
+            ),
+            'calendario': self.get_serializer(
+                instance
+            ).data,
         })
-    
+
     @action(detail=False, methods=['post'], url_path='crear-examen')
     def crear_examen(self, request):
         user = request.user
@@ -2095,10 +3095,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
         if not es_instructor(user):
             return Response(
                 {
-                    'error': (
-                        'Solo un instructor puede programar '
-                        'un examen policial.'
-                    )
+                    'error': 'Solo un instructor puede programar un examen policial.'
                 },
                 status=status.HTTP_403_FORBIDDEN
             )
@@ -2118,8 +3115,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': (
-                        'Debe seleccionar la fecha '
-                        'del examen policial.'
+                        'Debe seleccionar la fecha del examen policial.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -2131,8 +3127,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': (
-                        'La fecha del examen no tiene '
-                        'un formato válido.'
+                        'La fecha del examen no tiene un formato válido.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -2168,8 +3163,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': (
-                        'Los exámenes policiales no pueden '
-                        'programarse los domingos.'
+                        'Los exámenes policiales no pueden programarse los domingos.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -2210,8 +3204,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': (
-                        'No se puede programar el examen porque '
-                        'la matrícula no está aprobada.'
+                        'No se puede programar el examen porque la matrícula no está aprobada.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -2239,8 +3232,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': (
-                        'El tipo de curso de la matrícula '
-                        'no es válido.'
+                        'El tipo de curso de la matrícula no es válido.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -2253,8 +3245,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': (
-                        'Esta matrícula no incluye '
-                        'acompañamiento al examen policial.'
+                        'Esta matrícula no incluye acompañamiento al examen policial.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -2269,9 +3260,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': (
-                        'No se puede programar el examen '
-                        'porque el estudiante no tiene '
-                        'un usuario activo.'
+                        'No se puede programar el examen porque el estudiante no tiene un usuario activo.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -2288,8 +3277,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': (
-                        'El estudiante no tiene clases '
-                        'regulares asignadas.'
+                        'El estudiante no tiene clases regulares asignadas.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -2305,8 +3293,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': (
-                        'Este estudiante no está asignado '
-                        'al instructor actual.'
+                        'Este estudiante no está asignado al instructor actual.'
                     )
                 },
                 status=status.HTTP_403_FORBIDDEN
@@ -2320,22 +3307,21 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': (
-                        'El estudiante todavía no ha '
-                        'completado todas sus clases.'
+                        'El estudiante todavía no ha completado todas sus clases.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        validacion_plan = validar_plan_completado_para_examen(
+        if not matricula_tiene_notas_teorica_y_practica(
             matricula
-        )
-
-        if not validacion_plan['completo']:
+        ):
             return Response(
                 {
-                    'error': validacion_plan['error'],
-                    'progreso': validacion_plan['progreso'],
+                    'error': (
+                        'El estudiante necesita tener registrada '
+                        'la nota teórica y la nota práctica antes de programar el examen policial.'
+                    )
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
@@ -2349,14 +3335,12 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             examenes_del_estudiante.count()
         )
 
-        # Los exámenes cancelados también cuentan
-        # dentro de las tres asignaciones.
+        # Los exámenes cancelados también cuentan dentro de las tres asignaciones.
         if total_examenes_asignados >= 3:
             return Response(
                 {
                     'error': (
-                        'El estudiante ya alcanzó el máximo '
-                        'de 3 asignaciones para examen policial.'
+                        'El estudiante ya alcanzó el máximo de 3 asignaciones para examen policial.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -2372,113 +3356,273 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     'error': (
-                        'El estudiante ya tiene un examen '
-                        'policial pendiente o completado.'
+                        'El estudiante ya tiene un examen policial pendiente o completado.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Los exámenes pueden compartir horario.
-        # Solo se revisa choque con clases normales.
-        choque_clase_regular = Calendario.objects.filter(
-            instructor=instructor,
-            fecha=fecha_examen,
-            es_examen=False,
-            hora_inicio__lt=hora_fin,
-            hora_fin__gt=hora_inicio,
-        ).exclude(
-            estado='cancelada'
-        ).exists()
+        clases_reprogramadas = []
+        nuevas_clases_recuperacion = []
 
-        if choque_clase_regular:
+        with transaction.atomic():
+            matricula = (
+                Matricula.objects
+                .select_for_update()
+                .select_related('estudiante')
+                .get(id=matricula.id)
+            )
+
+            instructor = (
+                Instructor.objects
+                .select_for_update()
+                .get(id=instructor.id)
+            )
+
+            examenes_del_estudiante = (
+                Calendario.objects
+                .filter(
+                    matricula=matricula,
+                    es_examen=True,
+                )
+            )
+
+            total_examenes_asignados = (
+                examenes_del_estudiante.count()
+            )
+
+            if total_examenes_asignados >= 3:
+                return Response(
+                    {
+                        'error': (
+                            'El estudiante ya alcanzó el máximo de 3 asignaciones para examen policial.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if (
+                examenes_del_estudiante
+                .exclude(estado='cancelada')
+                .exists()
+            ):
+                return Response(
+                    {
+                        'error': (
+                            'El estudiante ya tiene un examen policial pendiente o completado.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            examenes_instructor_dia = (
+                Calendario.objects
+                .filter(
+                    instructor=instructor,
+                    fecha=fecha_examen,
+                    es_examen=True,
+                )
+                .exclude(
+                    estado='cancelada'
+                )
+                .count()
+            )
+
+            if examenes_instructor_dia >= 10:
+                return Response(
+                    {
+                        'error': (
+                            'El instructor ya tiene asignados 10 estudiantes para examen policial en esa fecha.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            clases_en_conflicto = list(
+                Calendario.objects
+                .select_for_update()
+                .filter(
+                    instructor=instructor,
+                    fecha=fecha_examen,
+                    es_examen=False,
+                    hora_inicio__lt=hora_fin,
+                    hora_fin__gt=hora_inicio,
+                )
+                .exclude(
+                    estado='cancelada'
+                )
+                .order_by(
+                    'hora_inicio',
+                    'id',
+                )
+            )
+
+            clases_no_reprogramables = [
+                clase
+                for clase in clases_en_conflicto
+                if clase.estado != 'pendiente'
+            ]
+
+            if clases_no_reprogramables:
+                return Response(
+                    {
+                        'error': (
+                            'El instructor tiene una clase que ya fue procesada en ese horario '
+                            'y no puede reprogramarse automáticamente.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            for clase in clases_en_conflicto:
+                Asistencia.objects.update_or_create(
+                    As_calendario=clase,
+                    defaults={
+                        'As_estudiante': (
+                            clase.matricula.estudiante
+                        ),
+                        'estado': 'justificado',
+                        'observacion': (
+                            'Encuentro justificado '
+                            'automáticamente porque el '
+                            'instructor fue asignado a un '
+                            'examen policial en el mismo horario.'
+                        ),
+                        'justificado_por_admin': True,
+                        'km_inicial': None,
+                        'km_final': None,
+                    },
+                )
+
+                clase.estado = 'reprogramada'
+                clase.save(
+                    update_fields=['estado']
+                )
+
+                nueva_clase = crear_clase_recuperacion(
+                    clase
+                )
+
+                clases_reprogramadas.append(
+                    clase.id
+                )
+
+                nuevas_clases_recuperacion.append(
+                    nueva_clase.id
+                )
+
+            examen = Calendario.objects.create(
+                matricula=matricula,
+                instructor=instructor,
+                fecha=fecha_examen,
+                hora_inicio=hora_inicio,
+                hora_fin=hora_fin,
+                numero_clase=99,
+                estado='pendiente',
+                es_examen=True,
+            )
+
             return Response(
                 {
-                    'error': (
-                        'El instructor tiene una clase regular '
-                        f'el {fecha_examen} entre '
-                        f'{hora_inicio.strftime("%H:%M")} y '
-                        f'{hora_fin.strftime("%H:%M")}.'
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        examenes_instructor_dia = Calendario.objects.filter(
-            instructor=instructor,
-            fecha=fecha_examen,
-            es_examen=True,
-        ).exclude(
-            estado='cancelada'
-        ).count()
-
-        if examenes_instructor_dia >= 10:
-            return Response(
-                {
-                    'error': (
-                        'El instructor ya tiene asignados '
-                        '10 estudiantes para examen policial '
-                        'en esa fecha.'
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        examen = Calendario.objects.create(
-            matricula=matricula,
-            instructor=instructor,
-            fecha=fecha_examen,
-            hora_inicio=hora_inicio,
-            hora_fin=hora_fin,
-            numero_clase=99,
-            estado='pendiente',
-            es_examen=True,
-        )
-
-        return Response(
-            {
-                'message': (
-                    'Examen policial programado correctamente.'
-                ),
-                'fecha': fecha_examen,
-                'horario_examen': horario_examen,
-                'hora_inicio': hora_inicio.strftime('%H:%M'),
-                'hora_fin': hora_fin.strftime('%H:%M'),
-                'cupo_instructor': {
-                    'asignados': examenes_instructor_dia + 1,
-                    'maximo': 10,
-                },
-                'asignaciones_estudiante': {
-                    'utilizadas': (
-                        total_examenes_asignados + 1
+                    'message': (
+                        'Examen policial programado correctamente.'
+                        if not clases_reprogramadas
+                        else (
+                            'Examen policial programado correctamente. '
+                            f'Se justificaron y reprogramaron '
+                            f'{len(clases_reprogramadas)} '
+                            f'encuentro(s) regular(es).'
+                        )
                     ),
-                    'maximo': 3,
+                    'fecha': fecha_examen,
+                    'horario_examen': horario_examen,
+                    'hora_inicio': hora_inicio.strftime(
+                        '%H:%M'
+                    ),
+                    'hora_fin': hora_fin.strftime(
+                        '%H:%M'
+                    ),
+                    'cupo_instructor': {
+                        'asignados': (
+                            examenes_instructor_dia + 1
+                        ),
+                        'maximo': 10,
+                    },
+                    'asignaciones_estudiante': {
+                        'utilizadas': (
+                            total_examenes_asignados + 1
+                        ),
+                        'maximo': 3,
+                    },
+                    'reprogramacion_automatica': {
+                        'cantidad': len(
+                            clases_reprogramadas
+                        ),
+                        'clases_justificadas': (
+                            clases_reprogramadas
+                        ),
+                        'nuevas_clases': (
+                            nuevas_clases_recuperacion
+                        ),
+                    },
+                    'examen': CalendarioSerializer(
+                        examen
+                    ).data,
                 },
-                'examen': CalendarioSerializer(
-                    examen
-                ).data,
-            },
-            status=status.HTTP_201_CREATED
-        )
+                status=status.HTTP_201_CREATED
+            )
 
-
-class AsistenciaViewSet(viewsets.ModelViewSet):
+class AsistenciaViewSet(viewsets.GenericViewSet):
     queryset = Asistencia.objects.select_related(
-    'As_estudiante',
-    'As_calendario',
-    'As_calendario__matricula',
-    'As_calendario__matricula__estudiante',
-    'As_calendario__instructor',
+        'As_estudiante',
+        'As_calendario',
+        'As_calendario__matricula',
+        'As_calendario__matricula__estudiante',
+        'As_calendario__instructor',
     ).all()
+
     serializer_class = AsistenciaSerializer
     permission_classes = [IsAuthenticated]
 
+    http_method_names = [
+        'get',
+        'post',
+        'head',
+        'options',
+    ]
+
+    def get_queryset(self):
+        """
+        Limita las asistencias según el usuario autenticado.
+        Administración y Secretaría pueden consultar todas.
+        El instructor solamente puede consultar sus clases.
+        El estudiante solamente puede consultar sus asistencias.
+        """
+        queryset = super().get_queryset()
+        user = self.request.user
+
+        if es_admin(user):
+            return queryset
+
+        if es_instructor(user):
+            return queryset.filter(
+                As_calendario__instructor_id=user.instructor_id
+            )
+
+        if es_estudiante(user):
+            return queryset.filter(
+                As_estudiante_id=user.estudiante_id
+            )
+
+        return queryset.none()
 
     def list(self, request, *args, **kwargs):
         user = request.user
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ''
         hoy = timezone.localdate()
 
+        es_admin_asistencia = es_admin(user)
+        es_usuario_instructor = es_instructor(user)
+        es_usuario_estudiante = es_estudiante(user)
         fecha_param = request.query_params.get('fecha')
         fecha_inicio_param = request.query_params.get('fecha_inicio')
         fecha_fin_param = request.query_params.get('fecha_fin')
@@ -2519,7 +3663,7 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         clases_base = Calendario.objects.select_related(
             'matricula',
             'matricula__estudiante',
@@ -2534,25 +3678,19 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'hora_inicio'
         )
 
-        if rol == 'instructor':
-            if not user.instructor_id:
-                return Response([])
-
+        if es_usuario_instructor:
             clases_base = clases_base.filter(
                 instructor_id=user.instructor_id
             )
 
-        elif rol == 'estudiante':
-            if not user.estudiante_id:
-                return Response([])
-
+        elif es_usuario_estudiante:
             clases_base = clases_base.filter(
                 matricula__estudiante_id=user.estudiante_id
             )
-        
-        elif rol not in ['admin', 'administrador'] and not user.is_staff and not user.is_superuser:
+
+        elif not es_admin_asistencia:
             return Response([])
-        
+
         clases = clases_base.filter(
             fecha__gte=fecha_inicio,
             fecha__lte=fecha_fin
@@ -2580,27 +3718,22 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
         for clase in clases:
             estudiante = clase.matricula.estudiante
             matricula_id = clase.matricula_id
+            instructor = clase.instructor
+
+            instructor_nombre = 'No asignado'
+
+            if instructor:
+                instructor_nombre = (
+                    f"{instructor.nombre or ''} "
+                    f"{instructor.apellido or ''}"
+                ).strip()
+
+                if not instructor_nombre:
+                    instructor_nombre = (
+                        f'Instructor {instructor.id}'
+                    )
 
             if matricula_id not in resultado:
-                instructor = clase.instructor
-
-                instructor_nombre = "No asignado"
-
-                if instructor:
-                    instructor_nombre = (
-                        f"{instructor.nombre or ''} {instructor.apellido or ''}"
-                    ).strip()
-
-                    if not instructor_nombre:
-                        usuario = instructor.usuarios.first()
-                        if usuario:
-                            instructor_nombre = (
-                                f"{usuario.first_name or ''} {usuario.last_name or ''}"
-                            ).strip() or usuario.username
-
-                    if not instructor_nombre:
-                        instructor_nombre = f"Instructor {instructor.id}"
-
                 resultado[matricula_id] = {
                     'matricula_id': matricula_id,
                     'nombre': f'{estudiante.nombre} {estudiante.apellido}',
@@ -2623,17 +3756,11 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 estado = 'pendiente'
                 asistencia_id = None
                 justificado_por_admin = False
-            
+
             en_rango = fecha_inicio <= clase.fecha <= fecha_fin
             es_hoy = clase.fecha == hoy
             es_pasado = clase.fecha < hoy
             es_futuro = clase.fecha > hoy
-
-            es_admin_asistencia = (
-                rol in ['admin', 'administrador']
-                or user.is_staff
-                or user.is_superuser
-            )
 
             puede_marcar = (
                 asistencia is None
@@ -2644,14 +3771,14 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                         and clase.fecha <= hoy
                     )
                     or (
-                        rol == 'instructor'
+                        es_usuario_instructor
                         and en_rango
                         and es_hoy
-                        and clase.instructor_id == getattr(user, 'instructor_id', None)
+                        and clase.instructor_id == user.instructor_id
                     )
                 )
             )
-              
+
             resultado[matricula_id]['asistencias'][str(clase.numero_clase)] = {
                 'id': clase.id,
                 'asistencia_id': asistencia_id,
@@ -2663,24 +3790,19 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 'justificado_por_admin': justificado_por_admin,
                 'instructor_id': clase.instructor.id if clase.instructor else None,
                 'instructor_nombre': instructor_nombre,
-
                 'km_inicial': asistencia.km_inicial if asistencia else None,
                 'km_final': asistencia.km_final if asistencia else None,
                 'km_recorridos': asistencia.km_recorridos if asistencia else 0,
-
                 'en_rango': en_rango,
                 'es_hoy': es_hoy,
                 'es_pasado': es_pasado,
                 'es_futuro': es_futuro,
                 'puede_marcar': puede_marcar,
                 'bloqueado': not puede_marcar,
-
             }
-
 
         for item in resultado.values():
             asistencias_estudiante = item['asistencias'].values()
-
             total_clases_validas = 0
             total_asistidas = 0
 
@@ -2700,27 +3822,18 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 if total_clases_validas > 0
                 else 0
             )
-
         return Response(list(resultado.values()))
-    
+
     @action(detail=False, methods=['post'], url_path='marcar')
     def marcar(self, request):
         clase_id = request.data.get('clase_id')
         estado = request.data.get('estado')
         observacion = request.data.get('observacion', '')
         km_inicial = request.data.get('km_inicial')
-        km_final = request.data.get('km_final')
-
+        km_final = None
         user = request.user
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ''
-
-        es_admin_asistencia = (
-            rol in ['admin', 'administrador']
-            or user.is_staff
-            or user.is_superuser
-        )
-
-        es_usuario_instructor = rol == 'instructor'
+        es_admin_asistencia = es_admin(user)
+        es_usuario_instructor = es_instructor(user)
 
         if not es_admin_asistencia and not es_usuario_instructor:
             return Response(
@@ -2746,18 +3859,25 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
 
+        if clase.es_examen:
+            return Response(
+                {
+                    'error': (
+                        'Los exámenes policiales no se pueden registrar como asistencia normal. '
+                        'Debe utilizarse la opción de resultado del examen policial.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         if es_usuario_instructor and not es_admin_asistencia:
-            instructor_usuario = getattr(user, 'instructor', None)
-
-            if not instructor_usuario:
+            if clase.instructor_id != user.instructor_id:
                 return Response(
-                    {'error': 'El usuario actual no tiene instructor asignado.'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-
-            if clase.instructor_id != instructor_usuario.id:
-                return Response(
-                    {'error': 'No puedes marcar asistencia de una clase que no te pertenece.'},
+                    {
+                        'error': (
+                            'No puedes marcar asistencia de una clase que no te pertenece.'
+                        )
+                    },
                     status=status.HTTP_403_FORBIDDEN
                 )
 
@@ -2769,10 +3889,13 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 )
 
             try:
-                km_inicial = Decimal(str(km_inicial))
-            except Exception:
+                km_inicial = validar_kilometraje(
+                    km_inicial,
+                    'km inicial'
+                )
+            except ValueError as error:
                 return Response(
-                    {'error': 'El km inicial debe ser numérico.'},
+                    {'error': str(error)},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -2823,7 +3946,6 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             clase.estado = 'inasistencia'
 
         clase.save(update_fields=['estado'])
-
         serializer = self.get_serializer(asistencia)
 
         return Response({
@@ -2831,22 +3953,14 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'message': 'Asistencia registrada correctamente.',
             'data': serializer.data
         })
-    
+
     @action(detail=False, methods=['post'], url_path='finalizar-km')
     def finalizar_km(self, request):
         asistencia_id = request.data.get('asistencia_id')
         km_final = request.data.get('km_final')
-
         user = request.user
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ''
-
-        es_admin_asistencia = (
-            rol in ['admin', 'administrador']
-            or user.is_staff
-            or user.is_superuser
-        )
-
-        es_usuario_instructor = rol == 'instructor'
+        es_admin_asistencia = es_admin(user)
+        es_usuario_instructor = es_instructor(user)
 
         if not es_admin_asistencia and not es_usuario_instructor:
             return Response(
@@ -2872,17 +3986,16 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             )
 
         if es_usuario_instructor and not es_admin_asistencia:
-            instructor_usuario = getattr(user, 'instructor', None)
-
-            if not instructor_usuario:
+            if (
+                asistencia.As_calendario.instructor_id
+                != user.instructor_id
+            ):
                 return Response(
-                    {'error': 'El usuario actual no tiene instructor asignado.'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-
-            if asistencia.As_calendario.instructor_id != instructor_usuario.id:
-                return Response(
-                    {'error': 'No puedes finalizar kilometraje de una clase que no te pertenece.'},
+                    {
+                        'error': (
+                            'No puedes finalizar kilometraje de una clase que no te pertenece.'
+                        )
+                    },
                     status=status.HTTP_403_FORBIDDEN
                 )
 
@@ -2899,16 +4012,19 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             )
 
         try:
-            km_final = Decimal(str(km_final))
-        except Exception:
+            km_final = validar_kilometraje(
+                km_final,
+                'km final'
+            )
+        except ValueError as error:
             return Response(
-                {'error': 'El km final debe ser numérico.'},
+                {'error': str(error)},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         if asistencia.km_inicial is None:
-            return Response(
-                {'error': 'La asistencia no tiene km inicial.'},
+                return Response(
+                    {'error': 'La asistencia no tiene km inicial.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -2919,7 +4035,12 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             )
 
         asistencia.km_final = km_final
-        asistencia.save(update_fields=['km_final'])
+        asistencia.save(
+            update_fields=[
+                'km_final',
+                'km_recorridos',
+            ]
+        )
 
         serializer = self.get_serializer(asistencia)
 
@@ -2928,23 +4049,15 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'message': 'Kilometraje final registrado.',
             'data': serializer.data
         })
-    
+
     @action(detail=False, methods=['post'], url_path='editar-km')
     def editar_km(self, request):
         asistencia_id = request.data.get('asistencia_id')
         km_inicial = request.data.get('km_inicial')
         km_final = request.data.get('km_final')
-
         user = request.user
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ''
-
-        es_admin_asistencia = (
-            rol in ['admin', 'administrador']
-            or user.is_staff
-            or user.is_superuser
-        )
-
-        es_usuario_instructor = rol == 'instructor'
+        es_admin_asistencia = es_admin(user)
+        es_usuario_instructor = es_instructor(user)
 
         if not es_admin_asistencia and not es_usuario_instructor:
             return Response(
@@ -2970,17 +4083,17 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             )
 
         if es_usuario_instructor and not es_admin_asistencia:
-            instructor_usuario = getattr(user, 'instructor', None)
-
-            if not instructor_usuario:
+            if (
+                asistencia.As_calendario.instructor_id
+                != user.instructor_id
+            ):
                 return Response(
-                    {'error': 'El usuario actual no tiene instructor asignado.'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-
-            if asistencia.As_calendario.instructor_id != instructor_usuario.id:
-                return Response(
-                    {'error': 'No puedes editar kilometraje de una clase que no te pertenece.'},
+                    {
+                        'error': (
+                            'No puedes editar kilometraje de una '
+                            'clase que no te pertenece.'
+                        )
+                    },
                     status=status.HTTP_403_FORBIDDEN
                 )
 
@@ -2992,15 +4105,22 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
 
         if km_inicial in [None, '']:
             return Response(
-                {'error': 'Debe ingresar el km inicial.'},
+                {
+                    'error': (
+                        'Debe ingresar el km inicial.'
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         try:
-            km_inicial = Decimal(str(km_inicial))
-        except Exception:
+            km_inicial = validar_kilometraje(
+                km_inicial,
+                'km inicial'
+            )
+        except ValueError as error:
             return Response(
-                {'error': 'El km inicial debe ser numérico.'},
+                {'error': str(error)},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -3008,22 +4128,35 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             km_final = None
         else:
             try:
-                km_final = Decimal(str(km_final))
-            except Exception:
+                km_final = validar_kilometraje(
+                    km_final,
+                    'km final'
+                )
+            except ValueError as error:
                 return Response(
-                    {'error': 'El km final debe ser numérico.'},
+                    {'error': str(error)},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
             if km_final < km_inicial:
                 return Response(
-                    {'error': 'El km final no puede ser menor al inicial.'},
+                    {
+                        'error': (
+                            'El km final no puede ser menor al inicial.'
+                        )
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
         asistencia.km_inicial = km_inicial
         asistencia.km_final = km_final
-        asistencia.save(update_fields=['km_inicial', 'km_final'])
+        asistencia.save(
+            update_fields=[
+                'km_inicial',
+                'km_final',
+                'km_recorridos',
+            ]
+        )
 
         serializer = self.get_serializer(asistencia)
 
@@ -3032,15 +4165,18 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'message': 'Kilometraje editado correctamente.',
             'data': serializer.data
         })
-        
+
     @action(detail=True, methods=['post'], url_path='justificar')
     def justificar(self, request, pk=None):
         user = request.user
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ''
 
-        if rol not in ['admin', 'administrador'] and not user.is_staff and not user.is_superuser:
+        if not es_admin(user):
             return Response(
-                {'error': 'Solo el administrador puede justificar una inasistencia.'},
+                {
+                    'error': (
+                        'Solo Administración o Secretaría pueden justificar una inasistencia.'
+                    )
+                },
                 status=status.HTTP_403_FORBIDDEN
             )
 
@@ -3052,19 +4188,30 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        observacion = request.data.get('observacion', '')
+        observacion = str(
+            request.data.get('observacion') or ''
+        ).strip()
 
         with transaction.atomic():
             asistencia.estado = 'justificado'
             asistencia.justificado_por_admin = True
 
-            asistencia.save(update_fields=['estado', 'justificado_por_admin'])
+            campos_actualizados = [
+                'estado',
+                'justificado_por_admin',
+            ]
+
+            if observacion:
+                asistencia.observacion = observacion
+                campos_actualizados.append('observacion')
+
+            asistencia.save(
+                update_fields=campos_actualizados
+            )
 
             clase_faltada = asistencia.As_calendario
-
             clase_faltada.estado = 'reprogramada'
             clase_faltada.save(update_fields=['estado'])
-
             nueva_clase = self.reprogramar_clases_por_justificacion(clase_faltada)
 
         serializer = self.get_serializer(asistencia)
@@ -3075,115 +4222,114 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'data': serializer.data,
             'nueva_clase_id': nueva_clase.id if nueva_clase else None,
         })
-        
 
-    def reprogramar_clases_por_justificacion(self, clase_faltada):
-        matricula = clase_faltada.matricula
-        es_extraordinario = str(matricula.modalidad).lower() == 'extraordinario'
-
-        def siguiente_fecha_valida(fecha_base):
-            nueva_fecha = fecha_base + timedelta(days=1)
-
-            while True:
-                es_fin_semana = nueva_fecha.weekday() >= 5
-
-                if es_extraordinario and es_fin_semana:
-                    return nueva_fecha
-
-                if not es_extraordinario and not es_fin_semana:
-                    return nueva_fecha
-
-                nueva_fecha += timedelta(days=1)
-
-        ultima_clase = Calendario.objects.filter(
-            matricula=matricula,
-            es_examen=False
-        ).order_by(
-            '-numero_clase'
-        ).first()
-
-        ultimo_numero = ultima_clase.numero_clase if ultima_clase else 0
-
-        ultima_fecha = Calendario.objects.filter(
-            matricula=matricula,
-            es_examen=False
-        ).order_by(
-            '-fecha',
-            '-hora_inicio'
-        ).first()
-
-        fecha_base = ultima_fecha.fecha if ultima_fecha else clase_faltada.fecha
-        fecha_recuperacion = siguiente_fecha_valida(fecha_base)
-
-        while Calendario.objects.filter(
-            instructor=clase_faltada.instructor,
-            fecha=fecha_recuperacion,
-            hora_inicio__lt=clase_faltada.hora_fin,
-            hora_fin__gt=clase_faltada.hora_inicio,
-            estado__in=['pendiente', 'reprogramada', 'inasistencia']
-        ).exists():
-            fecha_recuperacion = siguiente_fecha_valida(fecha_recuperacion)
-
-        nueva_clase = Calendario.objects.create(
-            matricula=matricula,
-            instructor=clase_faltada.instructor,
-            fecha=fecha_recuperacion,
-            hora_inicio=clase_faltada.hora_inicio,
-            hora_fin=clase_faltada.hora_fin,
-            numero_clase=ultimo_numero + 1,
-            estado='pendiente',
-            es_examen=False,
+    def reprogramar_clases_por_justificacion(
+        self,
+        clase_faltada,
+    ):
+        return crear_clase_recuperacion(
+            clase_faltada
         )
-
-        return nueva_clase
-
 
     @action(detail=False, methods=['get'], url_path='resumen')
     def resumen(self, request):
-        matriculas = Matricula.objects.select_related(
-            'estudiante',
-            'plan_de_estudio'
-        ).all()
+        if not es_admin(request.user):
+            return Response(
+                {
+                    'error': (
+                        'Solo Administración o Secretaría '
+                        'pueden consultar este resumen.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        matriculas = (
+            Matricula.objects
+            .select_related(
+                'estudiante',
+                'plan_de_estudio',
+            )
+            .annotate(
+                total_clases_resumen=Count(
+                    'clases',
+                    filter=Q(
+                        clases__es_examen=False
+                    ),
+                    distinct=True,
+                ),
+                total_marcadas_resumen=Count(
+                    'clases__asistencia',
+                    filter=(
+                        Q(clases__es_examen=False)
+                        & ~Q(
+                            clases__asistencia__estado=(
+                                'justificado'
+                            )
+                        )
+                    ),
+                    distinct=True,
+                ),
+                presentes_resumen=Count(
+                    'clases__asistencia',
+                    filter=Q(
+                        clases__es_examen=False,
+                        clases__asistencia__estado='asistio',
+                    ),
+                    distinct=True,
+                ),
+            )
+            .order_by('-id')
+        )
 
         resultado = []
 
         for matricula in matriculas:
-            clases = Calendario.objects.filter(
-                matricula=matricula,
-                es_examen=False
-            ).order_by('numero_clase')
-
-            asistencias = Asistencia.objects.filter(
-                As_calendario__matricula=matricula
+            total_marcadas = (
+                matricula.total_marcadas_resumen
             )
 
-            total_marcadas = asistencias.exclude(
-                estado='justificado'
-            ).count()
-
-            presentes = asistencias.filter(
-                estado='asistio'
-            ).count()
+            presentes = (
+                matricula.presentes_resumen
+            )
 
             porcentaje = (
-                round((presentes / total_marcadas) * 100)
+                round(
+                    (
+                        presentes /
+                        total_marcadas
+                    ) * 100
+                )
                 if total_marcadas > 0
                 else 0
             )
 
             resultado.append({
                 'matricula_id': matricula.id,
-                'nombre': matricula.estudiante.nombre,
-                'apellido': matricula.estudiante.apellido,
-                'cedula': matricula.estudiante.cedula,
-                'plan_estudio': matricula.plan_de_estudio.nombre if matricula.plan_de_estudio else '',
-                'tipo_curso': matricula.tipo_curso,
-                'total_clases': clases.count(),
+                'nombre': (
+                    matricula.estudiante.nombre
+                ),
+                'apellido': (
+                    matricula.estudiante.apellido
+                ),
+                'cedula': (
+                    matricula.estudiante.cedula
+                ),
+                'plan_estudio': (
+                    matricula.plan_de_estudio.nombre
+                    if matricula.plan_de_estudio
+                    else ''
+                ),
+                'tipo_curso': (
+                    matricula.tipo_curso
+                ),
+                'total_clases': (
+                    matricula.total_clases_resumen
+                ),
                 'porcentaje': porcentaje,
             })
 
         return Response(resultado)
-    
 
     @action(detail=False, methods=['get'], url_path='resumen-km')
     def resumen_km(self, request):
@@ -3235,7 +4381,6 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                 continue
 
             instructor = calendario.instructor
-
             key = f"{estudiante.id}_{instructor.id}"
 
             if key not in resultado:
@@ -3243,10 +4388,8 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
                     'estudiante_id': estudiante.id,
                     'estudiante_nombre': f"{estudiante.nombre} {estudiante.apellido}",
                     'cedula': estudiante.cedula,
-
                     'instructor_id': instructor.id,
                     'instructor_nombre': f"{instructor.nombre} {instructor.apellido}",
-
                     'total_clases': 0,
                     'total_km': 0,
                     'detalles': []
@@ -3266,12 +4409,22 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             })
 
         return Response(list(resultado.values()))
-    
+
     @action(detail=False, methods=['get'], url_path='resumen-estudiante')
     def resumen_estudiante(self, request):
         user = request.user
 
-        if not hasattr(user, 'estudiante') or not user.estudiante:
+        if not es_estudiante(user):
+            return Response(
+                {
+                    'error': (
+                        'Este resumen pertenece únicamente al estudiante autenticado.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if not user.estudiante_id:
             return Response({
                 'porcentaje': 0,
                 'asistidas': 0,
@@ -3310,7 +4463,6 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
 
         inicio = datetime.combine(date.today(), primera_clase.hora_inicio)
         fin = datetime.combine(date.today(), primera_clase.hora_fin)
-
         horas_por_dia = int((fin - inicio).total_seconds() // 3600)
 
         if horas_por_dia <= 0:
@@ -3347,11 +4499,10 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             'asistidas': asistidas,
             'total': total,
         })
-    
+
     @action(detail=False, methods=['get'], url_path='fechas-disponibles')
     def fechas_disponibles(self, request):
         user = request.user
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ''
 
         clases = Calendario.objects.filter(
             es_examen=False,
@@ -3360,23 +4511,17 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             estado='cancelada'
         )
 
-        if rol == 'instructor':
-            if not user.instructor_id:
-                return Response([])
-
+        if es_instructor(user):
             clases = clases.filter(
                 instructor_id=user.instructor_id
             )
 
-        elif rol == 'estudiante':
-            if not user.estudiante_id:
-                return Response([])
-
+        elif es_estudiante(user):
             clases = clases.filter(
                 matricula__estudiante_id=user.estudiante_id
             )
 
-        elif rol not in ['admin', 'administrador'] and not user.is_staff and not user.is_superuser:
+        elif not es_admin(user):
             return Response([])
 
         fechas = clases.order_by('fecha').values_list(
@@ -3388,7 +4533,7 @@ class AsistenciaViewSet(viewsets.ModelViewSet):
             fecha.isoformat()
             for fecha in fechas
         ])
-    
+
 class NotasViewSet(viewsets.ModelViewSet):
     queryset = Notas.objects.select_related(
         'matricula',
@@ -3396,34 +4541,342 @@ class NotasViewSet(viewsets.ModelViewSet):
         'instructor',
         'plan_de_estudio',
     ).all()
+
     serializer_class = NotasSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = PaginacionOpcional
+    # Se permite consultar y crear. No se permite editar una nota mediante PUT o PATCH.
+    http_method_names = [
+        'get',
+        'post',
+        'head',
+        'options',
+    ]
 
     def get_queryset(self):
+        """
+        Limita las notas según el usuario autenticado.
+        Administración y Secretaría pueden consultar todas.
+        El instructor consulta las notas registradas por él.
+        El estudiante consulta únicamente sus propias notas.
+        """
+
+        queryset = super().get_queryset()
         user = self.request.user
 
-        queryset = Notas.objects.select_related(
-            'matricula',
-            'matricula__estudiante',
-            'instructor',
-            'plan_de_estudio',
-        ).all()
-
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
-
-        if rol in ['admin', 'administrador']:
+        if es_admin(user):
             return queryset
 
-        if rol == 'instructor' and user.instructor_id:
-            return queryset.filter(instructor_id=user.instructor_id)
+        if es_instructor(user):
+            return queryset.filter(
+                instructor_id=user.instructor_id
+            )
 
-        if rol == 'estudiante' and user.estudiante_id:
-            return queryset.filter(matricula__estudiante_id=user.estudiante_id)
-
+        if es_estudiante(user):
+            return queryset.filter(
+                matricula__estudiante_id=user.estudiante_id
+            )
         return queryset.none()
-    
+
+    def obtener_ultima_clase_practica(
+        self,
+        matricula,
+    ):
+        """
+        Obtiene la última clase práctica activa de una matrícula.
+        Las clases correspondientes al examen policial no se
+        consideran para habilitar la nota práctica.
+        Las clases canceladas tampoco se consideran.
+        """
+
+        return (
+            Calendario.objects
+            .select_related('instructor')
+            .filter(
+                matricula=matricula,
+                es_examen=False,
+            )
+            .exclude(
+                estado='cancelada'
+            )
+            .order_by(
+                '-fecha',
+                '-hora_fin',
+                '-id',
+            )
+            .first()
+        )
+
+    @action(detail=False, methods=['get'], url_path='agrupadas')
+    def agrupadas(self, request):
+        """
+        Pagina por matrícula y mantiene juntas sus notas práctica y
+        teórica. La búsqueda, el filtro y el resumen se calculan sobre
+        todos los resultados permitidos para el usuario autenticado.
+        """
+
+        notas_permitidas = self.get_queryset()
+        notas_coincidentes = notas_permitidas
+
+        buscar = request.query_params.get(
+            'buscar',
+            ''
+        ).strip()[:100]
+
+        tipo_curso = request.query_params.get(
+            'tipo_curso',
+            ''
+        ).strip()
+
+        if buscar:
+            notas_coincidentes = notas_coincidentes.filter(
+                Q(
+                    matricula__estudiante__nombre__icontains=buscar
+                )
+                | Q(
+                    matricula__estudiante__apellido__icontains=buscar
+                )
+                | Q(
+                    matricula__estudiante__cedula__icontains=buscar
+                )
+                | Q(
+                    instructor__nombre__icontains=buscar
+                )
+                | Q(
+                    instructor__apellido__icontains=buscar
+                )
+                | Q(
+                    plan_de_estudio__nombre__icontains=buscar
+                )
+            )
+
+        if tipo_curso and tipo_curso.lower() != 'todas':
+            notas_coincidentes = notas_coincidentes.filter(
+                matricula__tipo_curso__iexact=tipo_curso
+            )
+
+        ids_coincidentes = (
+            notas_coincidentes
+            .order_by()
+            .values('matricula_id')
+        )
+
+        matriculas = (
+            Matricula.objects
+            .select_related('estudiante')
+            .filter(
+                id__in=Subquery(ids_coincidentes)
+            )
+            .order_by('-id')
+        )
+
+        nota_practica = (
+            notas_permitidas
+            .filter(
+                matricula_id=OuterRef('pk'),
+                tipo_nota='practico',
+            )
+            .order_by(
+                '-fecha_registro',
+                '-id',
+            )
+            .values('nota')[:1]
+        )
+
+        nota_teorica = (
+            notas_permitidas
+            .filter(
+                matricula_id=OuterRef('pk'),
+                tipo_nota='teorico',
+            )
+            .order_by(
+                '-fecha_registro',
+                '-id',
+            )
+            .values('nota')[:1]
+        )
+
+        matriculas_resumen = matriculas.annotate(
+            nota_practica_num=Cast(
+                Subquery(nota_practica),
+                FloatField(),
+            ),
+            nota_teorica_num=Cast(
+                Subquery(nota_teorica),
+                FloatField(),
+            ),
+        )
+
+        datos_resumen = matriculas_resumen.aggregate(
+            total=Count('id'),
+            aprobados=Count(
+                'id',
+                filter=(
+                    Q(nota_practica_num__isnull=False)
+                    & Q(nota_teorica_num__isnull=False)
+                    & Q(nota_practica_num__gte=80)
+                    & Q(nota_teorica_num__gte=80)
+                ),
+            ),
+            reprobados=Count(
+                'id',
+                filter=(
+                    Q(nota_practica_num__isnull=False)
+                    & Q(nota_teorica_num__isnull=False)
+                    & (
+                        Q(nota_practica_num__lt=80)
+                        | Q(nota_teorica_num__lt=80)
+                    )
+                ),
+            ),
+            pendientes=Count(
+                'id',
+                filter=(
+                    Q(nota_practica_num__isnull=True)
+                    | Q(nota_teorica_num__isnull=True)
+                ),
+            ),
+            suma_practica=Sum(
+                'nota_practica_num'
+            ),
+            suma_teorica=Sum(
+                'nota_teorica_num'
+            ),
+            cantidad_practica=Count(
+                'nota_practica_num'
+            ),
+            cantidad_teorica=Count(
+                'nota_teorica_num'
+            ),
+        )
+
+        cantidad_notas = (
+            datos_resumen['cantidad_practica']
+            + datos_resumen['cantidad_teorica']
+        )
+
+        suma_notas = (
+            (datos_resumen['suma_practica'] or 0)
+            + (datos_resumen['suma_teorica'] or 0)
+        )
+
+        resumen = {
+            'total': datos_resumen['total'],
+            'aprobados': datos_resumen['aprobados'],
+            'reprobados': datos_resumen['reprobados'],
+            'pendientes': datos_resumen['pendientes'],
+            'promedio': (
+                f'{suma_notas / cantidad_notas:.1f}'
+                if cantidad_notas
+                else '0.0'
+            ),
+        }
+
+        pagina = self.paginate_queryset(
+            matriculas
+        )
+
+        matriculas_pagina = (
+            pagina
+            if pagina is not None
+            else list(matriculas)
+        )
+
+        ids_pagina = [
+            matricula.id
+            for matricula in matriculas_pagina
+        ]
+
+        notas_pagina = (
+            notas_permitidas
+            .filter(
+                matricula_id__in=ids_pagina
+            )
+            .order_by(
+                '-fecha_registro',
+                '-id',
+            )
+        )
+
+        notas_serializadas = self.get_serializer(
+            notas_pagina,
+            many=True,
+        ).data
+
+        agrupadas = {}
+
+        for nota in notas_serializadas:
+            matricula_id = nota['matricula']
+
+            if matricula_id not in agrupadas:
+                agrupadas[matricula_id] = {
+                    **nota,
+                    'nota_practica': None,
+                    'nota_teorica': None,
+                    'comentario_practico': '',
+                    'comentario_teorico': '',
+                }
+
+            if nota['tipo_nota'] == 'practico':
+                agrupadas[matricula_id][
+                    'nota_practica'
+                ] = nota['nota']
+
+                agrupadas[matricula_id][
+                    'comentario_practico'
+                ] = nota['comentario'] or ''
+
+            if nota['tipo_nota'] == 'teorico':
+                agrupadas[matricula_id][
+                    'nota_teorica'
+                ] = nota['nota']
+
+                agrupadas[matricula_id][
+                    'comentario_teorico'
+                ] = nota['comentario'] or ''
+
+        resultados = [
+            agrupadas[matricula.id]
+            for matricula in matriculas_pagina
+            if matricula.id in agrupadas
+        ]
+
+        if pagina is None:
+            return Response({
+                'count': len(resultados),
+                'next': None,
+                'previous': None,
+                'results': resultados,
+                'resumen': resumen,
+            })
+
+        return Response({
+            'count': (
+                self.paginator
+                .page
+                .paginator
+                .count
+            ),
+            'next': (
+                self.paginator.get_next_link()
+            ),
+            'previous': (
+                self.paginator.get_previous_link()
+            ),
+            'results': resultados,
+            'resumen': resumen,
+        })
+
     @action(detail=False, methods=['get'], url_path='estudiantes-disponibles')
     def estudiantes_disponibles(self, request):
+        """
+        Devuelve únicamente estudiantes que:
+        1. Están asignados al instructor autenticado.
+        2. No tienen todavía nota práctica.
+        3. Ya llegaron al último día de clases prácticas.
+        4. Tienen al instructor autenticado en la última clase.
+        """
+
         user = request.user
 
         if not es_instructor(user):
@@ -3432,30 +4885,96 @@ class NotasViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_200_OK
             )
 
-        matriculas_con_nota_practica = Notas.objects.filter(
-            tipo_nota='practico'
-        ).values_list(
-            'matricula_id',
-            flat=True
+        hoy = timezone.localdate()
+
+        matriculas_con_nota_practica = (
+            Notas.objects
+            .filter(
+                tipo_nota='practico'
+            )
+            .values_list(
+                'matricula_id',
+                flat=True,
+            )
         )
 
-        matriculas = Matricula.objects.select_related(
-            'estudiante',
-            'plan_de_estudio',
-        ).filter(
-            estado='matriculado',
-            clases__instructor_id=user.instructor_id,
-            clases__es_examen=False,
-        ).exclude(
-            id__in=matriculas_con_nota_practica
-        ).distinct().order_by(
-            'estudiante__nombre',
-            'estudiante__apellido',
+        clases_practicas_activas = (
+            Calendario.objects
+            .filter(
+                es_examen=False,
+            )
+            .exclude(
+                estado='cancelada'
+            )
+            .select_related(
+                'instructor'
+            )
+            .order_by(
+                '-fecha',
+                '-hora_fin',
+                '-id',
+            )
+        )
+
+        matriculas = (
+            Matricula.objects
+            .select_related(
+                'estudiante',
+                'plan_de_estudio',
+            )
+            .filter(
+                estado='matriculado',
+                clases__instructor_id=user.instructor_id,
+                clases__es_examen=False,
+                clases__estado__in=[
+                    'pendiente',
+                    'completada',
+                    'inasistencia',
+                    'reprogramada',
+                ],
+            )
+            .exclude(
+                id__in=matriculas_con_nota_practica
+            )
+            .prefetch_related(
+                Prefetch(
+                    'clases',
+                    queryset=clases_practicas_activas,
+                    to_attr='clases_practicas_activas',
+                )
+            )
+            .distinct()
+            .order_by(
+                'estudiante__nombre',
+                'estudiante__apellido',
+            )
         )
 
         resultado = []
 
         for matricula in matriculas:
+            clases_practicas = getattr(
+                matricula,
+                'clases_practicas_activas',
+                [],
+            )
+
+            if not clases_practicas:
+                continue
+
+            ultima_clase = clases_practicas[0]
+
+            # Solo el instructor de la última clase práctica puede registrar la nota.
+            if (
+                ultima_clase.instructor_id
+                != user.instructor_id
+            ):
+                continue
+
+            # Antes del último día, el estudiante no aparece. En el último día y posteriormente, permanece disponible hasta registrar la nota.
+            if ultima_clase.fecha > hoy:
+                continue
+
             resultado.append({
                 'id': matricula.id,
                 'estudiante_id': matricula.estudiante_id,
@@ -3475,167 +4994,442 @@ class NotasViewSet(viewsets.ModelViewSet):
                 'fecha_inscripcion': (
                     matricula.fecha_registro
                 ),
+                'ultima_fecha_curso': (
+                    ultima_clase.fecha
+                ),
             })
 
-        return Response(resultado)
-
-    def create(self, request, *args, **kwargs):
-        """Crear nota práctica asignando instructor y plan_de_estudio automáticamente"""
-        
-        if not request.user.instructor:
-            return Response({
-                'error': 'El usuario actual no tiene instructor asignado.'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        data = request.data.copy()
-
-        matricula_id = data.get('matricula')
-        if not matricula_id:
-            return Response({
-                'error': 'Debe seleccionar una matrícula.'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            matricula = Matricula.objects.get(id=matricula_id)
-        except Matricula.DoesNotExist:
-            return Response({
-                'error': 'Matrícula no encontrada.'
-            }, status=status.HTTP_404_NOT_FOUND)
-        
-        if not Calendario.objects.filter(
-            matricula=matricula,
-            instructor=request.user.instructor,
-            es_examen=False
-        ).exists():
-            return Response({
-                'error': 'No puedes registrar nota de un estudiante que no tienes asignado.'
-            }, status=status.HTTP_403_FORBIDDEN)
-
-        if Notas.objects.filter(
-            matricula=matricula,
-            tipo_nota='practico'
-        ).exists():
-            return Response({
-                'error': 'Ya existe una nota práctica registrada para este estudiante.'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        plan_estudio = matricula.plan_de_estudio
-
-        if not plan_estudio:
-            return Response({
-                'error': 'La matrícula no tiene un plan de estudio asignado.'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        data['instructor'] = request.user.instructor.id
-        data['plan_de_estudio'] = plan_estudio.id
-        data['tipo_nota'] = 'practico'
-
-        serializer = self.get_serializer(data=data)
-        serializer.is_valid(raise_exception=True)
-
-        serializer.save()
-
-        finalizar_matricula_si_tiene_dos_notas(
-            matricula
+        return Response(
+            resultado,
+            status=status.HTTP_200_OK
         )
 
-        headers = self.get_success_headers(serializer.data)
-        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+    def create(self, request, *args, **kwargs):
+        """
+        Registra exclusivamente una nota práctica.
+        La operación se valida nuevamente aunque el estudiante
+        ya haya aparecido en el buscador del frontend. Así no se
+        puede saltar la regla enviando un POST manual.
+        """
+
+        user = request.user
+
+        if not es_instructor(user):
+            return Response(
+                {
+                    'error': (
+                        'Solo un instructor puede registrar la nota práctica.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        matricula_id = request.data.get('matricula')
+
+        if not matricula_id:
+            return Response(
+                {
+                    'error': (
+                        'Debe seleccionar una matrícula.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        hoy = timezone.localdate()
+
+        with transaction.atomic():
+            try:
+                matricula = (
+                    Matricula.objects
+                    .select_for_update()
+                    .select_related(
+                        'estudiante',
+                        'plan_de_estudio',
+                    )
+                    .get(
+                        id=matricula_id
+                    )
+                )
+            except (
+                Matricula.DoesNotExist,
+                ValueError,
+                TypeError,
+            ):
+                return Response(
+                    {
+                        'error': (
+                            'Matrícula no encontrada.'
+                        )
+                    },
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            ultima_clase = (
+                self.obtener_ultima_clase_practica(
+                    matricula
+                )
+            )
+
+            if ultima_clase is None:
+                return Response(
+                    {
+                        'error': (
+                            'La matrícula no tiene clases prácticas asignadas.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if (
+                ultima_clase.instructor_id
+                != user.instructor_id
+            ):
+                return Response(
+                    {
+                        'error': (
+                            'Solo el instructor asignado a la última clase práctica puede registrar esta nota.'
+                        )
+                    },
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            if ultima_clase.fecha > hoy:
+                return Response(
+                    {
+                        'error': (
+                            'La nota práctica estará disponible '
+                            'a partir del último día del curso: '
+                            f'{ultima_clase.fecha.strftime("%d/%m/%Y")}.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if Notas.objects.filter(
+                matricula=matricula,
+                tipo_nota='practico',
+            ).exists():
+                return Response(
+                    {
+                        'error': (
+                            'Ya existe una nota práctica registrada para este estudiante.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            plan_estudio = matricula.plan_de_estudio
+
+            if not plan_estudio:
+                return Response(
+                    {
+                        'error': (
+                            'La matrícula no tiene un plan de estudio asignado.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            data = request.data.copy()
+            data['matricula'] = matricula.id
+            data['instructor'] = user.instructor_id
+            data['plan_de_estudio'] = plan_estudio.id
+            data['tipo_nota'] = 'practico'
+
+            serializer = self.get_serializer(
+                data=data
+            )
+
+            serializer.is_valid(
+                raise_exception=True
+            )
+
+            nota = serializer.save()
+
+            matricula_finalizada = (
+                actualizar_estado_matricula_por_notas(
+                    nota.matricula
+                )
+            )
+
+            if matricula_finalizada:
+                desactivar_usuarios_estudiante(
+                    nota.matricula.estudiante
+                )
+
+        headers = self.get_success_headers(
+            serializer.data
+        )
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_201_CREATED,
+            headers=headers,
+        )
 
 @api_view(['POST'])
+@authentication_classes([])
 @permission_classes([AllowAny])
+@throttle_classes([LoginRateThrottle])
 def login(request):
     username = request.data.get('username')
     password = request.data.get('password')
 
-    usuario_existente = Usuario.objects.filter(username=username).first()
+    if not isinstance(username, str):
+        return Response(
+            {
+                'error': (
+                    'El nombre de usuario y la contraseña '
+                    'son obligatorios.'
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
-    if usuario_existente and not usuario_existente.is_active:
-        return Response({
-            'error': 'Este usuario está desactivado. Contacte al administrador.'
-        }, status=403)
+    if not isinstance(password, str):
+        return Response(
+            {
+                'error': (
+                    'El nombre de usuario y la contraseña '
+                    'son obligatorios.'
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
-    user = authenticate(username=username, password=password)
+    username = username.strip()
 
-    if not user:
-        return Response({
-            'error': 'Credenciales inválidas'
-        }, status=401)
+    if not username or not password:
+        return Response(
+            {
+                'error': (
+                    'El nombre de usuario y la contraseña '
+                    'son obligatorios.'
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
-    if not user.is_active:
-        return Response({
-            'error': 'Este usuario está desactivado. Contacte al administrador.'
-        }, status=403)
+    usuario_existente = (
+        Usuario.objects
+        .select_related('rol')
+        .filter(username=username)
+        .first()
+    )
 
-    token, created = Token.objects.get_or_create(user=user)
+    # MySQL normalmente utiliza una comparación que no diferencia entre mayúsculas y minúsculas. Por eso comprobamos también
+    # el texto exacto almacenado en el usuario.
+    if (
+        usuario_existente is None
+        or usuario_existente.username != username
+        or not usuario_existente.is_active
+    ):
+        return Response(
+            {
+                'error': 'Credenciales inválidas.'
+            },
+            status=status.HTTP_401_UNAUTHORIZED
+        )
 
-    return Response({
-        'token': token.key,
-        'user_id': user.id,
-        'username': user.username,
-        'email': user.email,
-        'first_name': user.first_name,
-        'last_name': user.last_name,
-        'rol': user.rol.nombre if user.rol else 'sin rol',
-    })
+    user = authenticate(
+        request=request,
+        username=username,
+        password=password
+    )
+
+    if (
+        user is None
+        or user.pk != usuario_existente.pk
+        or user.username != username
+        or not user.is_active
+    ):
+        return Response(
+            {
+                'error': 'Credenciales inválidas.'
+            },
+            status=status.HTTP_401_UNAUTHORIZED
+        )
+
+    with transaction.atomic():
+        # Se elimina el token anterior para que un token antiguo no continúe funcionando después de un nuevo ingreso.
+        Token.objects.filter(user=user).delete()
+
+        token = Token.objects.create(user=user)
+
+        update_last_login(
+            sender=None,
+            user=user
+        )
+
+    return Response(
+        {
+            'token': token.key,
+            'user_id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'rol': (
+                user.rol.nombre
+                if user.rol
+                else 'sin rol'
+            ),
+        },
+        status=status.HTTP_200_OK
+    )
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def cerrar_sesion(request):
+    """
+    Elimina el token utilizado en la solicitud actual.
+    Después de ejecutar esta acción, el mismo token ya no
+    podrá utilizarse para acceder a rutas protegidas.
+    """
+
+    token_actual = request.auth
+
+    if isinstance(token_actual, Token):
+        token_actual.delete()
+    else:
+        Token.objects.filter(
+            user=request.user
+        ).delete()
+
+    return Response(
+        {
+            'mensaje': 'Sesión cerrada correctamente.'
+        },
+        status=status.HTTP_200_OK
+    )
 
 class DashboardGananciasView(APIView):
     """Endpoint para obtener ganancias mensuales y matriculados"""
     permission_classes = [IsAuthenticated]
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
 
     def get(self, request):
         if not es_admin(request.user):
             return Response(
-                {'error': 'No tienes permiso para ver información del dashboard.'},
+                {
+                    'error': (
+                        'No tienes permiso para ver información del dashboard.'
+                    )
+                },
                 status=status.HTTP_403_FORBIDDEN
             )
-        try:
-            hoy = datetime.now().date()
 
+        try:
+            hoy = timezone.localdate()
             anio_param = request.query_params.get('anio')
 
             try:
-                anio = int(anio_param) if anio_param else hoy.year
-            except ValueError:
+                anio = (
+                    int(anio_param)
+                    if anio_param
+                    else hoy.year
+                )
+            except (
+                ValueError,
+                TypeError,
+            ):
                 anio = hoy.year
+
+            if anio < 1 or anio > 9998:
+                return Response(
+                    {
+                        'error': (
+                            'El año indicado no es válido.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            inicio_anio = date(anio, 1, 1)
+            inicio_anio_siguiente = date(
+                anio + 1,
+                1,
+                1,
+            )
+
+            datos_por_mes = (
+                Recibo.objects
+                .filter(
+                    fecha_pago__gte=inicio_anio,
+                    fecha_pago__lt=inicio_anio_siguiente,
+                    tipo_pago__in=TIPOS_RECIBO_INGRESO,
+                )
+                .annotate(
+                    mes=TruncMonth('fecha_pago')
+                )
+                .values('mes')
+                .annotate(
+                    total=Sum('monto_pagado'),
+                    matriculados=Count(
+                        'matricula_id',
+                        filter=Q(
+                            tipo_pago__in=[
+                                'completo',
+                                'beneficio',
+                            ]
+                        ),
+                        distinct=True,
+                    ),
+                )
+                .order_by('mes')
+            )
+
+            resumen_por_mes = {
+                fila['mes'].month: fila
+                for fila in datos_por_mes
+                if fila['mes'] is not None
+            }
 
             meses_resultado = []
 
             for mes in range(1, 13):
-                total_ganancias = Recibo.objects.filter(
-                    fecha_pago__year=anio,
-                    fecha_pago__month=mes,
-                    tipo_pago__in=['completo', 'anticipo']
-                ).aggregate(
-                    total=Sum('monto_pagado')
-                )['total'] or Decimal('0')
-
-                total_matriculados = Recibo.objects.filter(
-                    fecha_pago__year=anio,
-                    fecha_pago__month=mes,
-                    tipo_pago__in=['completo', 'beneficio']
-                ).values(
-                    'matricula'
-                ).distinct().count()
+                datos_mes = resumen_por_mes.get(
+                    mes,
+                    {}
+                )
 
                 meses_resultado.append({
                     'mes': f'{anio}-{mes:02d}',
-                    'total': float(total_ganancias),
-                    'matriculados': total_matriculados,
+                    'total': float(
+                        datos_mes.get('total')
+                        or Decimal('0')
+                    ),
+                    'matriculados': (
+                        datos_mes.get('matriculados')
+                        or 0
+                    ),
                 })
 
             return Response(meses_resultado)
 
-        except Exception as e:
-            print(f"Error en DashboardGananciasView: {str(e)}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
+            logger.exception(
+                'Error en DashboardGananciasView.'
+            )
 
             return Response(
-                {'error': str(e), 'tipo': type(e).__name__},
-                status=500
+                {
+                    'error': (
+                        'No se pudieron cargar las '
+                        'ganancias del dashboard.'
+                    )
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-    
+
     def _get_nombre_mes(self, mes_numero):
         meses = {
             1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
@@ -3647,6 +5441,14 @@ class DashboardGananciasView(APIView):
 class DashboardResumenView(APIView):
     """Endpoint para resumen del dashboard"""
     permission_classes = [IsAuthenticated]
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
 
     def get(self, request):
 
@@ -3657,55 +5459,93 @@ class DashboardResumenView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
         try:
-            hoy = datetime.now().date()
-            
-            # Total de matriculados (todas las matrículas activas)
-            total_matriculados = Matricula.objects.filter(
-                estado='matriculado'
-            ).count()
-            
-            # Estudiantes activos (mismo que matriculados para este caso)
-            estudiantes_activos = Estudiante.objects.filter(
-                activo=True
-            ).count()
-            
-            # Egresados del mes actual
-            matriculas_con_teorico = set(
-                Notas.objects.filter(
-                    tipo_nota='teorico'
-                ).values_list(
-                    'matricula_id',
-                    flat=True
+            hoy = timezone.localdate()
+
+            inicio_mes = (
+                timezone.localtime(timezone.now())
+                .replace(
+                    day=1,
+                    hour=0,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
                 )
             )
 
-            matriculas_con_practico = set(
-                Notas.objects.filter(
-                    tipo_nota='practico'
-                ).values_list(
-                    'matricula_id',
-                    flat=True
+            if inicio_mes.month == 12:
+                inicio_mes_siguiente = inicio_mes.replace(
+                    year=inicio_mes.year + 1,
+                    month=1,
                 )
+            else:
+                inicio_mes_siguiente = inicio_mes.replace(
+                    month=inicio_mes.month + 1,
+                )
+
+            inicio_mes_fecha = inicio_mes.date()
+            inicio_mes_siguiente_fecha = inicio_mes_siguiente.date()
+
+            # Todos los estudiantes que alguna vez tuvieron matrícula.
+            # No importa si la matrícula está pendiente, activa o finalizada.
+            total_matriculados = (
+                Matricula.objects
+                .values(
+                    'estudiante_id'
+                )
+                .distinct()
+                .count()
             )
 
-            matriculas_egresadas = matriculas_con_teorico.intersection(
-                matriculas_con_practico
+            # Estudiantes que tienen al menos una matrícula no finalizada.
+            # Si finalizan una matrícula, dejan de aparecer aquí.
+            # Si luego reciben otra matrícula nueva, vuelven a aparecer.
+            estudiantes_activos = (
+                Matricula.objects
+                .exclude(
+                    estado='finalizado'
+                )
+                .values(
+                    'estudiante_id'
+                )
+                .distinct()
+                .count()
             )
 
-            egresados_mes = len(matriculas_egresadas)
-            
-            # Ingresos del mes actual
-            ingresos_mes = Recibo.objects.filter(
-                fecha_pago__year=hoy.year,
-                fecha_pago__month=hoy.month,
-                tipo_pago__in=['completo', 'anticipo']
-            ).aggregate(total=Sum('monto_pagado'))['total'] or Decimal('0')
-            
-            # Ingresos totales históricos
-            ingresos_totales = Recibo.objects.filter(
-                tipo_pago__in=['completo', 'anticipo']
-            ).aggregate(total=Sum('monto_pagado'))['total'] or Decimal('0')
-            
+            # Matrículas finalizadas durante el mes actual.
+            # Se usa rango de fechas para evitar problemas de zona horaria.
+            egresados_mes = Matricula.objects.filter(
+                estado='finalizado',
+                fecha_finalizacion__gte=inicio_mes,
+                fecha_finalizacion__lt=inicio_mes_siguiente,
+            ).count()
+
+            # Ingresos del mes actual.
+            # Recibo.fecha_pago es DateField, por eso se filtra con fechas.
+            ingresos_mes = (
+                Recibo.objects
+                .filter(
+                    fecha_pago__gte=inicio_mes_fecha,
+                    fecha_pago__lt=inicio_mes_siguiente_fecha,
+                    tipo_pago__in=TIPOS_RECIBO_INGRESO,
+                )
+                .aggregate(
+                    total=Sum('monto_pagado')
+                )['total']
+                or Decimal('0')
+            )
+
+            # Ingresos totales históricos.
+            ingresos_totales = (
+                Recibo.objects
+                .filter(
+                    tipo_pago__in=TIPOS_RECIBO_INGRESO,
+                )
+                .aggregate(
+                    total=Sum('monto_pagado')
+                )['total']
+                or Decimal('0')
+            )
+
             return Response({
                 'total_matriculados': total_matriculados,
                 'estudiantes_activos': estudiantes_activos,
@@ -3713,86 +5553,164 @@ class DashboardResumenView(APIView):
                 'ingresos_mes': float(ingresos_mes),
                 'ingresos_totales': float(ingresos_totales),
             })
-            
-        except Exception as e:
-            print(f"Error en DashboardResumenView: {str(e)}")
-            import traceback
-            traceback.print_exc()
+
+        except Exception:
+            logger.exception(
+                'Error en DashboardResumenView.'
+            )
+
             return Response(
                 {
-                    'total_matriculados': 0,
-                    'estudiantes_activos': 0,
-                    'egresados_mes': 0,
-                    'ingresos_mes': 0,
-                    'ingresos_totales': 0,
-                    'error': str(e)
+                    'error': (
+                        'No se pudo cargar el resumen del dashboard.'
+                    )
                 },
-                status=200  # Cambiado a 200 para que el frontend no falle
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 class DashboardIngresosMensualesView(APIView):
-    """Endpoint específico para ingresos mensuales (últimos 6 meses)"""
+    """Endpoint específico para ingresos mensuales."""
+
     permission_classes = [IsAuthenticated]
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
 
     def get(self, request):
         if not es_admin(request.user):
             return Response(
-                {'error': 'No tienes permiso para ver información del dashboard.'},
+                {
+                    'error': (
+                        'No tienes permiso para ver '
+                        'información del dashboard.'
+                    )
+                },
                 status=status.HTTP_403_FORBIDDEN
             )
+
         try:
-            hoy = datetime.now().date()
-            fecha_limite = hoy - timedelta(days=180)
-            
-            # Agrupar recibos por mes
-            ingresos = Recibo.objects.filter(
-                fecha_pago__gte=fecha_limite,
-                tipo_pago__in=['completo', 'anticipo']
-            ).annotate(
-                mes=TruncMonth('fecha_pago')
-            ).values('mes').annotate(
-                total=Sum('monto_pagado')
-            ).order_by('mes')
-            
-            # Generar últimos 6 meses
+            hoy = timezone.localdate()
+
+            anio_inicio = hoy.year
+            mes_inicio = hoy.month - 5
+
+            while mes_inicio <= 0:
+                mes_inicio += 12
+                anio_inicio -= 1
+
+            inicio_periodo = date(
+                anio_inicio,
+                mes_inicio,
+                1,
+            )
+
+            if hoy.month == 12:
+                fin_periodo = date(
+                    hoy.year + 1,
+                    1,
+                    1,
+                )
+            else:
+                fin_periodo = date(
+                    hoy.year,
+                    hoy.month + 1,
+                    1,
+                )
+
+            ingresos_agrupados = (
+                Recibo.objects
+                .filter(
+                    fecha_pago__gte=inicio_periodo,
+                    fecha_pago__lt=fin_periodo,
+                    tipo_pago__in=TIPOS_RECIBO_INGRESO,
+                )
+                .annotate(
+                    mes=TruncMonth('fecha_pago')
+                )
+                .values('mes')
+                .annotate(
+                    total=Sum('monto_pagado')
+                )
+                .order_by('mes')
+            )
+
+            ingresos_por_mes = {
+                (
+                    fila['mes'].year,
+                    fila['mes'].month,
+                ): (
+                    fila['total']
+                    or Decimal('0')
+                )
+                for fila in ingresos_agrupados
+                if fila['mes'] is not None
+            }
+
             meses_resultado = []
+
             for i in range(5, -1, -1):
-                fecha_mes = hoy.replace(day=1) - timedelta(days=30*i)
-                mes_str = fecha_mes.strftime('%Y-%m')
-                
-                # Buscar si hay datos para este mes
-                total = 0
-                for ingreso in ingresos:
-                    if ingreso['mes'] and ingreso['mes'].strftime('%Y-%m') == mes_str:
-                        total = float(ingreso['total'])
-                        break
-                
+                anio = hoy.year
+                mes = hoy.month - i
+
+                while mes <= 0:
+                    mes += 12
+                    anio -= 1
+
+                total = ingresos_por_mes.get(
+                    (anio, mes),
+                    Decimal('0'),
+                )
+
                 meses_resultado.append({
-                    'mes': mes_str,
-                    'total': total,
-                    'nombre_mes': self._get_nombre_mes(fecha_mes.month)
+                    'mes': f'{anio}-{mes:02d}',
+                    'total': float(total),
+                    'nombre_mes': self._get_nombre_mes(
+                        mes
+                    ),
                 })
-            
+
             return Response(meses_resultado)
-            
-        except Exception as e:
-            print(f"Error en DashboardIngresosMensualesView: {e}")
-            # Datos de ejemplo para desarrollo
-            return Response([
-                {"mes": "2025-01", "total": 12500, "nombre_mes": "Enero"},
-                {"mes": "2025-02", "total": 18900, "nombre_mes": "Febrero"},
-                {"mes": "2025-03", "total": 15200, "nombre_mes": "Marzo"},
-                {"mes": "2025-04", "total": 22400, "nombre_mes": "Abril"},
-                {"mes": "2025-05", "total": 19800, "nombre_mes": "Mayo"},
-            ])
-    
+
+        except Exception:
+            logger.exception(
+                'Error en DashboardIngresosMensualesView.'
+            )
+
+            return Response(
+                {
+                    'error': (
+                        'No se pudieron cargar los '
+                        'ingresos mensuales.'
+                    )
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
     def _get_nombre_mes(self, mes_numero):
         meses = {
-            1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
-            5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
-            9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
+            1: 'Enero',
+            2: 'Febrero',
+            3: 'Marzo',
+            4: 'Abril',
+            5: 'Mayo',
+            6: 'Junio',
+            7: 'Julio',
+            8: 'Agosto',
+            9: 'Septiembre',
+            10: 'Octubre',
+            11: 'Noviembre',
+            12: 'Diciembre',
         }
-        return meses.get(mes_numero, "")
+
+        return meses.get(
+            mes_numero,
+            ''
+        )
 
 class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = ProgresoTema.objects.select_related(
@@ -3804,8 +5722,18 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
         'tema__subtemas'
     ).all()
 
-    serializer_class = ProgresoTemaSerializer 
+    serializer_class = ProgresoTemaSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = PaginacionOpcional
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
+
 
     def get_queryset(self):
         user = self.request.user
@@ -3818,13 +5746,20 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
             'tema__plan_estudio'
         ).prefetch_related(
             'tema__subtemas'
+        ).filter(
+            tema__plan_estudio_id=F(
+                'matricula__plan_de_estudio_id'
+            ),
+            tema__activo=True,
+        ).exclude(
+            matricula_id__in=obtener_ids_matriculas_egresadas()
         ).order_by(
             'matricula_id',
             'orden_general',
             'id'
         )
 
-        if rol in ['admin', 'administrador'] or user.is_staff or user.is_superuser:
+        if es_admin(user):
             return queryset
 
         if rol == 'estudiante' and hasattr(user, 'estudiante') and user.estudiante:
@@ -3836,30 +5771,46 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
             ).distinct()
 
         return ProgresoTema.objects.none()
-    
+
+    def usuario_puede_acceder_matricula(self, user, matricula):
+        if es_admin(user):
+            return True
+
+        if es_estudiante(user):
+            return (
+                matricula.estudiante_id ==
+                user.estudiante_id
+            )
+
+        if es_instructor(user):
+            return Calendario.objects.filter(
+                matricula=matricula,
+                instructor_id=user.instructor_id,
+                es_examen=False
+            ).exclude(
+                estado='cancelada'
+            ).exists()
+
+        return False
+
     def list(self, request, *args, **kwargs):
-        queryset = self.filter_queryset(self.get_queryset())
-        progresos = list(queryset)
+        queryset = self.filter_queryset(
+            self.get_queryset()
+        )
 
-        matriculas = {
-            progreso.matricula_id: progreso.matricula
-            for progreso in progresos
-        }
+        page = self.paginate_queryset(queryset)
 
-        for matricula in matriculas.values():
-            if matricula_usa_checks(matricula):
-                self.normalizar_desbloqueo(matricula)
-
-        progresos_preparados = []
-
-        for progreso in progresos:
-            progreso.refresh_from_db()
-            progresos_preparados.append(
-                self.preparar_contexto_diario(progreso)
+        if page is not None:
+            serializer = self.get_serializer(
+                page,
+                many=True
+            )
+            return self.get_paginated_response(
+                serializer.data
             )
 
         serializer = self.get_serializer(
-            progresos_preparados,
+            queryset,
             many=True
         )
 
@@ -3867,22 +5818,13 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
     def retrieve(self, request, *args, **kwargs):
         progreso = self.get_object()
-
-        if matricula_usa_checks(progreso.matricula):
-            self.normalizar_desbloqueo(
-                progreso.matricula
-            )
-
-        progreso.refresh_from_db()
-        progreso = self.preparar_contexto_diario(progreso)
-
         serializer = self.get_serializer(progreso)
 
         return Response(serializer.data)
 
     def es_modo_diario(self, matricula):
         return False
-    
+
     def validar_curso_con_checks(self, matricula):
         if matricula_usa_checks(matricula):
             return None
@@ -3931,7 +5873,6 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
             if ahora >= momento_habilitado:
                 return clase
-
         return None
 
     def obtener_check_diario_actual(self, progreso, crear=False):
@@ -4026,7 +5967,6 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
         ).count()
 
         plan_diario_completo = total_checks_completados >= total_clases
-
         progreso.estudiante_completado = plan_diario_completo
         progreso.instructor_completado = plan_diario_completo
         progreso.completado = plan_diario_completo
@@ -4087,7 +6027,6 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
     def normalizar_desbloqueo_principiante(self, matricula):
         hoy = timezone.localdate()
-
         progresos = list(
             ProgresoTema.objects.filter(
                 matricula=matricula
@@ -4112,14 +6051,20 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
         primera_clase = clases.first()
 
-        for progreso in progresos:
-            progreso.desbloqueado = False
-            progreso.save(update_fields=['desbloqueado'])
-
         if not primera_clase:
+            ProgresoTema.objects.filter(
+                matricula=matricula
+            ).update(
+                desbloqueado=False
+            )
             return
 
         if primera_clase.fecha > hoy:
+            ProgresoTema.objects.filter(
+                matricula=matricula
+            ).update(
+                desbloqueado=False
+            )
             return
 
         clases_hasta_hoy = clases.filter(
@@ -4130,10 +6075,19 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
         for clase in clases_hasta_hoy:
             if clase.hora_inicio and clase.hora_fin:
-                inicio = datetime.combine(clase.fecha, clase.hora_inicio)
-                fin = datetime.combine(clase.fecha, clase.hora_fin)
+                inicio = datetime.combine(
+                    clase.fecha,
+                    clase.hora_inicio
+                )
 
-                horas_por_dia = int((fin - inicio).total_seconds() // 3600)
+                fin = datetime.combine(
+                    clase.fecha,
+                    clase.hora_fin
+                )
+
+                horas_por_dia = int(
+                    (fin - inicio).total_seconds() // 3600
+                )
 
                 if horas_por_dia <= 0:
                     horas_por_dia = 1
@@ -4142,26 +6096,25 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
             limite_temas += horas_por_dia
 
-        limite_temas = min(limite_temas, len(progresos))
+        limite_temas = min(
+            limite_temas,
+            len(progresos)
+        )
 
-        completados = [
-            progreso for progreso in progresos
-            if progreso.completado
-            or (
-                progreso.estudiante_completado
-                and progreso.instructor_completado
+        progresos_actualizar = []
+
+        for index, progreso in enumerate(progresos):
+            nuevo_estado = index < limite_temas
+
+            if progreso.desbloqueado != nuevo_estado:
+                progreso.desbloqueado = nuevo_estado
+                progresos_actualizar.append(progreso)
+
+        if progresos_actualizar:
+            ProgresoTema.objects.bulk_update(
+                progresos_actualizar,
+                ['desbloqueado']
             )
-        ]
-
-        cantidad_completados = len(completados)
-
-        inicio_bloque = cantidad_completados
-        fin_bloque = limite_temas
-
-        for progreso in progresos[inicio_bloque:fin_bloque]:
-            if not progreso.completado:
-                progreso.desbloqueado = True
-                progreso.save(update_fields=['desbloqueado'])
 
     def normalizar_desbloqueo(self, matricula):
         if self.es_modo_diario(matricula):
@@ -4169,7 +6122,6 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
             return
 
         self.normalizar_desbloqueo_principiante(matricula)
-
 
     def _actualizar_progreso(self, progreso):
         progreso.completado = (
@@ -4183,7 +6135,7 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
         progreso.save()
 
         self._crear_notificacion_pendiente(progreso)
-        
+
     def _obtener_horas_clase_actual(self, progreso):
         clase = Calendario.objects.filter(
             matricula=progreso.matricula,
@@ -4195,7 +6147,6 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
         inicio = datetime.combine(clase.fecha, clase.hora_inicio)
         fin = datetime.combine(clase.fecha, clase.hora_fin)
-
         horas = int((fin - inicio).total_seconds() // 3600)
 
         return max(horas, 1)
@@ -4236,11 +6187,9 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
             return
 
         usuario_estudiante = progreso_actual.matricula.estudiante.usuarios.first()
-
         for progreso in pendientes[:limite_temas]:
             progreso.desbloqueado = True
             progreso.save(update_fields=['desbloqueado'])
-
 
     def _obtener_usuario_estudiante(self, progreso):
         estudiante = progreso.matricula.estudiante
@@ -4248,7 +6197,6 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
         usuario = estudiante.usuarios.first()
 
         return usuario
-
 
     def _crear_notificacion_pendiente(self, progreso):
         estudiante = progreso.matricula.estudiante
@@ -4260,6 +6208,7 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
         Notificacion.objects.filter(
             estudiante=usuario_estudiante,
+            progreso_tema=progreso,
             tema=progreso.tema,
             tipo__in=['falta_estudiante', 'falta_instructor'],
             leida=False
@@ -4284,6 +6233,7 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
         if progreso.estudiante_completado and not progreso.instructor_completado:
             Notificacion.objects.update_or_create(
                 estudiante=usuario_estudiante,
+                progreso_tema=progreso,
                 tema=progreso.tema,
                 tipo='falta_instructor',
                 defaults={
@@ -4300,6 +6250,7 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
         elif progreso.instructor_completado and not progreso.estudiante_completado:
             Notificacion.objects.update_or_create(
                 estudiante=usuario_estudiante,
+                progreso_tema=progreso,
                 tema=progreso.tema,
                 tipo='falta_estudiante',
                 defaults={
@@ -4313,90 +6264,117 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
                 }
             )
 
-    def _validar_limite_temas_por_dia(self, progreso):
-        ahora = timezone.now()
-
-        inicio_dia = ahora.replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0
-        )
-
-        fin_dia = inicio_dia + timedelta(days=1)
-
-        temas_completados_hoy = ProgresoTema.objects.filter(
-            matricula=progreso.matricula,
-            estudiante_completado=True,
-            instructor_completado=True,
-            fecha_completado__gte=inicio_dia,
-            fecha_completado__lt=fin_dia,
-        ).exclude(id=progreso.id).count()
-
-        if temas_completados_hoy >= 2:
-            return Response({
-                'success': False,
-                'error': (
-                    'Ya se completaron 2 temas el día de hoy. '
-                    'Debe esperar 24 horas para iniciar la siguiente clase.'
-                )
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        ultimo_completado = ProgresoTema.objects.filter(
-            matricula=progreso.matricula,
-            estudiante_completado=True,
-            instructor_completado=True,
-            fecha_completado__isnull=False,
-        ).exclude(id=progreso.id).order_by('-fecha_completado').first()
-
-        if ultimo_completado:
-            diferencia = ahora - ultimo_completado.fecha_completado
-
-            # if diferencia < timedelta(hours=24):
-            if diferencia < timedelta(minutes=1):
-                restante = timedelta(minutes=1) - diferencia
-                # restante = timedelta(hours=24) - diferencia
-                # horas = int(restante.total_seconds() // 3600)
-                # minutos = int((restante.total_seconds() % 3600) // 60)
-                horas = int(restante.total_seconds() // 3600)
-                minutos = int((restante.total_seconds() % 3600) // 60)
-
-                return Response({
-                    'success': False,
-                    'error': (
-                        f'Debe esperar 24 horas para iniciar la siguiente clase. '
-                        f'Faltan aproximadamente {horas} hora(s) y {minutos} minuto(s).'
-                    )
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-        return None
-    
     @action(detail=False, methods=['post'], url_path='actualizar-desbloqueos')
     def actualizar_desbloqueos(self, request):
-        matricula_id = request.data.get('matricula_id')
+        matricula_ids = request.data.get('matricula_ids')
 
-        if not matricula_id:
-            return Response({
-                'success': False,
-                'error': 'Debe enviar la matrícula.'
-            }, status=status.HTTP_400_BAD_REQUEST)
+        # Mantiene compatibilidad con llamadas antiguas.
+        if matricula_ids is None:
+            matricula_id = request.data.get('matricula_id')
+            matricula_ids = [matricula_id] if matricula_id else []
 
-        matricula = get_object_or_404(Matricula, id=matricula_id)
+        if not isinstance(matricula_ids, list):
+            return Response(
+                {
+                    'success': False,
+                    'error': 'matricula_ids debe ser una lista.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        if not matricula_usa_checks(matricula):
-            return Response({
-                'success': True,
-                'usa_checks': False,
-                'message': (
-                    'Este curso no utiliza checks ni desbloqueos. '
-                    'El plan se muestra únicamente como contenido informativo.'
+        try:
+            matricula_ids = list(dict.fromkeys(
+                int(matricula_id)
+                for matricula_id in matricula_ids
+                if matricula_id
+            ))
+        except (TypeError, ValueError):
+            return Response(
+                {
+                    'success': False,
+                    'error': 'Las matrículas enviadas no son válidas.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not matricula_ids:
+            return Response(
+                {
+                    'success': False,
+                    'error': 'Debe enviar al menos una matrícula.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if len(matricula_ids) > 100:
+            return Response(
+                {
+                    'success': False,
+                    'error': 'Solo se permiten 100 matrículas por solicitud.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        matriculas_encontradas = {
+            matricula.id: matricula
+            for matricula in Matricula.objects.select_related(
+                'estudiante'
+            ).filter(id__in=matricula_ids)
+        }
+
+        ids_no_encontrados = [
+            matricula_id
+            for matricula_id in matricula_ids
+            if matricula_id not in matriculas_encontradas
+        ]
+
+        if ids_no_encontrados:
+            return Response(
+                {
+                    'success': False,
+                    'error': 'Una o más matrículas no existen.',
+                    'matricula_ids': ids_no_encontrados,
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        matriculas = [
+            matriculas_encontradas[matricula_id]
+            for matricula_id in matricula_ids
+        ]
+
+        # Primero valida todas. Así no actualiza unas antes de
+        # descubrir que el usuario no tiene acceso a otra.
+        for matricula in matriculas:
+            if not self.usuario_puede_acceder_matricula(
+                request.user,
+                matricula
+            ):
+                return Response(
+                    {
+                        'success': False,
+                        'error': (
+                            'No tiene permiso para actualizar el progreso '
+                            'de una o más matrículas.'
+                        )
+                    },
+                    status=status.HTTP_403_FORBIDDEN
                 )
-            })
 
-        self.normalizar_desbloqueo(matricula)
+        actualizadas = 0
+
+        with transaction.atomic():
+            for matricula in matriculas:
+                # Los checks continúan siendo solamente para Principiante.
+                if not matricula_usa_checks(matricula):
+                    continue
+
+                self.normalizar_desbloqueo(matricula)
+                actualizadas += 1
 
         return Response({
             'success': True,
+            'actualizadas': actualizadas,
             'message': 'Desbloqueos actualizados correctamente.'
         })
 
@@ -4407,8 +6385,7 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
                 {
                     'success': False,
                     'error': (
-                        'Solo el estudiante puede marcar '
-                        'su check del plan de estudio.'
+                        'Solo el estudiante puede marcar su check del plan de estudio.'
                     )
                 },
                 status=status.HTTP_403_FORBIDDEN
@@ -4416,7 +6393,6 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
         try:
             progreso = self.get_object()
-
             bloqueo = self.validar_curso_con_checks(
                 progreso.matricula
             )
@@ -4501,6 +6477,7 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
                 if progreso.estudiante_completado and progreso.instructor_completado:
                     Notificacion.objects.filter(
                         estudiante=self._obtener_usuario_estudiante(progreso),
+                        progreso_tema=progreso,
                         tema=progreso.tema,
                         tipo__in=['falta_estudiante', 'falta_instructor'],
                         leida=False
@@ -4522,11 +6499,24 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
                 'data': serializer.data
             })
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'error': str(e)
-            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception(
+                'Error inesperado al marcar el check del estudiante. '
+                'progreso_id=%s usuario_id=%s',
+                pk,
+                request.user.id,
+            )
+
+            return Response(
+                {
+                    'success': False,
+                    'error': (
+                        'No se pudo registrar el check del estudiante. '
+                        'Inténtelo nuevamente.'
+                    )
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
     @action(detail=True, methods=['post'], url_path='marcar-instructor')
@@ -4545,7 +6535,6 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
         try:
             progreso = self.get_object()
-
             bloqueo = self.validar_curso_con_checks(
                 progreso.matricula
             )
@@ -4630,6 +6619,7 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
                 if progreso.estudiante_completado and progreso.instructor_completado:
                     Notificacion.objects.filter(
                         estudiante=self._obtener_usuario_estudiante(progreso),
+                        progreso_tema=progreso,
                         tema=progreso.tema,
                         tipo__in=['falta_estudiante', 'falta_instructor'],
                         leida=False
@@ -4651,25 +6641,35 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
                 'data': serializer.data
             })
 
-        except Exception as e:
-            return Response({
-                'success': False,
-                'error': str(e)
-            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception(
+                'Error inesperado al marcar el check del instructor. '
+                'progreso_id=%s usuario_id=%s',
+                pk,
+                request.user.id,
+            )
+
+            return Response(
+                {
+                    'success': False,
+                    'error': (
+                        'No se pudo registrar el check del instructor. '
+                        'Inténtelo nuevamente.'
+                    )
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=True, methods=['post'], url_path='admin-forzar')
     def admin_forzar(self, request, pk=None):
         rol = str(getattr(request.user, 'rol_nombre', '') or '').lower()
 
-        if (
-            rol != 'admin'
-            and rol != 'administrador'
-            and not request.user.is_staff
-            and not request.user.is_superuser
-        ):
+        if not es_admin(request.user):
             return Response({
                 'success': False,
-                'error': 'Solo administradores pueden realizar esta acción'
+                'error': (
+                    'Solo administración puede realizar esta acción.'
+                )
             }, status=status.HTTP_403_FORBIDDEN)
 
         progreso = self.get_object()
@@ -4804,6 +6804,7 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
                 try:
                     Notificacion.objects.update_or_create(
                         estudiante=usuario_estudiante,
+                        progreso_tema=progreso,
                         tema=progreso.tema,
                         tipo='tema_desbloqueado',
                         defaults={
@@ -4834,8 +6835,10 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
         resultado = []
 
-        if rol in ['admin', 'administrador'] or user.is_staff or user.is_superuser:
-            matriculas = Matricula.objects.filter(estado='matriculado')
+        if es_admin(user):
+            matriculas = Matricula.objects.filter(
+                estado='matriculado'
+            )
 
         elif hasattr(user, 'instructor') and user.instructor:
             matriculas = Matricula.objects.filter(
@@ -4866,11 +6869,29 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
                 True
             )
 
-            if not validacion_plan['completo']:
-                continue
-
             progresos = obtener_progresos_plan_actual(matricula)
             total_temas = progresos.count()
+
+            if usa_checks:
+                temas_completados = progresos.filter(
+                    Q(completado=True)
+                    |
+                    Q(
+                        estudiante_completado=True,
+                        instructor_completado=True,
+                    )
+                ).distinct().count()
+
+                porcentaje = (
+                    round(
+                        (temas_completados / total_temas) * 100
+                    )
+                    if total_temas > 0
+                    else 0
+                )
+            else:
+                temas_completados = None
+                porcentaje = None
 
             resultado.append({
                 'matricula_id': matricula.id,
@@ -4882,19 +6903,11 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
                 'tipo_curso': matricula.tipo_curso,
                 'usa_checks': usa_checks,
                 'total_temas': total_temas,
-                'temas_completados': (
-                    total_temas
-                    if usa_checks
-                    else None
-                ),
-                'porcentaje': (
-                    100
-                    if usa_checks
-                    else None
-                ),
+                'temas_completados': temas_completados,
+                'porcentaje': porcentaje,
                 'progreso': validacion_plan['progreso'],
                 'plan_completado': (
-                    True
+                    validacion_plan['completo']
                     if usa_checks
                     else None
                 ),
@@ -4918,17 +6931,26 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='plan-completado')
     def plan_completado(self, request, pk=None):
-        try:
-            matricula = Matricula.objects.get(
-                id=pk
-            )
-        except Matricula.DoesNotExist:
+        matricula = get_object_or_404(
+            Matricula.objects.select_related(
+                'estudiante',
+                'plan_de_estudio'
+            ),
+            id=pk
+        )
+
+        if not self.usuario_puede_acceder_matricula(
+            request.user,
+            matricula
+        ):
             return Response(
                 {
                     'success': False,
-                    'error': 'Matrícula no encontrada.'
+                    'error': (
+                        'No tiene permiso para consultar el progreso de esta matrícula.'
+                    )
                 },
-                status=status.HTTP_404_NOT_FOUND
+                status=status.HTTP_403_FORBIDDEN
             )
 
         validacion_plan = (
@@ -4944,15 +6966,12 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
         if usa_checks:
             mensaje = (
-                'Plan de estudio completado.'
-                if validacion_plan['completo']
-                else validacion_plan['error']
+                'Los checks son de seguimiento opcional y no bloquean el examen teórico. '
+                f"Progreso actual: {validacion_plan['progreso']}."
             )
         else:
             mensaje = (
-                'Este curso no utiliza checks. '
-                'El examen teórico no depende del '
-                'progreso del plan de estudio.'
+                'Este curso muestra el plan como contenido informativo y no requiere checks.'
             )
 
         return Response({
@@ -4965,43 +6984,10 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
                 if usa_checks
                 else None
             ),
-            'puede_presentar_examen': (
-                validacion_plan['completo']
-            ),
+            'puede_presentar_examen': True,
             'progreso': validacion_plan['progreso'],
             'mensaje': mensaje,
         })
-        
-    def crear_notificacion_check_pendiente(self, progreso):
-        estudiante_usuario = progreso.matricula.estudiante.usuario
-
-        if progreso.estudiante_completado and not progreso.instructor_completado:
-            Notificacion.objects.get_or_create(
-                estudiante=estudiante_usuario,
-                tema=progreso.tema,
-                tipo='falta_instructor',
-                leida=False,
-                defaults={
-                    'mensaje': (
-                        f'El estudiante marcó como recibido el tema '
-                        f'"{progreso.tema.titulo}", pero el instructor aún no lo ha confirmado.'
-                    )
-                }
-            )
-
-        if progreso.instructor_completado and not progreso.estudiante_completado:
-            Notificacion.objects.get_or_create(
-                estudiante=estudiante_usuario,
-                tema=progreso.tema,
-                tipo='falta_estudiante',
-                leida=False,
-                defaults={
-                    'mensaje': (
-                        f'El instructor marcó como dado el tema '
-                        f'"{progreso.tema.titulo}", pero el estudiante aún no lo ha confirmado.'
-                    )
-                }
-            )         
 
 class NotificacionViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet para notificaciones del administrador"""
@@ -5009,6 +6995,15 @@ class NotificacionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Notificacion.objects.all()
     serializer_class = NotificacionSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = PaginacionOpcional
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
 
     def get_queryset(self):
         user = self.request.user
@@ -5039,8 +7034,7 @@ class NotificacionViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(
                 {
                     'error': (
-                        'Solo el administrador puede '
-                        'ver estas notificaciones.'
+                        'Solo el administrador puede ver estas notificaciones.'
                     )
                 },
                 status=status.HTTP_403_FORBIDDEN
@@ -5057,105 +7051,63 @@ class NotificacionViewSet(viewsets.ReadOnlyModelViewSet):
             leida=True
         )
 
-        notificaciones = Notificacion.objects.filter(
-            leida=False,
-            tipo__in=[
-                'falta_estudiante',
-                'falta_instructor',
-            ],
-            fecha_creacion__gte=limite_tiempo,
-        ).select_related(
-            'estudiante',
-            'estudiante__estudiante',
-            'tema',
-        ).order_by(
-            '-fecha_creacion'
+        notificaciones = (
+            Notificacion.objects
+            .filter(
+                leida=False,
+                tipo__in=[
+                    'falta_estudiante',
+                    'falta_instructor',
+                ],
+                fecha_creacion__gte=limite_tiempo,
+            )
+            .select_related(
+                'estudiante',
+                'tema',
+                'progreso_tema',
+                'progreso_tema__matricula',
+                'progreso_tema__matricula__estudiante',
+                'progreso_tema__tema',
+            )
+            .order_by('-fecha_creacion')
         )
 
         resultado = []
-        claves_usadas = set()
+        ids_cerrar = []
 
         for notificacion in notificaciones:
-            estudiante_id = getattr(
-                notificacion.estudiante,
-                'estudiante_id',
-                None
-            )
+            progreso = notificacion.progreso_tema
 
-            if not estudiante_id:
-                notificacion.leida = True
-                notificacion.save(
-                    update_fields=['leida']
-                )
-                continue
-
-            progreso = ProgresoTema.objects.filter(
-                tema=notificacion.tema,
-                matricula__estudiante_id=estudiante_id,
-            ).select_related(
-                'matricula',
-                'matricula__estudiante',
-                'tema',
-            ).order_by(
-                '-matricula_id'
-            ).first()
-
+            # Las notificaciones anteriores a esta migración no tienen
+            # una matrícula confiable, por eso no deben mostrarse.
             if not progreso:
-                notificacion.leida = True
-                notificacion.save(
-                    update_fields=['leida']
-                )
+                ids_cerrar.append(notificacion.id)
                 continue
 
-            if not matricula_usa_checks(
-                progreso.matricula
-            ):
-                notificacion.leida = True
-                notificacion.save(
-                    update_fields=['leida']
-                )
+            if not matricula_usa_checks(progreso.matricula):
+                ids_cerrar.append(notificacion.id)
                 continue
 
             if (
                 progreso.estudiante_completado
                 and progreso.instructor_completado
             ):
-                notificacion.leida = True
-                notificacion.save(
-                    update_fields=['leida']
-                )
+                ids_cerrar.append(notificacion.id)
                 continue
 
             if (
                 notificacion.tipo == 'falta_estudiante'
                 and progreso.estudiante_completado
             ):
-                notificacion.leida = True
-                notificacion.save(
-                    update_fields=['leida']
-                )
+                ids_cerrar.append(notificacion.id)
                 continue
 
             if (
                 notificacion.tipo == 'falta_instructor'
                 and progreso.instructor_completado
             ):
-                notificacion.leida = True
-                notificacion.save(
-                    update_fields=['leida']
-                )
+                ids_cerrar.append(notificacion.id)
                 continue
-
-            clave = (
-                f'{progreso.matricula_id}-'
-                f'{progreso.tema_id}-'
-                f'{notificacion.tipo}'
-            )
-
-            if clave in claves_usadas:
-                continue
-
-            claves_usadas.add(clave)
 
             estudiante = progreso.matricula.estudiante
 
@@ -5190,129 +7142,31 @@ class NotificacionViewSet(viewsets.ReadOnlyModelViewSet):
                 'estudiante': estudiante_nombre,
                 'tema': progreso.tema.titulo,
                 'matricula_id': progreso.matricula_id,
-                'tipo_curso': (
-                    progreso.matricula.tipo_curso
-                ),
-                'fecha_creacion': (
-                    notificacion.fecha_creacion
-                ),
+                'tipo_curso': progreso.matricula.tipo_curso,
+                'fecha_creacion': notificacion.fecha_creacion,
             })
 
             if len(resultado) >= 10:
                 break
 
+        if ids_cerrar:
+            Notificacion.objects.filter(
+                id__in=ids_cerrar
+            ).update(
+                leida=True
+            )
+
         return Response(resultado)
 
 class DashboardPlanViewSet(viewsets.ViewSet):
-    """ViewSet para el dashboard con estadísticas"""
-    
+    """Resumen del plan para el estudiante autenticado."""
+
     permission_classes = [IsAuthenticated]
-    
-    @action(detail=False, methods=['get'], url_path='estudiante-progreso')
-    def estudiante_progreso(self, request):
-        user = request.user
-
-        if not user.estudiante:
-            return Response([])
-
-        progresos = ProgresoTema.objects.filter(
-            matricula__estudiante=user.estudiante
-        ).select_related(
-            'matricula',
-            'subtema',
-            'subtema__tema',
-            'subtema__tema__plan_estudio'
-        ).order_by(
-            'subtema__tema__orden',
-            'subtema__orden'
-        )
-
-        return Response(ProgresoTemaSerializer(progresos, many=True).data)
-    
-    @action(detail=False, methods=['get'], url_path='instructor-vista')
-    def instructor_vista(self, request):
-        """Vista para instructores: ver estudiantes y su progreso"""
-        # Verificar que sea instructor
-        # if not request.user.groups.filter(name='Instructores').exists():
-        #     return Response({'error': 'No autorizado'}, status=403)
-        
-        # Obtener todos los estudiantes (o filtrados por curso)
-        estudiantes = Usuario.objects.filter(groups__name='Estudiantes')
-        
-        resultado = []
-        for estudiante in estudiantes:
-            progreso_estudiante = []
-            planes = PlanEstudio.objects.filter(activo=True)
-            
-            for plan in planes:
-                temas = plan.temas.all()
-                progresos = ProgresoTema.objects.filter(
-                    estudiante=estudiante,
-                    tema__in=temas
-                )
-                
-                total = temas.count()
-                completados = progresos.filter(
-                    instructor_completado=True  # Instructor solo ve su check
-                ).count()
-                
-                progreso_estudiante.append({
-                    'plan_id': plan.id,
-                    'plan_nombre': plan.nombre,
-                    'progreso_instructor': round((completados / total * 100) if total > 0 else 0),
-                    'total_temas': total,
-                    'clases_dadas': completados
-                })
-            
-            resultado.append({
-                'estudiante_id': estudiante.id,
-                'estudiante_nombre': estudiante.username,
-                'progreso_general': progreso_estudiante
-            })
-        
-        return Response(resultado)
-    
-    @action(detail=False, methods=['get'], url_path='admin-vista')
-    def admin_vista(self, request):
-        """Vista para administradores: ver todo el sistema"""
-        if not request.user.is_staff:
-            return Response({'error': 'No autorizado'}, status=403)
-        
-        # Estadísticas generales
-        total_estudiantes = Usuario.objects.filter(groups__name='Estudiantes').count()
-        total_planes = PlanEstudio.objects.count()
-        
-        # Temas bloqueados (donde falta un check)
-        temas_bloqueados = ProgresoTema.objects.filter(
-            Q(estudiante_completado=False) | Q(instructor_completado=False)
-        ).exclude(
-            estudiante_completado=True, instructor_completado=True
-        )
-        
-        # Notificaciones no leídas
-        notificaciones_no_leidas = Notificacion.objects.filter(leida=False).count()
-        
-        # Progreso general
-        todos_progresos = ProgresoTema.objects.all()
-        total_temas_progreso = todos_progresos.count()
-        completados_total = todos_progresos.filter(
-            estudiante_completado=True, instructor_completado=True
-        ).count()
-        
-        return Response({
-            'estadisticas': {
-                'total_estudiantes': total_estudiantes,
-                'total_planes': total_planes,
-                'temas_bloqueados': temas_bloqueados.count(),
-                'notificaciones_pendientes': notificaciones_no_leidas,
-                'tasa_completacion': round((completados_total / total_temas_progreso * 100) if total_temas_progreso > 0 else 0)
-            },
-            'temas_bloqueados_detalle': ProgresoTemaSerializer(temas_bloqueados[:10], many=True).data,
-            'notificaciones_recientes': NotificacionSerializer(
-                Notificacion.objects.filter(leida=False)[:10], 
-                many=True
-            ).data
-        })
+    http_method_names = [
+        'get',
+        'head',
+        'options',
+    ]
 
     @action(detail=False, methods=['get'], url_path='mi-progreso')
     def mi_progreso(self, request):
@@ -5382,6 +7236,9 @@ class DashboardPlanViewSet(viewsets.ViewSet):
                 'matricula_id': matricula.id,
                 'aplica_progreso': False,
                 'examen_disponible': True,
+                'mensaje_examen': (
+                    'Este curso no usa checks como requisito para el examen teórico.'
+                ),
             })
 
         if total_temas == 0:
@@ -5393,7 +7250,11 @@ class DashboardPlanViewSet(viewsets.ViewSet):
                 'tipo_curso': matricula.tipo_curso,
                 'matricula_id': matricula.id,
                 'aplica_progreso': True,
-                'examen_disponible': False,
+                'examen_disponible': True,
+                'mensaje_examen': (
+                    'El examen teórico no depende de los checks '
+                    'del plan de estudio.'
+                ),
             })
 
         temas_completados = progresos.filter(
@@ -5413,17 +7274,23 @@ class DashboardPlanViewSet(viewsets.ViewSet):
             'tipo_curso': matricula.tipo_curso,
             'matricula_id': matricula.id,
             'aplica_progreso': True,
-            'examen_disponible': (
-                total_temas > 0 and
-                temas_completados >= total_temas
-            ),
+            'examen_disponible': True,
         })
-    
 
 class PreguntaExamenTeoricoViewSet(viewsets.ModelViewSet):
     queryset = PreguntaExamenTeorico.objects.prefetch_related('opciones').all()
     serializer_class = PreguntaExamenTeoricoSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = PaginacionOpcional
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'delete',
+        'head',
+        'options',
+    ]
 
     def get_queryset(self):
         user = self.request.user
@@ -5433,11 +7300,7 @@ class PreguntaExamenTeoricoViewSet(viewsets.ModelViewSet):
             'opciones'
         ).all().order_by('-fecha_creacion')
 
-        # tipo_curso = self.request.query_params.get('tipo_curso')
         activa = self.request.query_params.get('activa')
-
-        # if tipo_curso:
-        #     queryset = queryset.filter(tipo_curso=tipo_curso)
 
         if activa is not None:
             if activa.lower() == 'true':
@@ -5445,45 +7308,110 @@ class PreguntaExamenTeoricoViewSet(viewsets.ModelViewSet):
             elif activa.lower() == 'false':
                 queryset = queryset.filter(activa=False)
 
-        if rol in ['admin', 'administrador']:
+        if es_admin(user):
             return queryset
 
         return queryset.none()
 
     def perform_create(self, serializer):
         user = self.request.user
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
 
-        if rol not in ['admin', 'administrador']:
+        if not es_admin(user):
             raise serializers.ValidationError(
-                'Solo el administrador puede crear preguntas del examen teórico.'
+                'Solo administración puede crear preguntas del examen teórico.'
             )
 
         serializer.save()
 
     def perform_update(self, serializer):
         user = self.request.user
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
 
-        if rol not in ['admin', 'administrador']:
+        if not es_admin(user):
             raise serializers.ValidationError(
-                'Solo el administrador puede editar preguntas del examen teórico.'
+                (
+                    'Solo administración puede editar '
+                    'preguntas del examen teórico.'
+                )
+            )
+
+        pregunta = serializer.instance
+
+        tiene_intento_activo = (
+            pregunta.asignaciones_examen
+            .filter(
+                intento__estado__in=[
+                    'habilitado',
+                    'iniciado',
+                ]
+            )
+            .exists()
+        )
+
+        if tiene_intento_activo:
+            raise serializers.ValidationError(
+                {
+                    'error': (
+                        'Esta pregunta pertenece a un examen que un estudiante todavía tiene activo. '
+                        'No puede editarse hasta que el intento sea enviado.'
+                    )
+                }
             )
 
         serializer.save()
 
     def destroy(self, request, *args, **kwargs):
-        user = request.user
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
-
-        if rol not in ['admin', 'administrador']:
+        if not es_admin(request.user):
             return Response(
-                {'error': 'Solo el administrador puede eliminar preguntas.'},
-                status=status.HTTP_403_FORBIDDEN
+                {
+                    'error': (
+                        'Solo administración puede '
+                        'eliminar preguntas.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
             )
 
-        return super().destroy(request, *args, **kwargs)
-    
+        pregunta = self.get_object()
+
+        fue_utilizada = (
+            pregunta.asignaciones_examen
+            .exists()
+        )
+
+        if fue_utilizada:
+            if pregunta.activa:
+                pregunta.activa = False
+                pregunta.save(
+                    update_fields=[
+                        'activa',
+                    ]
+                )
+
+            return Response(
+                {
+                    'message': (
+                        'La pregunta ya fue utilizada en un '
+                        'examen. Se retiró de los exámenes nuevos, '
+                        'pero se conservó en el historial.'
+                    ),
+                    'desactivada': True,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        pregunta.delete()
+
+        return Response(
+            {
+                'message': (
+                    'La pregunta y sus opciones fueron '
+                    'eliminadas correctamente.'
+                ),
+                'desactivada': False,
+            },
+            status=status.HTTP_200_OK,
+        )
+
 class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = ExamenTeorico.objects.select_related(
         'matricula',
@@ -5493,42 +7421,301 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
 
     serializer_class = ExamenTeoricoSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = PaginacionOpcional
+    http_method_names = [
+        'get',
+        'post',
+        'head',
+        'options',
+    ]
 
     def get_queryset(self):
         user = self.request.user
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
 
-        queryset = ExamenTeorico.objects.select_related(
-            'matricula',
-            'matricula__estudiante',
-            'habilitado_por',
-        ).all().order_by('-id')
+        queryset = (
+            ExamenTeorico.objects
+            .select_related(
+                'matricula',
+                'matricula__estudiante',
+                'habilitado_por',
+            )
+            .all()
+            .order_by('-id')
+        )
 
-        if rol in ['admin', 'administrador']:
+        if es_admin(user):
             return queryset
 
-        if rol == 'instructor' and user.instructor_id:
-            return queryset.filter(habilitado_por_id=user.instructor_id)
+        if es_instructor(user):
+            return queryset.filter(
+                habilitado_por_id=user.instructor_id
+            )
 
-        if rol == 'estudiante' and user.estudiante_id:
-            return queryset.filter(matricula__estudiante_id=user.estudiante_id)
+        if es_estudiante(user):
+            return queryset.filter(
+                matricula__estudiante_id=user.estudiante_id
+            )
 
         return queryset.none()
 
     def create(self, request, *args, **kwargs):
         return Response(
-            {'error': 'Para habilitar un examen usa /api/examen-teorico/habilitar/.'},
+            {
+                'error': (
+                    'Para habilitar un examen usa '
+                    '/api/examen-teorico/habilitar/.'
+                )
+            },
             status=status.HTTP_405_METHOD_NOT_ALLOWED
         )
+
+    def obtener_ultima_clase_practica(self, matricula):
+        return (
+            Calendario.objects
+            .filter(
+                matricula=matricula,
+                es_examen=False,
+            )
+            .exclude(
+                estado='cancelada'
+            )
+            .order_by(
+                '-fecha',
+                '-hora_fin',
+                '-id',
+            )
+            .first()
+        )
+
+    def obtener_instructor_actual_id(self, matricula):
+        ultima_clase = self.obtener_ultima_clase_practica(
+            matricula
+        )
+
+        if not ultima_clase:
+            return None
+
+        return ultima_clase.instructor_id
+
+    def obtener_ordenes_previos(self, examen):
+        ordenes = []
+
+        intentos = (
+            IntentoExamenTeorico.objects
+            .filter(
+                examen=examen
+            )
+            .prefetch_related(
+                'preguntas_asignadas'
+            )
+            .order_by(
+                'numero_intento'
+            )
+        )
+
+        for intento in intentos:
+            ids = list(
+                intento.preguntas_asignadas
+                .order_by('orden')
+                .values_list(
+                    'pregunta_id',
+                    flat=True,
+                )
+            )
+
+            if ids:
+                ordenes.append(
+                    tuple(ids)
+                )
+
+        return set(ordenes)
+
+    def seleccionar_orden_preguntas(
+        self,
+        examen,
+        total_requerido,
+    ):
+        ids_preguntas = list(
+            PreguntaExamenTeorico.objects
+            .filter(
+                activa=True
+            )
+            .values_list(
+                'id',
+                flat=True,
+            )
+        )
+
+        if not ids_preguntas:
+            return []
+
+        total = min(
+            len(ids_preguntas),
+            total_requerido,
+        )
+
+        ids_preguntas = ids_preguntas[:]
+        ordenes_previos = self.obtener_ordenes_previos(
+            examen
+        )
+
+        if total <= 1 and ordenes_previos:
+            raise ValueError(
+                'No hay suficientes preguntas activas para '
+                'generar un orden diferente al intento anterior.'
+            )
+
+        for _ in range(50):
+            random.shuffle(ids_preguntas)
+
+            seleccion = tuple(
+                ids_preguntas[:total]
+            )
+
+            if seleccion not in ordenes_previos:
+                return list(seleccion)
+
+        seleccion_base = ids_preguntas[:total]
+
+        for desplazamiento in range(1, total):
+            seleccion = tuple(
+                seleccion_base[desplazamiento:]
+                + seleccion_base[:desplazamiento]
+            )
+
+            if seleccion not in ordenes_previos:
+                return list(seleccion)
+
+        raise ValueError(
+            'No fue posible generar un orden de preguntas diferente para este estudiante.'
+        )
+
+    def crear_intento_habilitado(
+        self,
+        examen,
+        total_requerido=30,
+    ):
+        ultimo_intento = (
+            IntentoExamenTeorico.objects
+            .filter(
+                examen=examen
+            )
+            .order_by(
+                '-numero_intento'
+            )
+            .first()
+        )
+
+        if (
+            ultimo_intento
+            and ultimo_intento.estado in [
+                'habilitado',
+                'iniciado',
+            ]
+        ):
+            return ultimo_intento
+
+        if (
+            ultimo_intento
+            and ultimo_intento.estado == 'realizado'
+            and ultimo_intento.nota is not None
+            and ultimo_intento.nota >= 80
+        ):
+            raise ValueError(
+                'El estudiante ya aprobó el examen teórico.'
+            )
+
+        siguiente_numero = (
+            ultimo_intento.numero_intento + 1
+            if ultimo_intento
+            else 1
+        )
+
+        ids_preguntas = self.seleccionar_orden_preguntas(
+            examen,
+            total_requerido,
+        )
+
+        if not ids_preguntas:
+            raise ValueError(
+                'No existen preguntas activas para el examen teórico.'
+            )
+
+        intento = IntentoExamenTeorico.objects.create(
+            examen=examen,
+            numero_intento=siguiente_numero,
+            estado='habilitado',
+            fecha_habilitado=timezone.now(),
+        )
+
+        asignaciones = [
+            PreguntaIntentoExamenTeorico(
+                intento=intento,
+                pregunta_id=pregunta_id,
+                orden=indice,
+            )
+            for indice, pregunta_id in enumerate(
+                ids_preguntas,
+                start=1,
+            )
+        ]
+
+        PreguntaIntentoExamenTeorico.objects.bulk_create(
+            asignaciones
+        )
+
+        return intento
+
+    def obtener_intento_actual(self, examen):
+        return (
+            IntentoExamenTeorico.objects
+            .filter(
+                examen=examen,
+                estado__in=[
+                    'habilitado',
+                    'iniciado',
+                ],
+            )
+            .order_by(
+                '-numero_intento'
+            )
+            .first()
+        )
+
+    def obtener_preguntas_del_intento(self, intento):
+        asignaciones = (
+            PreguntaIntentoExamenTeorico.objects
+            .select_related(
+                'pregunta'
+            )
+            .prefetch_related(
+                'pregunta__opciones'
+            )
+            .filter(
+                intento=intento
+            )
+            .order_by(
+                'orden'
+            )
+        )
+
+        return [
+            asignacion.pregunta
+            for asignacion in asignaciones
+        ]
 
     @action(detail=False, methods=['post'], url_path='habilitar')
     def habilitar(self, request):
         user = request.user
-        rol = user.rol_nombre if hasattr(user, 'rol_nombre') else ""
 
-        if rol != 'instructor' or not user.instructor_id:
+        if not es_instructor(user):
             return Response(
-                {'error': 'Solo un instructor puede habilitar el examen teórico.'},
+                {
+                    'error': (
+                        'Solo un instructor puede habilitar '
+                        'el examen teórico.'
+                    )
+                },
                 status=status.HTTP_403_FORBIDDEN
             )
 
@@ -5536,162 +7723,204 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
 
         if not matricula_id:
             return Response(
-                {'error': 'Debe enviar la matrícula del estudiante.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        try:
-            matricula = Matricula.objects.select_related(
-                'estudiante',
-                'plan_de_estudio',
-            ).get(id=matricula_id)
-        except Matricula.DoesNotExist:
-            return Response(
-                {'error': 'Matrícula no encontrada.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        if matricula.estado not in ['matriculado', 'finalizado']:
-            return Response(
                 {
                     'error': (
-                        'El estudiante debe estar matriculado o tener el plan finalizado '
-                        'para habilitar el examen.'
+                        'Debe enviar la matrícula del estudiante.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        tiene_clase_con_instructor = Calendario.objects.filter(
-            matricula=matricula,
-            instructor_id=user.instructor_id,
-            es_examen=False,
-        ).exists()
-
-        if not tiene_clase_con_instructor:
+        try:
+            matricula = (
+                Matricula.objects
+                .select_related(
+                    'estudiante',
+                    'plan_de_estudio',
+                )
+                .get(
+                    id=matricula_id
+                )
+            )
+        except Matricula.DoesNotExist:
             return Response(
-                {'error': 'Este estudiante no está asignado a este instructor.'},
-                status=status.HTTP_403_FORBIDDEN
+                {
+                    'error': 'Matrícula no encontrada.'
+                },
+                status=status.HTTP_404_NOT_FOUND
             )
 
-        validacion_plan = validar_plan_completado_para_examen(matricula)
-
-        if not validacion_plan['completo']:
+        if matricula.estado not in [
+            'matriculado',
+            'finalizado',
+        ]:
             return Response(
-                {'error': validacion_plan['error']},
+                {
+                    'error': (
+                        'La matrícula debe encontrarse activa o finalizada para habilitar el examen.'
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        preguntas_disponibles = PreguntaExamenTeorico.objects.filter(
-                activa=True,
-            ).count()
+        instructor_actual_id = (
+            self.obtener_instructor_actual_id(
+                matricula
+            )
+        )
+
+        if not instructor_actual_id:
+            return Response(
+                {
+                    'error': (
+                        'La matrícula todavía no tiene clases prácticas asignadas.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if instructor_actual_id != user.instructor_id:
+            return Response(
+                {
+                    'error': (
+                        'Solo el instructor actualmente asignado al estudiante puede habilitar el examen.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        preguntas_disponibles = (
+            PreguntaExamenTeorico.objects
+            .filter(
+                activa=True
+            )
+            .count()
+        )
 
         if preguntas_disponibles == 0:
             return Response(
                 {
                     'error': (
-                        f'No existen preguntas activas para el examen teórico. '
-                        f'{matricula.tipo_curso}.'
+                        'No existen preguntas activas para el examen teórico.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        examen, created = ExamenTeorico.objects.get_or_create(
-            matricula=matricula,
-            defaults={
-                'habilitado_por_id': user.instructor_id,
-                'estado': 'habilitado',
-                'fecha_habilitado': timezone.now(),
-            }
-        )
-
-        if not created:
-
-                if examen.estado == 'realizado' and examen.nota is not None and examen.nota >= 80:
-                    return Response(
-                        {'error': 'El estudiante ya aprobó el examen teórico.'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-
-                if examen.estado == 'realizado' and examen.nota is not None and examen.nota < 80:
-                    RespuestaExamenTeorico.objects.filter(examen=examen).delete()
-
-                    examen.estado = 'habilitado'
-                    examen.nota = None
-                    examen.fecha_realizado = None
-                    examen.fecha_habilitado = timezone.now()
-                    examen.habilitado_por_id = user.instructor_id
-
-                    examen.save(update_fields=[
-                        'estado',
-                        'nota',
-                        'fecha_realizado',
-                        'fecha_habilitado',
-                        'habilitado_por',
-                    ])
-
-                else:
-                    examen.estado = 'habilitado'
-                    examen.fecha_habilitado = timezone.now()
-                    examen.habilitado_por_id = user.instructor_id
-
-                    examen.save(update_fields=[
-                        'estado',
-                        'fecha_habilitado',
-                        'habilitado_por',
-                    ])
-
-        serializer = self.get_serializer(examen)
-
-        return Response(
-                {
-                    'message': 'Examen teórico habilitado correctamente.',
-                    'examen': serializer.data,
-                },
-                status=status.HTTP_200_OK
+        with transaction.atomic():
+            examen, created = (
+                ExamenTeorico.objects
+                .select_for_update()
+                .get_or_create(
+                    matricula=matricula,
+                    defaults={
+                        'habilitado_por_id': user.instructor_id,
+                        'estado': 'habilitado',
+                        'fecha_habilitado': timezone.now(),
+                    }
+                )
             )
 
-    @action(detail=False, methods=['get'], url_path='mi-examen')
-    def mi_examen(self, request):
-        user = request.user
-        rol = (
-            user.rol_nombre
-            if hasattr(user, 'rol_nombre')
-            else ''
+            if (
+                not created
+                and examen.estado == 'realizado'
+                and examen.nota is not None
+                and examen.nota >= 80
+            ):
+                return Response(
+                    {
+                        'error': (
+                            'El estudiante ya aprobó el examen teórico.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            examen.estado = 'habilitado'
+            examen.nota = None
+            examen.fecha_realizado = None
+            examen.fecha_habilitado = timezone.now()
+            examen.habilitado_por_id = user.instructor_id
+            examen.save(
+                update_fields=[
+                    'estado',
+                    'nota',
+                    'fecha_realizado',
+                    'fecha_habilitado',
+                    'habilitado_por',
+                ]
+            )
+
+            try:
+                intento = self.crear_intento_habilitado(
+                    examen
+                )
+            except ValueError as error:
+                return Response(
+                    {
+                        'error': str(error)
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        serializer = self.get_serializer(
+            examen
         )
 
-        if rol != 'estudiante' or not user.estudiante_id:
+        return Response(
+            {
+                'message': (
+                    'Examen teórico habilitado correctamente.'
+                ),
+                'examen': serializer.data,
+                'intento': intento.numero_intento,
+            },
+            status=status.HTTP_200_OK
+        )
+
+    @action(
+        detail=False,
+        methods=['get'],
+        url_path='mi-examen',
+    )
+    def mi_examen(self, request):
+        user = request.user
+
+        if not es_estudiante(user):
             return Response(
                 {
                     'error': (
-                        'Solo el estudiante puede consultar '
-                        'su examen teórico.'
+                        'Solo el estudiante puede consultar su examen teórico.'
                     )
                 },
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        matricula = Matricula.objects.select_related(
-            'estudiante',
-            'plan_de_estudio',
-        ).filter(
-            estudiante_id=user.estudiante_id,
-            estado__in=[
-                'matriculado',
-                'finalizado',
-            ]
-        ).order_by(
-            '-id'
-        ).first()
+        matricula = (
+            Matricula.objects
+            .select_related(
+                'estudiante',
+                'plan_de_estudio',
+            )
+            .filter(
+                estudiante_id=user.estudiante_id,
+                estado__in=[
+                    'matriculado',
+                    'finalizado',
+                ]
+            )
+            .order_by(
+                '-id'
+            )
+            .first()
+        )
 
         if not matricula:
             return Response(
                 {
                     'disponible': False,
                     'message': (
-                        'No tienes una matrícula activa para '
-                        'realizar el examen teórico.'
+                        'No tienes una matrícula activa para realizar el examen teórico.'
                     ),
                 },
                 status=status.HTTP_200_OK
@@ -5701,28 +7930,28 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
             matricula.tipo_curso or ''
         ).strip().lower()
 
-        examen = ExamenTeorico.objects.select_related(
-            'matricula',
-            'matricula__estudiante',
-            'habilitado_por',
-        ).filter(
-            matricula=matricula
-        ).first()
+        examen = (
+            ExamenTeorico.objects
+            .select_related(
+                'matricula',
+                'matricula__estudiante',
+                'habilitado_por',
+            )
+            .filter(
+                matricula=matricula
+            )
+            .first()
+        )
 
-        # Intermedio y Avanzado se habilitan automáticamente.
-        if tipo_curso in ['intermedio', 'avanzado']:
-            instructor_id = Calendario.objects.filter(
-                matricula=matricula,
-                es_examen=False,
-            ).exclude(
-                estado='cancelada'
-            ).order_by(
-                'fecha',
-                'id'
-            ).values_list(
-                'instructor_id',
-                flat=True
-            ).first()
+        if tipo_curso in [
+            'intermedio',
+            'avanzado',
+        ]:
+            instructor_id = (
+                self.obtener_instructor_actual_id(
+                    matricula
+                )
+            )
 
             if not examen:
                 examen = ExamenTeorico.objects.create(
@@ -5732,37 +7961,14 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
                     fecha_habilitado=timezone.now(),
                 )
 
-            elif examen.estado == 'pendiente':
-                examen.estado = 'habilitado'
-                examen.fecha_habilitado = timezone.now()
-
-                campos_actualizados = [
-                    'estado',
-                    'fecha_habilitado',
-                ]
-
-                if (
-                    not examen.habilitado_por_id
-                    and instructor_id
-                ):
-                    examen.habilitado_por_id = instructor_id
-                    campos_actualizados.append(
-                        'habilitado_por'
-                    )
-
-                examen.save(
-                    update_fields=campos_actualizados
-                )
-
             elif (
-                examen.estado == 'realizado'
-                and examen.nota is not None
-                and float(examen.nota) < 80
+                examen.estado == 'pendiente'
+                or (
+                    examen.estado == 'realizado'
+                    and examen.nota is not None
+                    and examen.nota < 80
+                )
             ):
-                RespuestaExamenTeorico.objects.filter(
-                    examen=examen
-                ).delete()
-
                 examen.estado = 'habilitado'
                 examen.nota = None
                 examen.fecha_realizado = None
@@ -5775,10 +7981,7 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
                     'fecha_habilitado',
                 ]
 
-                if (
-                    not examen.habilitado_por_id
-                    and instructor_id
-                ):
+                if instructor_id:
                     examen.habilitado_por_id = instructor_id
                     campos_actualizados.append(
                         'habilitado_por'
@@ -5793,20 +7996,23 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
                 {
                     'disponible': False,
                     'message': (
-                        'Todavía no tienes examen teórico '
-                        'habilitado.'
+                        'Todavía no tienes examen teórico habilitado.'
                     ),
                 },
                 status=status.HTTP_200_OK
             )
 
-        if examen.estado == 'realizado':
+        if (
+            examen.estado == 'realizado'
+            and examen.nota is not None
+            and examen.nota >= 80
+        ):
             return Response(
                 {
                     'disponible': False,
                     'realizado': True,
                     'message': (
-                        'Ya realizaste el examen teórico.'
+                        'Ya aprobaste el examen teórico.'
                     ),
                     'examen': self.get_serializer(
                         examen
@@ -5821,20 +8027,48 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
                     'disponible': False,
                     'realizado': False,
                     'message': (
-                        'Tu examen teórico todavía '
-                        'no está disponible.'
+                        'Tu examen teórico todavía no está disponible.'
                     ),
                 },
                 status=status.HTTP_200_OK
             )
 
-        preguntas = PreguntaExamenTeorico.objects.prefetch_related(
-            'opciones'
-        ).filter(
-            activa=True
-        ).order_by(
-            '?'
-        )[:30]
+        with transaction.atomic():
+            examen = (
+                ExamenTeorico.objects
+                .select_for_update()
+                .get(
+                    id=examen.id
+                )
+            )
+
+            try:
+                intento = self.crear_intento_habilitado(
+                    examen
+                )
+            except ValueError as error:
+                return Response(
+                    {
+                        'disponible': False,
+                        'message': str(error),
+                    },
+                    status=status.HTTP_200_OK
+                )
+
+            if intento.estado == 'habilitado':
+                intento.estado = 'iniciado'
+                intento.fecha_iniciado = timezone.now()
+
+                intento.save(
+                    update_fields=[
+                        'estado',
+                        'fecha_iniciado',
+                    ]
+                )
+
+        preguntas = self.obtener_preguntas_del_intento(
+            intento
+        )
 
         preguntas_serializer = (
             PreguntaExamenEstudianteSerializer(
@@ -5852,22 +8086,25 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
                 'examen': self.get_serializer(
                     examen
                 ).data,
+                'intento': intento.numero_intento,
                 'preguntas': preguntas_serializer.data,
             },
             status=status.HTTP_200_OK
         )
 
-    @action(detail=True, methods=['post'], url_path='enviar')
+    @action(
+        detail=True,
+        methods=['post'],
+        url_path='enviar',
+    )
     def enviar(self, request, pk=None):
         user = request.user
-        rol = obtener_rol(user)
 
-        if rol != 'estudiante' or not user.estudiante_id:
+        if not es_estudiante(user):
             return Response(
                 {
                     'error': (
-                        'Solo el estudiante puede enviar '
-                        'el examen teórico.'
+                        'Solo el estudiante puede enviar el examen teórico.'
                     )
                 },
                 status=status.HTTP_403_FORBIDDEN
@@ -5882,8 +8119,7 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(
                 {
                     'error': (
-                        'No puedes enviar un examen '
-                        'que no te pertenece.'
+                        'No puedes enviar un examen que no te pertenece.'
                     )
                 },
                 status=status.HTTP_403_FORBIDDEN
@@ -5893,8 +8129,7 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(
                 {
                     'error': (
-                        'Este examen no está habilitado '
-                        'o ya fue realizado.'
+                        'Este examen no está habilitado o ya fue realizado.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -5903,140 +8138,119 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = RespuestaEnviarExamenSerializer(
             data=request.data
         )
-        serializer.is_valid(raise_exception=True)
+
+        serializer.is_valid(
+            raise_exception=True
+        )
 
         respuestas = serializer.validated_data[
             'respuestas'
         ]
 
-        respuestas_ids_lista = [
-            int(respuesta['pregunta_id'])
+        respuestas_ids = {
+            respuesta['pregunta_id']
             for respuesta in respuestas
-        ]
+        }
 
-        respuestas_ids = set(
-            respuestas_ids_lista
+        intento = self.obtener_intento_actual(
+            examen
         )
 
-        if len(respuestas_ids_lista) != len(
-            respuestas_ids
-        ):
+        if not intento:
             return Response(
                 {
                     'error': (
-                        'Una pregunta fue respondida '
-                        'más de una vez.'
+                        'No existe un intento activo para este examen.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        total_activas = (
-            PreguntaExamenTeorico.objects.filter(
-                activa=True
-            ).count()
+        asignaciones = list(
+            PreguntaIntentoExamenTeorico.objects
+            .select_related(
+                'pregunta'
+            )
+            .filter(
+                intento=intento
+            )
+            .order_by(
+                'orden'
+            )
         )
 
-        total_requerido = min(
-            total_activas,
-            30
+        total_requerido = len(
+            asignaciones
         )
 
         if total_requerido == 0:
             return Response(
                 {
                     'error': (
-                        'No hay preguntas activas '
-                        'para este examen.'
+                        'El intento no tiene preguntas asignadas.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if len(respuestas_ids) != total_requerido:
+        preguntas_asignadas_ids = {
+            asignacion.pregunta_id
+            for asignacion in asignaciones
+        }
+
+        if respuestas_ids != preguntas_asignadas_ids:
             return Response(
                 {
                     'error': (
-                        f'Debe responder las '
-                        f'{total_requerido} preguntas '
-                        f'del examen.'
+                        'Las respuestas enviadas no coinciden con las preguntas asignadas al intento.'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        preguntas = list(
-            PreguntaExamenTeorico.objects
-            .prefetch_related('opciones')
+        opciones = (
+            OpcionPreguntaExamenTeorico.objects
             .filter(
-                activa=True,
-                id__in=respuestas_ids,
+                id__in=[
+                    respuesta['opcion_id']
+                    for respuesta in respuestas
+                ],
+                pregunta_id__in=preguntas_asignadas_ids,
+            )
+            .select_related(
+                'pregunta'
             )
         )
 
-        if len(preguntas) != total_requerido:
-            return Response(
-                {
-                    'error': (
-                        'Una o más preguntas enviadas '
-                        'ya no están disponibles.'
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        preguntas_por_id = {
-            pregunta.id: pregunta
-            for pregunta in preguntas
+        opciones_por_id = {
+            opcion.id: opcion
+            for opcion in opciones
         }
 
         respuestas_preparadas = []
 
         for respuesta in respuestas:
-            pregunta_id = int(
-                respuesta['pregunta_id']
-            )
-            opcion_id = int(
-                respuesta['opcion_id']
-            )
-
-            pregunta = preguntas_por_id.get(
-                pregunta_id
+            pregunta_id = respuesta['pregunta_id']
+            opcion_id = respuesta['opcion_id']
+            opcion = opciones_por_id.get(
+                opcion_id
             )
 
-            if not pregunta:
+            if (
+                not opcion
+                or opcion.pregunta_id != pregunta_id
+            ):
                 return Response(
                     {
                         'error': (
-                            'Una pregunta no pertenece '
-                            'al examen actual.'
-                        )
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            opcion = (
-                OpcionPreguntaExamenTeorico.objects
-                .filter(
-                    id=opcion_id,
-                    pregunta=pregunta,
-                )
-                .first()
-            )
-
-            if not opcion:
-                return Response(
-                    {
-                        'error': (
-                            'Una opción no pertenece '
-                            'a la pregunta indicada.'
+                            'Una opción no pertenece a la pregunta indicada.'
                         )
                     },
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
             respuestas_preparadas.append({
-                'pregunta': pregunta,
+                'pregunta_id': pregunta_id,
                 'opcion': opcion,
             })
 
@@ -6052,34 +8266,27 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
-
         instructor = examen.habilitado_por
 
         if not instructor:
-            instructor_id = Calendario.objects.filter(
-                matricula=examen.matricula,
-                es_examen=False,
-            ).exclude(
-                estado='cancelada'
-            ).order_by(
-                'fecha',
-                'id'
-            ).values_list(
-                'instructor_id',
-                flat=True
-            ).first()
+            instructor_id = self.obtener_instructor_actual_id(
+                examen.matricula
+            )
 
             if instructor_id:
-                instructor = Instructor.objects.filter(
-                    id=instructor_id
-                ).first()
+                instructor = (
+                    Instructor.objects
+                    .filter(
+                        id=instructor_id
+                    )
+                    .first()
+                )
 
         if not instructor:
             return Response(
                 {
                     'error': (
-                        'No se puede registrar la nota '
-                        'porque la matrícula todavía no '
+                        'No se puede registrar la nota porque la matrícula todavía no '
                         'tiene instructor asignado.'
                     )
                 },
@@ -6087,9 +8294,40 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         with transaction.atomic():
-            examen = ExamenTeorico.objects.select_for_update().get(
-                id=examen.id
+            examen = (
+                ExamenTeorico.objects
+                .select_for_update()
+                .get(
+                    id=examen.id
+                )
             )
+
+            intento = (
+                IntentoExamenTeorico.objects
+                .select_for_update()
+                .filter(
+                    examen=examen,
+                    estado__in=[
+                        'habilitado',
+                        'iniciado',
+                    ],
+                )
+                .order_by(
+                    '-numero_intento'
+                )
+                .first()
+            )
+
+            if not intento:
+                return Response(
+                    {
+                        'error': (
+                            'El intento ya fue enviado '
+                            'o dejó de estar disponible.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
             if examen.estado != 'habilitado':
                 return Response(
@@ -6102,26 +8340,29 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            RespuestaExamenTeorico.objects.filter(
-                examen=examen
-            ).delete()
-
             correctas = 0
+            respuestas_crear = []
 
             for item in respuestas_preparadas:
-                pregunta = item['pregunta']
                 opcion = item['opcion']
                 es_correcta = opcion.es_correcta
 
                 if es_correcta:
                     correctas += 1
 
-                RespuestaExamenTeorico.objects.create(
-                    examen=examen,
-                    pregunta=pregunta,
-                    opcion_seleccionada=opcion,
-                    correcta=es_correcta,
+                respuestas_crear.append(
+                    RespuestaExamenTeorico(
+                        examen=examen,
+                        intento=intento,
+                        pregunta_id=item['pregunta_id'],
+                        opcion_seleccionada=opcion,
+                        correcta=es_correcta,
+                    )
                 )
+
+            RespuestaExamenTeorico.objects.bulk_create(
+                respuestas_crear
+            )
 
             nota_final = round(
                 (
@@ -6129,6 +8370,18 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
                     / total_requerido
                 ) * 100,
                 2
+            )
+
+            intento.estado = 'realizado'
+            intento.nota = nota_final
+            intento.fecha_realizado = timezone.now()
+
+            intento.save(
+                update_fields=[
+                    'estado',
+                    'nota',
+                    'fecha_realizado',
+                ]
             )
 
             examen.estado = 'realizado'
@@ -6145,35 +8398,70 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
                 ]
             )
 
-            Notas.objects.update_or_create(
-                matricula=examen.matricula,
-                tipo_nota='teorico',
-                defaults={
-                    'instructor': instructor,
-                    'plan_de_estudio': plan,
-                    'nota': str(nota_final),
-                    'comentario': (
-                        'Examen teórico aprobado '
-                        'automáticamente por el sistema.'
-                        if nota_final >= 80
-                        else (
-                            'Examen teórico reprobado. '
-                            'Puede realizarlo nuevamente.'
-                        )
-                    ),
-                }
+            comentario_nota = (
+                'Examen teórico aprobado automáticamente por el sistema.'
+                if nota_final >= 80
+                else (
+                    'Examen teórico reprobado. '
+                    'Puede realizarlo nuevamente.'
+                )
             )
 
-            finalizar_matricula_si_tiene_dos_notas(
-                examen.matricula
+            nota_teorica = (
+                Notas.objects
+                .select_for_update()
+                .filter(
+                    matricula=examen.matricula,
+                    tipo_nota='teorico',
+                )
+                .order_by(
+                    '-fecha_registro',
+                    '-id',
+                )
+                .first()
             )
+
+            if nota_teorica:
+                nota_teorica.instructor = instructor
+                nota_teorica.plan_de_estudio = plan
+                nota_teorica.nota = f'{nota_final:.2f}'
+                nota_teorica.comentario = comentario_nota
+
+                nota_teorica.save(
+                    update_fields=[
+                        'instructor',
+                        'plan_de_estudio',
+                        'nota',
+                        'comentario',
+                    ]
+                )
+            else:
+                nota_teorica = Notas.objects.create(
+                    matricula=examen.matricula,
+                    tipo_nota='teorico',
+                    instructor=instructor,
+                    plan_de_estudio=plan,
+                    nota=f'{nota_final:.2f}',
+                    comentario=comentario_nota,
+                )
+
+            matricula_finalizada = (
+                actualizar_estado_matricula_por_notas(
+                    nota_teorica.matricula
+                )
+            )
+
+            if matricula_finalizada:
+                desactivar_usuarios_estudiante(
+                    nota_teorica.matricula.estudiante
+                )
 
         return Response(
             {
                 'message': (
-                    'Examen enviado y '
-                    'calificado correctamente.'
+                    'Examen enviado y calificado correctamente.'
                 ),
+                'intento': intento.numero_intento,
                 'total_preguntas': total_requerido,
                 'correctas': correctas,
                 'nota': nota_final,
@@ -6190,20 +8478,54 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
     def respuestas(self, request, pk=None):
         examen = self.get_object()
 
-        respuestas = RespuestaExamenTeorico.objects.select_related(
-            'pregunta',
-            'opcion_seleccionada',
-        ).filter(
-            examen=examen
+        intento = (
+            IntentoExamenTeorico.objects
+            .filter(
+                examen=examen,
+                estado='realizado',
+            )
+            .order_by(
+                '-numero_intento'
+            )
+            .first()
         )
 
-        serializer = RespuestaExamenTeoricoSerializer(respuestas, many=True)
+        respuestas = (
+            RespuestaExamenTeorico.objects
+            .select_related(
+                'pregunta',
+                'opcion_seleccionada',
+                'intento',
+            )
+            .filter(
+                examen=examen
+            )
+        )
 
-        return Response(serializer.data)
-    
+        if intento:
+            respuestas = respuestas.filter(
+                intento=intento
+            )
+
+        serializer = RespuestaExamenTeoricoSerializer(
+            respuestas,
+            many=True
+        )
+
+        return Response(
+            serializer.data
+        )
 
 class PerfilView(APIView):
     permission_classes = [IsAuthenticated]
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
 
     def get_foto_url(self, request, instructor):
         return obtener_foto_instructor(instructor)
@@ -6260,11 +8582,21 @@ class PerfilView(APIView):
             "instructor": None,
             "estudiantes": [],
             "instructores": [],
+            "matricula_activa": False,
         }
 
         if rol in ['admin', 'administrador', 'secretaria']:
             instructores = Instructor.objects.all().order_by('-id')
-            estudiantes = Estudiante.objects.all().order_by('-id')
+
+            matriculas_activas = Matricula.objects.exclude(
+                id__in=obtener_ids_matriculas_egresadas()
+            )
+
+            estudiantes = Estudiante.objects.filter(
+                id__in=matriculas_activas.values(
+                    'estudiante_id'
+                )
+            ).distinct().order_by('-id')
 
             data["instructores"] = [
                 self.serializar_instructor(
@@ -6279,7 +8611,6 @@ class PerfilView(APIView):
                 self.serializar_estudiante(estudiante)
                 for estudiante in estudiantes
             ]
-
             return Response(data)
 
         if rol == 'instructor':
@@ -6288,8 +8619,18 @@ class PerfilView(APIView):
             if instructor:
                 data["mi_perfil"] = self.serializar_instructor(request, instructor)
 
+                matriculas_activas = Matricula.objects.exclude(
+                    id__in=obtener_ids_matriculas_egresadas()
+                )
+
                 estudiantes_ids = Calendario.objects.filter(
-                    instructor=instructor
+                    instructor=instructor,
+                    es_examen=False,
+                    matricula_id__in=matriculas_activas.values(
+                        'id'
+                    ),
+                ).exclude(
+                    estado='cancelada'
                 ).values_list(
                     'matricula__estudiante_id',
                     flat=True
@@ -6301,7 +8642,6 @@ class PerfilView(APIView):
                     self.serializar_estudiante(estudiante)
                     for estudiante in estudiantes
                 ]
-
             return Response(data)
 
         if rol == 'estudiante':
@@ -6310,27 +8650,137 @@ class PerfilView(APIView):
             if estudiante:
                 data["mi_perfil"] = self.serializar_estudiante(estudiante)
 
-                clase = Calendario.objects.filter(
-                    matricula__estudiante=estudiante
-                ).select_related(
-                    'instructor'
-                ).first()
+                matricula_activa = (
+                    Matricula.objects
+                    .filter(
+                        estudiante=estudiante
+                    )
+                    .exclude(
+                        estado='finalizado'
+                    )
+                    .order_by(
+                        '-id'
+                    )
+                    .first()
+                )
 
-                if clase and clase.instructor:
-                    data["instructor"] = self.serializar_instructor(
-                        request,
-                        clase.instructor
+                data["matricula_activa"] = bool(matricula_activa)
+
+                if matricula_activa:
+                    clase = (
+                        Calendario.objects
+                        .filter(
+                            matricula=matricula_activa,
+                            es_examen=False,
+                        )
+                        .exclude(
+                            estado='cancelada'
+                        )
+                        .select_related(
+                            'instructor'
+                        )
+                        .order_by(
+                            'fecha',
+                            'hora_inicio',
+                            'id',
+                        )
+                        .first()
                     )
 
+                    if clase and clase.instructor:
+                        data["instructor"] = self.serializar_instructor(
+                            request,
+                            clase.instructor
+                        )
             return Response(data)
-
         return Response(data)
-    
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def exportar_reporte_instructores_policial(request):
+    if not es_admin(request.user):
+        return Response(
+            {
+                'error': (
+                    'Solo Administración o Secretaría pueden '
+                    'generar el reporte policial de instructores.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN
+        )
+
     fecha_desde = request.query_params.get('desde')
     fecha_hasta = request.query_params.get('hasta')
+    fecha_desde_parseada = (
+        parse_date(fecha_desde)
+        if fecha_desde
+        else None
+    )
+
+    fecha_hasta_parseada = (
+        parse_date(fecha_hasta)
+        if fecha_hasta
+        else None
+    )
+
+    if fecha_desde and not fecha_desde_parseada:
+        return Response(
+            {
+                'error': (
+                    'La fecha inicial no tiene un formato válido. '
+                    'Utilice AAAA-MM-DD.'
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if fecha_hasta and not fecha_hasta_parseada:
+        return Response(
+            {
+                'error': (
+                    'La fecha final no tiene un formato válido. '
+                    'Utilice AAAA-MM-DD.'
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if (
+        fecha_desde_parseada
+        and fecha_hasta_parseada
+        and fecha_desde_parseada > fecha_hasta_parseada
+    ):
+        return Response(
+            {
+                'error': (
+                    'La fecha inicial no puede ser posterior '
+                    'a la fecha final.'
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    zona_horaria = timezone.get_current_timezone()
+    inicio_rango = None
+    fin_rango = None
+
+    if fecha_desde_parseada:
+        inicio_rango = timezone.make_aware(
+            datetime.combine(
+                fecha_desde_parseada,
+                datetime.min.time()
+            ),
+            zona_horaria
+        )
+
+    if fecha_hasta_parseada:
+        fin_rango = timezone.make_aware(
+            datetime.combine(
+                fecha_hasta_parseada + timedelta(days=1),
+                datetime.min.time()
+            ),
+            zona_horaria
+        )
 
     ruta_plantilla = os.path.join(
         settings.BASE_DIR,
@@ -6410,11 +8860,8 @@ def exportar_reporte_instructores_policial(request):
         )
 
     ws = wb[nombre_hoja]
-
     fila_inicio = 5
-
     fila = fila_inicio
-
     imagenes_conservar = []
     archivos_temporales = []
 
@@ -6464,7 +8911,6 @@ def exportar_reporte_instructores_policial(request):
         ).strip()
 
         ws.cell(row=fila, column=1, value=index)
-
         ruta_foto = obtener_ruta_foto_instructor_para_excel(instructor)
 
         if ruta_foto:
@@ -6472,13 +8918,11 @@ def exportar_reporte_instructores_policial(request):
 
             try:
                 imagen = ExcelImage(ruta_foto)
-
                 imagen.width = 42
                 imagen.height = 42
 
                 ws.row_dimensions[fila].height = 48
                 ws.column_dimensions['B'].width = 10
-
                 ws.add_image(imagen, f'B{fila}')
 
             except Exception:
@@ -6625,14 +9069,14 @@ def exportar_reporte_instructores_policial(request):
         estado__in=['matriculado', 'finalizado']
     )
 
-    if fecha_desde:
+    if inicio_rango:
         matriculas = matriculas.filter(
-            fecha_registro__gte=fecha_desde
+            fecha_registro__gte=inicio_rango
         )
 
-    if fecha_hasta:
+    if fin_rango:
         matriculas = matriculas.filter(
-            fecha_registro__lte=fecha_hasta
+            fecha_registro__lt=fin_rango
         )
 
     matriculas = matriculas.order_by(
@@ -6682,7 +9126,6 @@ def exportar_reporte_instructores_policial(request):
             horas_practicas = matricula.horas_reforzamiento or 0
 
         horas_totales = round(float(horas_practicas) / 0.6)
-
         horas_teoricas = round(
             horas_totales - float(horas_practicas)
         )
@@ -6790,7 +9233,6 @@ def exportar_reporte_instructores_policial(request):
         )
 
     ws_egresos = wb[nombre_hoja_egresos]
-
     ws_egresos.cell(
         row=5,
         column=2,
@@ -6835,14 +9277,14 @@ def exportar_reporte_instructores_policial(request):
         id__in=matriculas_egresadas_ids
     )
 
-    if fecha_desde:
+    if inicio_rango:
         egresados = egresados.filter(
-            fecha_registro__gte=fecha_desde
+            fecha_registro__gte=inicio_rango
         )
 
-    if fecha_hasta:
+    if fin_rango:
         egresados = egresados.filter(
-            fecha_registro__lte=fecha_hasta
+            fecha_registro__lt=fin_rango
         )
 
     egresados = egresados.order_by(
@@ -6904,7 +9346,6 @@ def exportar_reporte_instructores_policial(request):
         )
 
         ws_egresos.cell(row=fila, column=1, value="")
-
         ws_egresos.cell(
             row=fila,
             column=2,
@@ -6975,11 +9416,9 @@ def exportar_reporte_instructores_policial(request):
         ws_egresos.cell(row=fila, column=14, value=horas_practicas)
         ws_egresos.cell(row=fila, column=15, value=nota_teorica or "")
         ws_egresos.cell(row=fila, column=16, value=nota_practica or "")
-
         ws_egresos.cell(row=fila, column=17, value="")
         ws_egresos.cell(row=fila, column=18, value="")
         ws_egresos.cell(row=fila, column=19, value="")
-
         ws_egresos.cell(row=fila, column=20, value="")
 
         fila += 1
@@ -7003,49 +9442,117 @@ def exportar_reporte_instructores_policial(request):
                     os.remove(ruta)
             except Exception:
                 pass
-
     return response
 
 class PagoInstructorViewSet(viewsets.ModelViewSet):
-    queryset = PagoInstructor.objects.all().order_by('-fecha_inicio')
+    queryset = PagoInstructor.objects.all().order_by('-fecha_inicio', '-id')
     serializer_class = PagoInstructorSerializer
     permission_classes = [IsAuthenticated]
 
-    def create(self, request, *args, **kwargs):
-        if not es_admin(request.user):
-            return Response(
-                {'error': 'No tienes permiso para crear este registro.'},
-                status=status.HTTP_403_FORBIDDEN
+    def get_queryset(self):
+        queryset = (
+            PagoInstructor.objects
+            .all()
+            .order_by(
+                '-fecha_inicio',
+                '-id',
             )
+        )
 
-        return super().create(request, *args, **kwargs)
+        if es_admin(self.request.user):
+            return queryset
+
+        return queryset.none()
+
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
+
+    def _validar_permiso_administrativo(self, request):
+        if es_admin(request.user):
+            return None
+
+        return Response(
+            {
+                'error': (
+                    'Solo Administración o Secretaría pueden '
+                    'registrar, modificar o eliminar pagos '
+                    'de instructores.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+
+    def create(self, request, *args, **kwargs):
+        respuesta_permiso = (
+            self._validar_permiso_administrativo(
+                request
+            )
+        )
+
+        if respuesta_permiso:
+            return respuesta_permiso
+
+        return super().create(
+            request,
+            *args,
+            **kwargs
+        )
+
 
     def update(self, request, *args, **kwargs):
-        if not es_admin(request.user):
-            return Response(
-                {'error': 'No tienes permiso para editar este registro.'},
-                status=status.HTTP_403_FORBIDDEN
+        respuesta_permiso = (
+            self._validar_permiso_administrativo(
+                request
             )
+        )
 
-        return super().update(request, *args, **kwargs)
+        if respuesta_permiso:
+            return respuesta_permiso
+
+        return super().update(
+            request,
+            *args,
+            **kwargs
+        )
 
     def partial_update(self, request, *args, **kwargs):
-        if not es_admin(request.user):
-            return Response(
-                {'error': 'No tienes permiso para editar este registro.'},
-                status=status.HTTP_403_FORBIDDEN
+        respuesta_permiso = (
+            self._validar_permiso_administrativo(
+                request
             )
+        )
 
-        return super().partial_update(request, *args, **kwargs)
+        if respuesta_permiso:
+            return respuesta_permiso
+
+        return super().partial_update(
+            request,
+            *args,
+            **kwargs
+        )
 
     def destroy(self, request, *args, **kwargs):
-        if not es_admin(request.user):
-            return Response(
-                {'error': 'No tienes permiso para eliminar este registro.'},
-                status=status.HTTP_403_FORBIDDEN
+        respuesta_permiso = (
+            self._validar_permiso_administrativo(
+                request
             )
+        )
 
-        return super().destroy(request, *args, **kwargs)
+        if respuesta_permiso:
+            return respuesta_permiso
+
+        return super().destroy(
+            request,
+            *args,
+            **kwargs
+        )
 
     def perform_create(self, serializer):
         activo = serializer.validated_data.get('activo', True)
@@ -7055,7 +9562,6 @@ class PagoInstructorViewSet(viewsets.ModelViewSet):
                 activo=False,
                 fecha_fin=timezone.now().date()
             )
-
         serializer.save()
 
     def perform_update(self, serializer):
@@ -7070,14 +9576,20 @@ class PagoInstructorViewSet(viewsets.ModelViewSet):
                 activo=False,
                 fecha_fin=timezone.now().date()
             )
-
         serializer.save()
-
 
 class CargoInstitucionalViewSet(viewsets.ModelViewSet):
     queryset = CargoInstitucional.objects.all().order_by('tipo', 'nombre')
     serializer_class = CargoInstitucionalSerializer
     permission_classes = [IsAuthenticated]
+    http_method_names = [
+        'get',
+        'post',
+        'put',
+        'patch',
+        'head',
+        'options',
+    ]
 
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
@@ -7085,7 +9597,6 @@ class CargoInstitucionalViewSet(viewsets.ModelViewSet):
                 {'error': 'No tienes permiso para crear este registro.'},
                 status=status.HTTP_403_FORBIDDEN
             )
-
         return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
@@ -7094,7 +9605,6 @@ class CargoInstitucionalViewSet(viewsets.ModelViewSet):
                 {'error': 'No tienes permiso para editar este registro.'},
                 status=status.HTTP_403_FORBIDDEN
             )
-
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
@@ -7103,21 +9613,21 @@ class CargoInstitucionalViewSet(viewsets.ModelViewSet):
                 {'error': 'No tienes permiso para editar este registro.'},
                 status=status.HTTP_403_FORBIDDEN
             )
-
         return super().partial_update(request, *args, **kwargs)
-
-    def destroy(self, request, *args, **kwargs):
-        if not es_admin(request.user):
-            return Response(
-                {'error': 'No tienes permiso para eliminar este registro.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        return super().destroy(request, *args, **kwargs)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def reporte_induccion_instructores(request):
+    if not es_admin(request.user):
+        return Response(
+            {
+                'error': (
+                    'Solo Administración o Secretaría pueden generar el reporte de inducción de instructores.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN
+        )
+
     fecha_desde = request.query_params.get('desde')
     fecha_hasta = request.query_params.get('hasta')
     instructor_id = request.query_params.get('instructor')
@@ -7151,47 +9661,120 @@ def reporte_induccion_instructores(request):
             status=404
         )
 
-    notas_teoricas = Notas.objects.filter(
-        tipo_nota='teorico'
-    ).values_list(
-        'matricula_id',
-        flat=True
+    fecha_desde_parseada = (
+        parse_date(fecha_desde)
+        if fecha_desde
+        else None
     )
 
-    notas_practicas = Notas.objects.filter(
-        tipo_nota='practico',
-        instructor_id=instructor_id
-    ).values_list(
-        'matricula_id',
-        flat=True
+    fecha_hasta_parseada = (
+        parse_date(fecha_hasta)
+        if fecha_hasta
+        else None
     )
 
-    matriculas_ids = set(notas_teoricas).intersection(
-        set(notas_practicas)
-    )
-
-    matriculas = Matricula.objects.select_related(
-        'estudiante',
-        'categoria'
-    ).filter(
-        id__in=matriculas_ids
-    )
-
-    if fecha_desde:
-        matriculas = matriculas.filter(
-            fecha_registro__gte=fecha_desde
+    if fecha_desde and not fecha_desde_parseada:
+        return Response(
+            {
+                'error': (
+                    'La fecha desde no tiene un formato válido.'
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST
         )
 
-    if fecha_hasta:
-        matriculas = matriculas.filter(
-            fecha_registro__lte=fecha_hasta
+    if fecha_hasta and not fecha_hasta_parseada:
+        return Response(
+            {
+                'error': (
+                    'La fecha hasta no tiene un formato válido.'
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST
         )
 
-    matriculas = matriculas.order_by(
-        'fecha_registro',
+    if (
+        fecha_desde_parseada
+        and fecha_hasta_parseada
+        and fecha_desde_parseada > fecha_hasta_parseada
+    ):
+        return Response(
+            {
+                'error': (
+                    'La fecha desde no puede ser posterior a la fecha hasta.'
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    instructor_ultima_clase = (
+        Calendario.objects
+        .filter(
+            matricula_id=OuterRef('pk'),
+            es_examen=False,
+        )
+        .exclude(
+            estado='cancelada'
+        )
+        .order_by(
+            '-fecha',
+            '-hora_fin',
+            '-id',
+        )
+        .values(
+            'instructor_id'
+        )[:1]
+    )
+
+    matriculas = (
+        Matricula.objects
+        .select_related(
+            'estudiante',
+            'categoria',
+        )
+        .annotate(
+            instructor_responsable_id=Subquery(
+                instructor_ultima_clase
+            )
+        )
+        .filter(
+            instructor_responsable_id=instructor_id,
+            estado='finalizado',
+            fecha_finalizacion__isnull=False,
+        )
+    )
+
+    if fecha_desde_parseada:
+        inicio_rango = timezone.make_aware(
+            datetime.combine(
+                fecha_desde_parseada,
+                datetime.min.time(),
+            ),
+            timezone.get_current_timezone(),
+        )
+
+        matriculas = matriculas.filter(
+            fecha_finalizacion__gte=inicio_rango
+        )
+
+    if fecha_hasta_parseada:
+        fin_rango = timezone.make_aware(
+            datetime.combine(
+                fecha_hasta_parseada + timedelta(days=1),
+                datetime.min.time(),
+            ),
+            timezone.get_current_timezone(),
+        )
+
+        matriculas = matriculas.filter(
+            fecha_finalizacion__lt=fin_rango
+        )
+
+    matriculas = matriculas.distinct().order_by(
+        'fecha_finalizacion',
         'estudiante__nombre',
         'estudiante__apellido',
-        'id'
+        'id',
     )
 
     datos = []
@@ -7222,10 +9805,42 @@ def reporte_induccion_instructores(request):
 
         datos.append({
             'matricula_id': matricula.id,
-            'estudiante': f'{estudiante.nombre or ""} {estudiante.apellido or ""}'.strip(),
-            'fecha': matricula.fecha_registro.strftime('%d/%m/%Y') if matricula.fecha_registro else '',
-            'numero_recibo': recibo.numero_recibo if recibo and recibo.numero_recibo else '',
-            'codigo_egreso': matricula.id,
+                        'estudiante': (
+                f'{estudiante.nombre or ""} '
+                f'{estudiante.apellido or ""}'
+            ).strip(),
+
+            'fecha_matricula': (
+                timezone.localtime(
+                    matricula.fecha_registro
+                ).strftime('%d/%m/%Y')
+                if matricula.fecha_registro
+                else ''
+            ),
+
+            'fecha_finalizacion': (
+                timezone.localtime(
+                    matricula.fecha_finalizacion
+                ).strftime('%d/%m/%Y')
+                if matricula.fecha_finalizacion
+                else ''
+            ),
+
+            # Se conserva temporalmente para no romper
+            # el frontend antes del siguiente cambio.
+            'fecha': (
+                timezone.localtime(
+                    matricula.fecha_finalizacion
+                ).strftime('%d/%m/%Y')
+                if matricula.fecha_finalizacion
+                else ''
+            ),
+
+            'numero_recibo': (
+                recibo.numero_recibo
+                if recibo and recibo.numero_recibo
+                else ''
+            ),
             'horas': float(horas_practicas),
             'tarifa_hora': float(tarifa_por_hora),
             'cobro': float(monto),
@@ -7253,7 +9868,6 @@ def reporte_induccion_instructores(request):
         'tarifa_hora': float(tarifa_por_hora),
         'total': float(total),
         'estudiantes': datos,
-        
         'firmas': {
             'gerente_nombre': gerente.nombre if gerente else '',
             'gerente_cargo': gerente.cargo if gerente else '',
@@ -7265,6 +9879,17 @@ def reporte_induccion_instructores(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def reporte_kilometros_instructor(request):
+    if not es_admin(request.user):
+        return Response(
+            {
+                'error': (
+                    'Solo Administración o Secretaría pueden '
+                    'generar el reporte de kilómetros.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN
+        )
+
     fecha_desde = request.query_params.get('desde')
     fecha_hasta = request.query_params.get('hasta')
     instructor_id = request.query_params.get('instructor')
@@ -7317,7 +9942,6 @@ def reporte_kilometros_instructor(request):
 
     thin = Side(style='thin', color='000000')
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
     header_fill = PatternFill(fill_type='solid', fgColor='D9EAF7')
     titulo_fill = PatternFill(fill_type='solid', fgColor='FFFFFF')
 
@@ -7325,34 +9949,39 @@ def reporte_kilometros_instructor(request):
     ws['A1'] = 'Instituto de Formación y Capacitación “Adiact”'
     ws['A1'].font = Font(bold=True, size=16)
     ws['A1'].alignment = Alignment(horizontal='center')
-
     ws.merge_cells('A2:J2')
     ws['A2'] = 'Somos expertos en Formación y Capacitación del Talento Humano'
     ws['A2'].alignment = Alignment(horizontal='center')
-
     ws.merge_cells('A3:J3')
     ws['A3'] = 'Ética, Integridad, Dedicación y Solidaridad'
     ws['A3'].font = Font(bold=True)
     ws['A3'].alignment = Alignment(horizontal='center')
-
     ws.merge_cells('A5:J5')
     ws['A5'] = 'REPORTE DE KILÓMETROS RECORRIDOS POR INSTRUCTOR'
     ws['A5'].font = Font(bold=True, size=14)
     ws['A5'].alignment = Alignment(horizontal='center')
     ws['A5'].fill = titulo_fill
-
     ws['A7'] = 'Instructor:'
     ws['B7'] = f'{instructor.nombre or ""} {instructor.apellido or ""}'.strip()
-
     ws['A8'] = 'Fecha de emisión:'
     ws['B8'] = timezone.localdate()
     ws['B8'].number_format = 'dd/mm/yyyy'
 
-    ws['D8'] = 'Desde:'
-    fecha_desde_excel = parse_date(fecha_desde) if fecha_desde else None
-    fecha_hasta_excel = parse_date(fecha_hasta) if fecha_hasta else None
+    fecha_desde_excel = (
+        parse_date(fecha_desde)
+        if fecha_desde
+        else None
+    )
 
+    fecha_hasta_excel = (
+        parse_date(fecha_hasta)
+        if fecha_hasta
+        else None
+    )
+
+    ws['D8'] = 'Desde:'
     ws['E8'] = fecha_desde_excel or 'Inicio'
+    ws['F8'] = 'Hasta:'
     ws['G8'] = fecha_hasta_excel or 'Fin'
 
     if fecha_desde_excel:
@@ -7360,9 +9989,6 @@ def reporte_kilometros_instructor(request):
 
     if fecha_hasta_excel:
         ws['G8'].number_format = 'dd/mm/yyyy'
-
-    ws['F8'] = 'Hasta:'
-    ws['G8'] = fecha_hasta or 'Fin'
 
     encabezados = [
         'No.',
@@ -7470,8 +10096,6 @@ def reporte_kilometros_instructor(request):
 
         fila += 1
 
-
-    # Fila del total.
     fila_total = fila
 
     ws.cell(
@@ -7485,7 +10109,6 @@ def reporte_kilometros_instructor(request):
         column=11
     )
 
-    # Si existen registros, suma toda la columna K.
     if fila_total > fila_inicio_datos:
         celda_total.value = (
             f'=SUM(K{fila_inicio_datos}:K{fila_total - 1})'
@@ -7500,7 +10123,6 @@ def reporte_kilometros_instructor(request):
             row=fila_total,
             column=col
         )
-
         celda.font = Font(bold=True)
         celda.border = border
         celda.fill = header_fill
@@ -7510,7 +10132,6 @@ def reporte_kilometros_instructor(request):
         )
 
     fila = fila_total
-
     fila_footer = fila_total + 3
 
     ws.merge_cells(start_row=fila_footer, start_column=1, end_row=fila_footer, end_column=12)
@@ -7553,11 +10174,9 @@ def reporte_kilometros_instructor(request):
     )
 
     response['Content-Disposition'] = 'attachment; filename="reporte_kilometros_instructor.xlsx"'
-
     wb.calculation.fullCalcOnLoad = True
     wb.calculation.forceFullCalc = True
     wb.calculation.calcMode = "auto"
-
     wb.save(response)
 
     return response
@@ -7570,7 +10189,6 @@ def certificado_numero(valor):
         return Decimal(str(valor).replace(",", "."))
     except (InvalidOperation, ValueError, TypeError):
         return None
-
 
 def certificado_fecha_larga(fecha):
     if not fecha:
@@ -7590,47 +10208,7 @@ def certificado_fecha_larga(fecha):
         11: "noviembre",
         12: "diciembre",
     }
-
     return f"{fecha.day:02d} de {meses[fecha.month]} del {fecha.year}"
-
-
-def certificado_dia_letras(dia):
-    dias = {
-        1: "un",
-        2: "dos",
-        3: "tres",
-        4: "cuatro",
-        5: "cinco",
-        6: "seis",
-        7: "siete",
-        8: "ocho",
-        9: "nueve",
-        10: "diez",
-        11: "once",
-        12: "doce",
-        13: "trece",
-        14: "catorce",
-        15: "quince",
-        16: "dieciséis",
-        17: "diecisiete",
-        18: "dieciocho",
-        19: "diecinueve",
-        20: "veinte",
-        21: "veintiún",
-        22: "veintidós",
-        23: "veintitrés",
-        24: "veinticuatro",
-        25: "veinticinco",
-        26: "veintiséis",
-        27: "veintisiete",
-        28: "veintiocho",
-        29: "veintinueve",
-        30: "treinta",
-        31: "treinta y un",
-    }
-
-    return dias.get(dia, str(dia))
-
 
 def certificado_mes_anio(fecha):
     if not fecha:
@@ -7651,290 +10229,10 @@ def certificado_mes_anio(fecha):
         12: "diciembre",
     }
 
-    return f"{meses[fecha.month]} del año {fecha.year}"
-
-
-def certificado_run(parrafo, texto, size=8, bold=False):
-    run = parrafo.add_run(str(texto))
-    run.bold = bold
-    run.font.name = "Arial"
-    run.font.size = Pt(size)
-    run._element.get_or_add_rPr().rFonts.set(
-        qn("w:eastAsia"),
-        "Arial",
+    return (
+        f"{meses[fecha.month]} "
+        f"del año {fecha.year}"
     )
-    return run
-
-
-def certificado_preparar_parrafo(
-    parrafo,
-    align=WD_ALIGN_PARAGRAPH.CENTER,
-    before=0,
-    after=0,
-    line_spacing=None,
-):
-    parrafo.alignment = align
-    parrafo.paragraph_format.space_before = Pt(before)
-    parrafo.paragraph_format.space_after = Pt(after)
-
-    if line_spacing is not None:
-        parrafo.paragraph_format.line_spacing = Pt(line_spacing)
-
-    return parrafo
-
-
-def certificado_parrafo(
-    celda,
-    texto="",
-    size=8,
-    bold=False,
-    align=WD_ALIGN_PARAGRAPH.CENTER,
-    before=0,
-    after=0,
-    line_spacing=None,
-):
-    parrafo = celda.add_paragraph()
-    certificado_preparar_parrafo(
-        parrafo,
-        align=align,
-        before=before,
-        after=after,
-        line_spacing=line_spacing,
-    )
-    certificado_run(
-        parrafo,
-        texto,
-        size=size,
-        bold=bold,
-    )
-    return parrafo
-
-
-def certificado_limpiar_celda(celda):
-    celda._tc.clear_content()
-
-
-def certificado_set_margenes_celda(
-    celda,
-    top=0,
-    start=0,
-    bottom=0,
-    end=0,
-):
-    tc_pr = celda._tc.get_or_add_tcPr()
-    tc_mar = tc_pr.first_child_found_in("w:tcMar")
-
-    if tc_mar is None:
-        tc_mar = OxmlElement("w:tcMar")
-        tc_pr.append(tc_mar)
-
-    valores = {
-        "top": top,
-        "start": start,
-        "bottom": bottom,
-        "end": end,
-    }
-
-    for nombre, valor in valores.items():
-        elemento = tc_mar.find(qn(f"w:{nombre}"))
-
-        if elemento is None:
-            elemento = OxmlElement(f"w:{nombre}")
-            tc_mar.append(elemento)
-
-        elemento.set(qn("w:w"), str(valor))
-        elemento.set(qn("w:type"), "dxa")
-
-
-def certificado_sombrear_celda(celda, color):
-    tc_pr = celda._tc.get_or_add_tcPr()
-    shd = tc_pr.find(qn("w:shd"))
-
-    if shd is None:
-        shd = OxmlElement("w:shd")
-        tc_pr.append(shd)
-
-    shd.set(qn("w:fill"), color)
-
-
-def certificado_fijar_tabla(tabla, ancho_pulgadas):
-    tabla.autofit = False
-    tabla.alignment = WD_TABLE_ALIGNMENT.CENTER
-
-    tbl_pr = tabla._tbl.tblPr
-
-    layout = tbl_pr.find(qn("w:tblLayout"))
-    if layout is None:
-        layout = OxmlElement("w:tblLayout")
-        tbl_pr.append(layout)
-    layout.set(qn("w:type"), "fixed")
-
-    ancho = tbl_pr.find(qn("w:tblW"))
-    if ancho is None:
-        ancho = OxmlElement("w:tblW")
-        tbl_pr.append(ancho)
-    ancho.set(qn("w:w"), str(int(ancho_pulgadas * 1440)))
-    ancho.set(qn("w:type"), "dxa")
-
-    sangria = tbl_pr.find(qn("w:tblInd"))
-    if sangria is None:
-        sangria = OxmlElement("w:tblInd")
-        tbl_pr.append(sangria)
-    sangria.set(qn("w:w"), "0")
-    sangria.set(qn("w:type"), "dxa")
-
-    alineacion = tbl_pr.find(qn("w:jc"))
-    if alineacion is None:
-        alineacion = OxmlElement("w:jc")
-        tbl_pr.append(alineacion)
-    alineacion.set(qn("w:val"), "center")
-
-
-def certificado_fijar_ancho_celda(celda, ancho_pulgadas):
-    celda.width = Inches(ancho_pulgadas)
-
-    tc_pr = celda._tc.get_or_add_tcPr()
-    tc_w = tc_pr.find(qn("w:tcW"))
-
-    if tc_w is None:
-        tc_w = OxmlElement("w:tcW")
-        tc_pr.append(tc_w)
-
-    tc_w.set(qn("w:w"), str(int(ancho_pulgadas * 1440)))
-    tc_w.set(qn("w:type"), "dxa")
-
-
-def certificado_fijar_columnas(tabla, anchos):
-    columnas_grid = tabla._tbl.tblGrid.gridCol_lst
-
-    for columna, ancho in zip(columnas_grid, anchos):
-        columna.set(
-            qn("w:w"),
-            str(int(ancho * 1440)),
-        )
-
-    for fila in tabla.rows:
-        for celda, ancho in zip(fila.cells, anchos):
-            certificado_fijar_ancho_celda(
-                celda,
-                ancho,
-            )
-
-
-def certificado_fijar_alto_fila(fila, alto_pulgadas):
-    fila.height = Inches(alto_pulgadas)
-    fila.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
-
-    tr_pr = fila._tr.get_or_add_trPr()
-
-    if tr_pr.find(qn("w:cantSplit")) is None:
-        tr_pr.append(OxmlElement("w:cantSplit"))
-
-
-def certificado_bordes_tabla(
-    tabla,
-    color=None,
-    size="0",
-):
-    tbl_pr = tabla._tbl.tblPr
-    borders = tbl_pr.first_child_found_in("w:tblBorders")
-
-    if borders is None:
-        borders = OxmlElement("w:tblBorders")
-        tbl_pr.append(borders)
-
-    for edge in [
-        "top",
-        "left",
-        "bottom",
-        "right",
-        "insideH",
-        "insideV",
-    ]:
-        tag = qn(f"w:{edge}")
-        element = borders.find(tag)
-
-        if element is None:
-            element = OxmlElement(f"w:{edge}")
-            borders.append(element)
-
-        if color is None:
-            element.set(qn("w:val"), "nil")
-        else:
-            element.set(qn("w:val"), "single")
-            element.set(qn("w:sz"), str(size))
-            element.set(qn("w:space"), "0")
-            element.set(qn("w:color"), color)
-
-
-def certificado_sin_bordes_tabla(tabla):
-    certificado_bordes_tabla(
-        tabla,
-        color=None,
-    )
-
-
-def certificado_bordes_celda(
-    celda,
-    top=None,
-    left=None,
-    bottom=None,
-    right=None,
-):
-    tc_pr = celda._tc.get_or_add_tcPr()
-    borders = tc_pr.first_child_found_in("w:tcBorders")
-
-    if borders is None:
-        borders = OxmlElement("w:tcBorders")
-        tc_pr.append(borders)
-
-    bordes = {
-        "top": top,
-        "left": left,
-        "bottom": bottom,
-        "right": right,
-    }
-
-    for nombre, configuracion in bordes.items():
-        elemento = borders.find(qn(f"w:{nombre}"))
-
-        if elemento is None:
-            elemento = OxmlElement(f"w:{nombre}")
-            borders.append(elemento)
-
-        if configuracion is None:
-            elemento.set(qn("w:val"), "nil")
-            continue
-
-        color, size = configuracion
-        elemento.set(qn("w:val"), "single")
-        elemento.set(qn("w:sz"), str(size))
-        elemento.set(qn("w:space"), "0")
-        elemento.set(qn("w:color"), color)
-
-
-def certificado_agregar_imagen(celda, ruta, ancho):
-    if not os.path.exists(ruta):
-        return False
-
-    certificado_limpiar_celda(celda)
-
-    parrafo = celda.add_paragraph()
-    certificado_preparar_parrafo(
-        parrafo,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        before=0,
-        after=0,
-    )
-
-    run = parrafo.add_run()
-    run.add_picture(
-        ruta,
-        width=Inches(ancho),
-    )
-
-    return True
-
 
 def certificado_periodo(fecha_inicio, fecha_fin):
     if not fecha_inicio and not fecha_fin:
@@ -7995,591 +10293,633 @@ def certificado_obtener_datos(desde, hasta):
     desde_fecha = parse_date(desde)
     hasta_fecha = parse_date(hasta)
 
-    if not desde_fecha or not hasta_fecha:
+    if (
+        not desde_fecha
+        or not hasta_fecha
+        or desde_fecha > hasta_fecha
+    ):
         return []
+
+    matriculas = (
+        Matricula.objects
+        .select_related(
+            "estudiante",
+            "categoria",
+            "plan_de_estudio",
+        )
+        .prefetch_related(
+            Prefetch(
+                "notas",
+                queryset=(
+                    Notas.objects
+                    .filter(
+                        tipo_nota__in=[
+                            "teorico",
+                            "practico",
+                        ]
+                    )
+                    .order_by(
+                        "-fecha_registro",
+                        "-id",
+                    )
+                ),
+                to_attr="notas_certificado",
+            )
+        )
+        .annotate(
+            fecha_inicio_curso=models.Min(
+                "clases__fecha",
+                filter=(
+                    Q(clases__es_examen=False)
+                    & ~Q(clases__estado="cancelada")
+                ),
+            ),
+            fecha_finalizacion_curso=models.Max(
+                "clases__fecha",
+                filter=(
+                    Q(clases__es_examen=False)
+                    & ~Q(clases__estado="cancelada")
+                ),
+            ),
+        )
+        .filter(
+            tipo_curso="Principiante",
+            fecha_finalizacion_curso__gte=desde_fecha,
+            fecha_finalizacion_curso__lte=hasta_fecha,
+        )
+        .order_by(
+            "estudiante__apellido",
+            "estudiante__nombre",
+            "id",
+        )
+    )
 
     resultados = []
 
-    matriculas = Matricula.objects.select_related(
-        "estudiante",
-        "categoria",
-        "plan_de_estudio",
-    ).filter(
-        tipo_curso="Principiante",
-    ).order_by(
-        "estudiante__apellido",
-        "estudiante__nombre",
-    )
-
     for matricula in matriculas:
-        nota_teorica_obj = Notas.objects.filter(
-            matricula=matricula,
-            tipo_nota="teorico",
-        ).order_by("-fecha_registro", "-id").first()
+        notas_por_tipo = {}
 
-        nota_practica_obj = Notas.objects.filter(
-            matricula=matricula,
-            tipo_nota="practico",
-        ).order_by("-fecha_registro", "-id").first()
+        for nota in matricula.notas_certificado:
+            if nota.tipo_nota not in notas_por_tipo:
+                notas_por_tipo[nota.tipo_nota] = nota
+
+        nota_teorica_obj = notas_por_tipo.get("teorico")
+        nota_practica_obj = notas_por_tipo.get("practico")
 
         if not nota_teorica_obj or not nota_practica_obj:
             continue
 
-        nota_teorica = certificado_numero(nota_teorica_obj.nota)
-        nota_practica = certificado_numero(nota_practica_obj.nota)
+        nota_teorica = certificado_numero(
+            nota_teorica_obj.nota
+        )
+
+        nota_practica = certificado_numero(
+            nota_practica_obj.nota
+        )
 
         if nota_teorica is None or nota_practica is None:
             continue
 
-        if nota_teorica < Decimal("80") or nota_practica < Decimal("80"):
+        if (
+            nota_teorica < Decimal("80")
+            or nota_practica < Decimal("80")
+        ):
             continue
 
-        fecha_teorica = None
-        fecha_practica = None
-
-        if getattr(nota_teorica_obj, "fecha_registro", None):
-            fecha_teorica = nota_teorica_obj.fecha_registro.date()
-
-        if getattr(nota_practica_obj, "fecha_registro", None):
-            fecha_practica = nota_practica_obj.fecha_registro.date()
-
-        fechas_notas = [
-            fecha for fecha in [fecha_teorica, fecha_practica]
-            if fecha is not None
-        ]
-
-        if fechas_notas:
-            fecha_egreso = max(fechas_notas)
-        elif matricula.fecha_registro:
-            fecha_egreso = matricula.fecha_registro.date()
-        else:
-            continue
-
-        if fecha_egreso < desde_fecha or fecha_egreso > hasta_fecha:
-            continue
+        fecha_finalizacion = (
+            matricula.fecha_finalizacion_curso
+        )
 
         estudiante = matricula.estudiante
-        categoria = matricula.categoria.nombre if matricula.categoria else ""
 
-        fecha_inicio = matricula.fecha_registro.date() if matricula.fecha_registro else None
+        categoria = (
+            matricula.categoria.nombre
+            if matricula.categoria
+            else ""
+        )
 
         resultados.append({
             "id": matricula.id,
-            "estudiante": f"{estudiante.nombre} {estudiante.apellido}".strip().upper(),
+            "estudiante": (
+                f"{estudiante.nombre} "
+                f"{estudiante.apellido}"
+            ).strip().upper(),
             "cedula": estudiante.cedula,
             "categoria": categoria,
             "tipo_curso": matricula.tipo_curso,
-            "fecha_inicio": fecha_inicio,
-            "fecha_egreso": fecha_egreso,
+
+            # Primera clase regular válida del curso.
+            "fecha_inicio": matricula.fecha_inicio_curso,
+
+            # Fecha real guardada cuando finalizó la matrícula.
+            "fecha_egreso": fecha_finalizacion,
+
             "nota_teorica": nota_teorica,
             "nota_practica": nota_practica,
         })
 
     return resultados
 
+COLOR_AZUL_CERTIFICADO = RGBColor(53, 86, 112)
+COLOR_DORADO_CERTIFICADO = RGBColor(226, 174, 94)
+COLOR_NEGRO_CERTIFICADO = RGBColor(20, 20, 20)
+COLOR_BLANCO_CERTIFICADO = RGBColor(255, 255, 255)
 
-def certificado_crear_en_celda(
-    celda,
+
+def certificado_ppt_rectangulo(
+    slide,
+    x,
+    y,
+    ancho,
+    alto,
+    color_relleno=None,
+    color_borde=None,
+    grosor_borde=1,
+):
+    forma = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(x),
+        Inches(y),
+        Inches(ancho),
+        Inches(alto),
+    )
+
+    if color_relleno is None:
+        forma.fill.background()
+    else:
+        forma.fill.solid()
+        forma.fill.fore_color.rgb = color_relleno
+
+    if color_borde is None:
+        forma.line.fill.background()
+    else:
+        forma.line.color.rgb = color_borde
+        forma.line.width = Pt(grosor_borde)
+
+    return forma
+
+
+def certificado_ppt_texto(
+    slide,
+    texto,
+    x,
+    y,
+    ancho,
+    alto,
+    tamano=10,
+    negrita=False,
+    alineacion=PP_ALIGN.CENTER,
+    color=COLOR_NEGRO_CERTIFICADO,
+):
+    caja = slide.shapes.add_textbox(
+        Inches(x),
+        Inches(y),
+        Inches(ancho),
+        Inches(alto),
+    )
+
+    marco = caja.text_frame
+    marco.clear()
+    marco.word_wrap = True
+    marco.vertical_anchor = MSO_ANCHOR.MIDDLE
+
+    marco.margin_left = Inches(0.03)
+    marco.margin_right = Inches(0.03)
+    marco.margin_top = Inches(0.01)
+    marco.margin_bottom = Inches(0.01)
+
+    parrafo = marco.paragraphs[0]
+    parrafo.alignment = alineacion
+    parrafo.space_before = Pt(0)
+    parrafo.space_after = Pt(0)
+    parrafo.line_spacing = 1
+
+    texto_run = parrafo.add_run()
+    texto_run.text = str(texto)
+
+    texto_run.font.name = "Arial"
+    texto_run.font.size = Pt(tamano)
+    texto_run.font.bold = negrita
+    texto_run.font.color.rgb = color
+
+    return caja
+
+
+def certificado_ppt_agregar_esquinas(
+    slide,
+    x,
+    y,
+    ancho,
+    alto,
+):
+    # Las decoraciones quedan dentro del certificado,
+    # sobre las esquinas del área blanca.
+    posiciones = [
+        (x + 0.42, y + 0.42),
+        (x + ancho - 0.71, y + 0.42),
+        (x + 0.42, y + alto - 0.71),
+        (
+            x + ancho - 0.71,
+            y + alto - 0.71,
+        ),
+    ]
+
+    for esquina_x, esquina_y in posiciones:
+        certificado_ppt_rectangulo(
+            slide,
+            esquina_x,
+            esquina_y,
+            0.22,
+            0.22,
+            color_relleno=None,
+            color_borde=COLOR_NEGRO_CERTIFICADO,
+            grosor_borde=1.2,
+        )
+
+        certificado_ppt_rectangulo(
+            slide,
+            esquina_x + 0.07,
+            esquina_y + 0.07,
+            0.22,
+            0.22,
+            color_relleno=None,
+            color_borde=COLOR_NEGRO_CERTIFICADO,
+            grosor_borde=0.9,
+        )
+
+def certificado_ppt_texto_principal(
+    slide,
+    item,
+    x,
+    y,
+    ancho,
+    alto,
+):
+    if item["fecha_inicio"]:
+        periodo = (
+            f"del {certificado_fecha_larga(item['fecha_inicio'])} "
+            f"al {certificado_fecha_larga(item['fecha_egreso'])}"
+        )
+    else:
+        periodo = (
+            f"hasta el "
+            f"{certificado_fecha_larga(item['fecha_egreso'])}"
+        )
+
+    caja = slide.shapes.add_textbox(
+        Inches(x),
+        Inches(y),
+        Inches(ancho),
+        Inches(alto),
+    )
+
+    marco = caja.text_frame
+    marco.clear()
+    marco.word_wrap = True
+    marco.vertical_anchor = MSO_ANCHOR.TOP
+
+    marco.margin_left = Inches(0.02)
+    marco.margin_right = Inches(0.02)
+    marco.margin_top = Inches(0.01)
+    marco.margin_bottom = Inches(0.01)
+
+    parrafo = marco.paragraphs[0]
+    parrafo.alignment = PP_ALIGN.LEFT
+    parrafo.space_before = Pt(0)
+    parrafo.space_after = Pt(0)
+    parrafo.line_spacing = 1
+
+    fragmentos = [
+        (
+            "Ha cumplido con el plan de instrucción "
+            "teórico y práctico aprobado por la DSTN, "
+            "de Principiante, para optar a la Licencia "
+            "de Conducir de Tipo Ordinaria en la Categoría ",
+            False,
+        ),
+        (
+            item["categoria"] or "__________",
+            True,
+        ),
+        (
+            f" impartido en el periodo comprendido "
+            f"{periodo}, habiendo obtenido las "
+            f"siguientes calificaciones:",
+            False,
+        ),
+    ]
+
+    for texto, subrayado in fragmentos:
+        texto_run = parrafo.add_run()
+        texto_run.text = texto
+        texto_run.font.name = "Arial"
+        texto_run.font.size = Pt(9.6)
+        texto_run.font.bold = True
+        texto_run.font.underline = subrayado
+        texto_run.font.color.rgb = COLOR_NEGRO_CERTIFICADO
+
+    return caja
+
+
+def certificado_ppt_agregar_certificado(
+    slide,
     item,
     logo_path,
     auto_path,
-    fecha_emision,
+    posicion_y,
+    nombre_gerente,
 ):
-    amarillo = "F6BA00"
-    azul = "090A7A"
-    negro = "000000"
-    dorado = "D8A800"
-    blanco = "FFFFFF"
+    x = 0.20
+    y = posicion_y
+    ancho = 8.10
+    alto = 5.15
 
-    certificado_limpiar_celda(celda)
-    celda.vertical_alignment = (
-        WD_CELL_VERTICAL_ALIGNMENT.CENTER
-    )
-    certificado_sombrear_celda(
-        celda,
-        amarillo,
-    )
-    certificado_set_margenes_celda(
-        celda,
-        top=440,
-        start=440,
-        bottom=260,
-        end=440,
+    # Fondo dorado exterior.
+    certificado_ppt_rectangulo(
+        slide,
+        x,
+        y,
+        ancho,
+        alto,
+        color_relleno=COLOR_DORADO_CERTIFICADO,
+        color_borde=COLOR_DORADO_CERTIFICADO,
+        grosor_borde=1,
     )
 
-    # Marco negro exterior.
-    tabla_negra = celda.add_table(
-        rows=1,
-        cols=1,
-    )
-    certificado_fijar_tabla(
-        tabla_negra,
-        7.89,
-    )
-    certificado_bordes_tabla(
-        tabla_negra,
-        color=negro,
-        size="18",
-    )
-    certificado_fijar_alto_fila(
-        tabla_negra.rows[0],
-        4.98,
+    # Banda azul gruesa sobre el marco dorado.
+    certificado_ppt_rectangulo(
+        slide,
+        x + 0.28,
+        y + 0.28,
+        ancho - 0.56,
+        alto - 0.56,
+        color_relleno=COLOR_AZUL_CERTIFICADO,
+        color_borde=COLOR_AZUL_CERTIFICADO,
+        grosor_borde=1,
     )
 
-    celda_negra = tabla_negra.cell(0, 0)
-    certificado_limpiar_celda(celda_negra)
-    celda_negra.vertical_alignment = (
-        WD_CELL_VERTICAL_ALIGNMENT.TOP
-    )
-    certificado_sombrear_celda(
-        celda_negra,
-        blanco,
-    )
-    certificado_set_margenes_celda(
-        celda_negra,
-        top=75,
-        start=75,
-        bottom=75,
-        end=75,
+    # Área blanca interior.
+    certificado_ppt_rectangulo(
+        slide,
+        x + 0.42,
+        y + 0.42,
+        ancho - 0.84,
+        alto - 0.84,
+        color_relleno=COLOR_BLANCO_CERTIFICADO,
+        color_borde=COLOR_AZUL_CERTIFICADO,
+        grosor_borde=1.3,
     )
 
-    # Marco azul grueso.
-    tabla_azul = celda_negra.add_table(
-        rows=1,
-        cols=1,
-    )
-    certificado_fijar_tabla(
-        tabla_azul,
-        7.70,
-    )
-    certificado_bordes_tabla(
-        tabla_azul,
-        color=azul,
-        size="42",
-    )
-    certificado_fijar_alto_fila(
-        tabla_azul.rows[0],
-        4.82,
+    # Línea azul interior fina.
+    certificado_ppt_rectangulo(
+        slide,
+        x + 0.50,
+        y + 0.50,
+        ancho - 1.00,
+        alto - 1.00,
+        color_relleno=None,
+        color_borde=COLOR_AZUL_CERTIFICADO,
+        grosor_borde=0.8,
     )
 
-    celda_azul = tabla_azul.cell(0, 0)
-    certificado_limpiar_celda(celda_azul)
-    celda_azul.vertical_alignment = (
-        WD_CELL_VERTICAL_ALIGNMENT.TOP
-    )
-    certificado_sombrear_celda(
-        celda_azul,
-        blanco,
-    )
-    certificado_set_margenes_celda(
-        celda_azul,
-        top=320,
-        start=260,
-        bottom=120,
-        end=260,
+    certificado_ppt_agregar_esquinas(
+        slide,
+        x,
+        y,
+        ancho,
+        alto,
     )
 
-    # Área interior con las dos líneas doradas verticales.
-    tabla_interior = celda_azul.add_table(
-        rows=1,
-        cols=1,
-    )
-    certificado_fijar_tabla(
-        tabla_interior,
-        7.05,
-    )
-    certificado_sin_bordes_tabla(
-        tabla_interior,
-    )
-    certificado_fijar_alto_fila(
-        tabla_interior.rows[0],
-        4.18,
+    # Líneas doradas verticales interiores.
+    certificado_ppt_rectangulo(
+        slide,
+        x + 0.62,
+        y + 0.72,
+        0.01,
+        alto - 1.44,
+        color_relleno=COLOR_DORADO_CERTIFICADO,
+        color_borde=None,
     )
 
-    contenido = tabla_interior.cell(0, 0)
-    certificado_limpiar_celda(contenido)
-    contenido.vertical_alignment = (
-        WD_CELL_VERTICAL_ALIGNMENT.TOP
-    )
-    certificado_sombrear_celda(
-        contenido,
-        blanco,
-    )
-    certificado_set_margenes_celda(
-        contenido,
-        top=0,
-        start=20,
-        bottom=0,
-        end=20,
-    )
-   
-
-    # Título superior. Se escribe como párrafo independiente para
-    # evitar que Word lo recorte en el primer certificado de la hoja.
-    p_titulo = contenido.add_paragraph()
-    certificado_preparar_parrafo(
-        p_titulo,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        before=0,
-        after=0,
-        line_spacing=15,
-    )
-    certificado_run(
-        p_titulo,
-        "-ESCUELA DE MANEJO EL CACIQUE ADIACT",
-        size=13,
-        bold=True,
+    certificado_ppt_rectangulo(
+        slide,
+        x + ancho - 0.63,
+        y + 0.72,
+        0.01,
+        alto - 1.44,
+        color_relleno=COLOR_DORADO_CERTIFICADO,
+        color_borde=None,
     )
 
-    encabezado = contenido.add_table(
-        rows=2,
-        cols=1,
-    )
-    certificado_fijar_tabla(
-        encabezado,
-        7.00,
-    )
-    certificado_sin_bordes_tabla(
-        encabezado,
-    )
-    certificado_fijar_alto_fila(
-        encabezado.rows[0],
-        0.30,
-    )
-    certificado_fijar_alto_fila(
-        encabezado.rows[1],
-        0.66,
+    # Título.
+    certificado_ppt_texto(
+        slide,
+        "-ESCUELA DE MANEJO EL CACIQUE ADIACT-",
+        x + 0.55,
+        y + 0.54,
+        ancho - 1.10,
+        0.25,
+        tamano=18,
+        negrita=True,
     )
 
-    franja = encabezado.cell(0, 0)
-    certificado_limpiar_celda(franja)
-    franja.vertical_alignment = (
-        WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    # Franja dorada.
+    certificado_ppt_rectangulo(
+        slide,
+        x + 2.30,
+        y + 0.82,
+        3.50,
+        0.43,
+        color_relleno=COLOR_DORADO_CERTIFICADO,
+        color_borde=None,
     )
-    certificado_sombrear_celda(
-        franja,
-        amarillo,
-    )
-    certificado_set_margenes_celda(
-        franja,
-        top=0,
-        start=0,
-        bottom=0,
-        end=0,
-    )
-    p_franja = franja.add_paragraph()
-    certificado_preparar_parrafo(
-        p_franja,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        before=0,
-        after=0,
-        line_spacing=11,
-    )
-    certificado_run(
-        p_franja,
+
+    certificado_ppt_texto(
+        slide,
         "CERTIFICA QUE:",
-        size=12,
-        bold=True,
+        x + 2.45,
+        y + 0.83,
+        3.20,
+        0.39,
+        tamano=17,
+        negrita=True,
     )
 
-    identidad = encabezado.cell(1, 0)
-    certificado_limpiar_celda(identidad)
-    certificado_set_margenes_celda(
-        identidad,
-        top=0,
-        start=0,
-        bottom=0,
-        end=0,
-    )
-
-    tabla_identidad = identidad.add_table(
-        rows=1,
-        cols=3,
-    )
-    certificado_fijar_tabla(
-        tabla_identidad,
-        7.00,
-    )
-    certificado_sin_bordes_tabla(
-        tabla_identidad,
-    )
-    certificado_fijar_columnas(
-        tabla_identidad,
-        [1.00, 5.00, 1.00],
-    )
-
-    logo_celda = tabla_identidad.cell(0, 0)
-    nombre_celda = tabla_identidad.cell(0, 1)
-    auto_celda = tabla_identidad.cell(0, 2)
-
-    for celda_identidad in [
-        logo_celda,
-        nombre_celda,
-        auto_celda,
-    ]:
-        celda_identidad.vertical_alignment = (
-            WD_CELL_VERTICAL_ALIGNMENT.CENTER
-        )
-        certificado_set_margenes_celda(
-            celda_identidad,
-            top=0,
-            start=0,
-            bottom=0,
-            end=0,
-        )
-
-    certificado_agregar_imagen(
-        logo_celda,
+    # Imágenes ya definidas en static/certificados.
+    slide.shapes.add_picture(
         logo_path,
-        0.76,
+        Inches(x + 0.78),
+        Inches(y + 0.78),
+        width=Inches(0.80),
     )
 
-    certificado_limpiar_celda(nombre_celda)
-
-    p_nombre = nombre_celda.add_paragraph()
-    certificado_preparar_parrafo(
-        p_nombre,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        before=0,
-        after=0,
-        line_spacing=12,
-    )
-    certificado_run(
-        p_nombre,
-        item["estudiante"],
-        size=11.5,
-        bold=True,
-    )
-
-    p_cedula = nombre_celda.add_paragraph()
-    certificado_preparar_parrafo(
-        p_cedula,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        before=0,
-        after=0,
-        line_spacing=10,
-    )
-    certificado_run(
-        p_cedula,
-        f"Cédula: {item['cedula']}.",
-        size=8.8,
-        bold=True,
-    )
-
-    certificado_agregar_imagen(
-        auto_celda,
+    slide.shapes.add_picture(
         auto_path,
-        0.95,
+        Inches(x + ancho - 1.80),
+        Inches(y + 0.81),
+        width=Inches(1.00),
     )
 
-    periodo = certificado_periodo(
-        item.get("fecha_inicio"),
-        item.get("fecha_egreso"),
+    tamano_nombre = (
+        15
+        if len(item["estudiante"]) > 38
+        else 17
     )
 
-    # Word deja un párrafo vacío después de la tabla anterior.
-    # Se reutiliza para que no aparezca un espacio adicional.
-    p_texto = contenido.paragraphs[-1]
-    certificado_preparar_parrafo(
-        p_texto,
-        align=WD_ALIGN_PARAGRAPH.JUSTIFY,
-        before=0,
-        after=1,
-        line_spacing=11.5,
+    certificado_ppt_texto(
+        slide,
+        item["estudiante"],
+        x + 1.00,
+        y + 1.29,
+        ancho - 2.00,
+        0.38,
+        tamano=tamano_nombre,
+        negrita=True,
     )
 
-    certificado_run(
-        p_texto,
+    certificado_ppt_texto(
+        slide,
+        f"Cédula: {item['cedula']}.",
+        x + 1.50,
+        y + 1.66,
+        ancho - 3.00,
+        0.30,
+        tamano=12,
+        negrita=True,
+    )
+
+    certificado_ppt_texto_principal(
+        slide,
+        item,
+        x + 0.72,
+        y + 1.94,
+        ancho - 1.44,
+        0.78,
+    )
+
+    certificado_ppt_texto(
+        slide,
         (
-            "Ha cumplido con el plan de instrucción teórico y "
-            "práctico aprobado por la DSTN, de Principiante, "
-            "para optar a la Licencia de Conducir de Tipo "
-            "Ordinaria en la Categoría "
-        ),
-        size=8.25,
-        bold=True,
-    )
-    certificado_run(
-        p_texto,
-        item.get("categoria") or "__________",
-        size=8.25,
-        bold=True,
-    )
-    certificado_run(
-        p_texto,
-        (
-            f" impartido en el período comprendido {periodo} "
-            "habiendo obtenido las siguientes calificaciones:"
-        ),
-        size=8.25,
-        bold=True,
-    )
-
-    certificado_parrafo(
-        contenido,
-        (
-            "Evaluación Teórica: "
-            f"{int(item['nota_teorica'])} puntos."
-        ),
-        size=8.6,
-        bold=True,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        before=0,
-        after=0,
-        line_spacing=10.5,
-    )
-
-    certificado_parrafo(
-        contenido,
-        (
-            "Evaluación Práctica: "
+            f"Evaluación Teórica: "
+            f"{int(item['nota_teorica'])} puntos.\n"
+            f"Evaluación Práctica: "
             f"{int(item['nota_practica'])} puntos."
         ),
-        size=8.6,
-        bold=True,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        before=0,
-        after=0,
-        line_spacing=10.5,
+        x + 1.65,
+        y + 2.58,
+        ancho - 3.30,
+        0.50,
+        tamano=10.5,
+        negrita=True,
     )
 
-    certificado_parrafo(
-        contenido,
+    certificado_ppt_texto(
+        slide,
         (
-            "Registrado en el Asiento No. __________ del "
-            "Folio No. __________ del Libro No. __________."
+            "Registrado en el Asiento No. _____ "
+            "del Folio No. ______ "
+            "del Libro ___."
         ),
-        size=8.1,
-        bold=True,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        before=4,
-        after=0,
-        line_spacing=10,
+        x + 0.90,
+        y + 3.03,
+        ancho - 1.80,
+        0.25,
+        tamano=9.8,
+        negrita=True,
     )
 
-    texto_dia = certificado_dia_letras(
-        fecha_emision.day
-    )
-    texto_mes = certificado_mes_anio(
-        fecha_emision
-    )
+    fecha_emision = item["fecha_egreso"]
 
-    certificado_parrafo(
-        contenido,
+    certificado_ppt_texto(
+        slide,
         (
             "Dado en la ciudad de León a los "
-            f"{texto_dia} días del mes de {texto_mes}."
+            f"{fecha_emision.day:02d} días del mes de "
+            f"{certificado_mes_anio(fecha_emision)}."
         ),
-        size=8.1,
-        bold=True,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        before=0,
-        after=0,
-        line_spacing=10,
+        x + 0.85,
+        y + 3.25,
+        ancho - 1.70,
+        0.25,
+        tamano=9.8,
+        negrita=True,
     )
 
-    tabla_firma = contenido.add_table(
-        rows=2,
-        cols=3,
-    )
-    certificado_fijar_tabla(
-        tabla_firma,
-        7.00,
-    )
-    certificado_sin_bordes_tabla(
-        tabla_firma,
-    )
-    certificado_fijar_columnas(
-        tabla_firma,
-        [2.15, 2.70, 2.15],
-    )
-    certificado_fijar_alto_fila(
-        tabla_firma.rows[0],
-        0.95,
-    )
-    certificado_fijar_alto_fila(
-        tabla_firma.rows[1],
-        0.46,
+    # Línea de firma.
+    certificado_ppt_rectangulo(
+        slide,
+        x + 2.30,
+        y + 3.95,
+        ancho - 4.60,
+        0.01,
+        color_relleno=COLOR_NEGRO_CERTIFICADO,
+        color_borde=COLOR_NEGRO_CERTIFICADO,
+        grosor_borde=0.5,
     )
 
-    for fila in tabla_firma.rows:
-        for celda_firma in fila.cells:
-            certificado_set_margenes_celda(
-                celda_firma,
-                top=0,
-                start=0,
-                bottom=0,
-                end=0,
-            )
-
-    firma = tabla_firma.cell(1, 1)
-    certificado_limpiar_celda(firma)
-    firma.vertical_alignment = (
-        WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    certificado_ppt_texto(
+        slide,
+        nombre_gerente,
+        x + 1.70,
+        y + 3.99,
+        ancho - 3.40,
+        0.27,
+        tamano=10.2,
+        negrita=True,
     )
 
-    certificado_bordes_celda(
-        firma,
-        top=(negro, "10"),
-    )
-
-    certificado_set_margenes_celda(
-        firma,
-        top=75,
-        start=0,
-        bottom=0,
-        end=0,
-    )
-
-    p_director = firma.add_paragraph()
-    certificado_preparar_parrafo(
-        p_director,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        before=0,
-        after=0,
-        line_spacing=8,
-    )
-    certificado_run(
-        p_director,
-        "Lic. JOSE FRANCISCO AGUILERA FERRUFINO.",
-        size=7.8,
-        bold=False,
-    )
-
-    p_cargo = firma.add_paragraph()
-    certificado_preparar_parrafo(
-        p_cargo,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        before=0,
-        after=0,
-        line_spacing=8,
-    )
-    certificado_run(
-        p_cargo,
+    certificado_ppt_texto(
+        slide,
         "Director.",
-        size=7.5,
-        bold=False,
+        x + 2.80,
+        y + 4.25,
+        ancho - 5.60,
+        0.22,
+        tamano=9.8,
+        negrita=True,
     )
 
 
-def certificado_crear_word(certificados, fecha_emision):
-    documento = Document()
+def certificado_crear_powerpoint(certificados):
+    presentacion = Presentation()
 
-    section = documento.sections[0]
-    section.page_width = Inches(8.5)
-    section.page_height = Inches(11)
-    section.top_margin = Inches(0)
-    section.bottom_margin = Inches(0)
-    section.left_margin = Inches(0)
-    section.right_margin = Inches(0)
-    section.header_distance = Inches(0)
-    section.footer_distance = Inches(0)
+    gerente_configurado = (
+        CargoInstitucional.objects
+        .filter(
+            tipo="gerente",
+            activo=True,
+        )
+        .order_by("-id")
+        .first()
+    )
 
-    estilo_normal = documento.styles["Normal"]
-    estilo_normal.font.name = "Arial"
-    estilo_normal.font.size = Pt(8)
-    estilo_normal.paragraph_format.space_before = Pt(0)
-    estilo_normal.paragraph_format.space_after = Pt(0)
+    if (
+        not gerente_configurado
+        or not str(
+            gerente_configurado.nombre or ""
+        ).strip()
+    ):
+        raise ValueError(
+            "No existe un gerente activo configurado."
+        )
+
+    nombre_sin_prefijo = str(
+        gerente_configurado.nombre
+    ).strip()
+
+    if nombre_sin_prefijo.lower().startswith("lic."):
+        nombre_sin_prefijo = (
+            nombre_sin_prefijo[4:].strip()
+        )
+
+    nombre_gerente = (
+        f"Lic. "
+        f"{nombre_sin_prefijo.rstrip('.').upper()}."
+    )
+
+    # Una diapositiva equivale a una hoja tamaño carta.
+    presentacion.slide_width = Inches(8.5)
+    presentacion.slide_height = Inches(11)
 
     logo_path = os.path.join(
         settings.BASE_DIR,
@@ -8587,6 +10927,7 @@ def certificado_crear_word(certificados, fecha_emision):
         "certificados",
         "logo.png",
     )
+
     auto_path = os.path.join(
         settings.BASE_DIR,
         "static",
@@ -8604,52 +10945,34 @@ def certificado_crear_word(certificados, fecha_emision):
             f"No se encontró la imagen del auto en: {auto_path}"
         )
 
-    total_filas = len(certificados)
+    diapositiva_vacia = presentacion.slide_layouts[6]
 
-    if total_filas % 2 != 0:
-        total_filas += 1
-
-    tabla = documento.add_table(
-        rows=total_filas,
-        cols=1,
-    )
-    certificado_fijar_tabla(
-        tabla,
-        8.5,
-    )
-    certificado_sin_bordes_tabla(
-        tabla,
-    )
-
-    for indice, fila in enumerate(tabla.rows):
-        certificado_fijar_alto_fila(
-            fila,
-            5.5,
+    for indice in range(0, len(certificados), 2):
+        grupo = certificados[indice:indice + 2]
+        slide = presentacion.slides.add_slide(
+            diapositiva_vacia
         )
 
-        celda = fila.cells[0]
-        certificado_set_margenes_celda(
-            celda,
-            top=0,
-            start=0,
-            bottom=0,
-            end=0,
-        )
+        fondo = slide.background.fill
+        fondo.solid()
+        fondo.fore_color.rgb = COLOR_BLANCO_CERTIFICADO
 
-        if indice >= len(certificados):
-            certificado_limpiar_celda(celda)
-            continue
+        posiciones_y = [
+            0.20,
+            5.65,
+        ]
 
-        certificado_crear_en_celda(
-            celda,
-            certificados[indice],
-            logo_path,
-            auto_path,
-            fecha_emision,
-        )
+        for posicion, item in enumerate(grupo):
+            certificado_ppt_agregar_certificado(
+                slide,
+                item,
+                logo_path,
+                auto_path,
+                posiciones_y[posicion],
+                nombre_gerente,
+            )
 
-    return documento
-
+    return presentacion
 
 
 
@@ -8673,7 +10996,6 @@ def certificados_egresados(request):
         )
 
     certificados = certificado_obtener_datos(desde, hasta)
-
     data = []
 
     for item in certificados:
@@ -8688,16 +11010,19 @@ def certificados_egresados(request):
             "nota_teorica": int(item["nota_teorica"]),
             "nota_practica": int(item["nota_practica"]),
         })
-
     return Response(data)
-
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
-def certificados_egresados_word(request):
+def certificados_egresados_powerpoint(request):
     if not es_admin(request.user):
         return Response(
-            {"detail": "No tienes permiso para generar certificados."},
+            {
+                "detail": (
+                    "No tienes permiso para generar "
+                    "certificados."
+                )
+            },
             status=403,
         )
 
@@ -8706,44 +11031,63 @@ def certificados_egresados_word(request):
 
     if not desde or not hasta:
         return Response(
-            {"detail": "Debe enviar fecha desde y fecha hasta."},
+            {
+                "detail": (
+                    "Debe enviar fecha desde "
+                    "y fecha hasta."
+                )
+            },
             status=400,
         )
 
-    certificados = certificado_obtener_datos(desde, hasta)
+    certificados = certificado_obtener_datos(
+        desde,
+        hasta,
+    )
 
     if not certificados:
         return Response(
             {
                 "detail": (
-                    "No hay estudiantes egresados del curso principiante con nota teórica "
-                    "y práctica mayor o igual a 80 en ese rango de fechas."
+                    "No hay estudiantes del curso "
+                    "principiante con nota teórica y "
+                    "práctica mayor o igual a 80 en "
+                    "ese rango de fechas."
                 )
             },
             status=404,
         )
 
-    fecha_emision = parse_date(hasta) or timezone.localdate()
-
     try:
-        documento = certificado_crear_word(certificados, fecha_emision)
+        presentacion = certificado_crear_powerpoint(
+            certificados
+        )
     except FileNotFoundError as error:
         return Response(
             {"detail": str(error)},
             status=500,
         )
+    except ValueError as error:
+        return Response(
+            {"detail": str(error)},
+            status=400,
+        )
 
     archivo = BytesIO()
-    documento.save(archivo)
+    presentacion.save(archivo)
     archivo.seek(0)
 
     response = HttpResponse(
         archivo.getvalue(),
-        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        content_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "presentationml.presentation"
+        ),
     )
 
     response["Content-Disposition"] = (
-        f'attachment; filename="certificados_{desde}_{hasta}.docx"'
+        f'attachment; filename='
+        f'"certificados_{desde}_{hasta}.pptx"'
     )
 
     return response

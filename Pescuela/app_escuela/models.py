@@ -3,7 +3,6 @@ from django.contrib.auth.models import AbstractUser
 from django.db import models, transaction
 from django.utils import timezone
 
-
 class Rol(models.Model):
     nombre = models.CharField(max_length=50, unique=True)
 
@@ -17,7 +16,7 @@ class ValorCurso(models.Model):
         ('Intermedio', 'Intermedio'),
         ('Avanzado', 'Avanzado'),
     ]
-    
+
     tipo_curso = models.CharField(
         max_length=50,
         choices=TIPO_CURSO_CHOICES
@@ -131,7 +130,7 @@ class SecuenciaCodigoEstudiante(models.Model):
 
     def __str__(self):
         return f"{self.nombre} - último código: {self.ultimo_codigo}"
-    
+
 class Estudiante(models.Model):
     SEXO_CHOICES = [
         ('M', 'Masculino'),
@@ -144,7 +143,7 @@ class Estudiante(models.Model):
         ('Universidad', 'Universidad'),
         ('Profesional', 'Profesional'),
     ]
-    
+
     codigo_estudiante = models.PositiveIntegerField(unique=True, blank=True, null=True)
 
     nombre = models.CharField(max_length=100)
@@ -203,27 +202,28 @@ class Matricula(models.Model):
         ('matriculado', 'Matriculado'),
         ('finalizado', 'Finalizado'),
     ]
-    
+
     MODALIDADES = [
         ('Regular', 'Regular'),
         ('Extraordinario', 'Extraordinario'),
         ('Mixto', 'Mixto'),
     ]
-    
+
     HORARIOS = [
         ('06AM', '06:00 AM'),
         ('08AM', '08:00 AM'),
         ('10AM', '10:00 AM'),
         ('12PM', '12:00 PM'),
+        ('02PM', '02:00 PM'),
         ('04PM', '04:00 PM'),
     ]
-    
+
     TIPOS_CURSO = [
         ('Principiante', 'Principiante'),
         ('Intermedio', 'Intermedio'),
         ('Avanzado', 'Avanzado'),
     ]
-    
+
     APARICIONES = [
         ('Redes_Sociales', 'Redes Sociales'),
         ('Referido', 'Referido'),
@@ -238,9 +238,10 @@ class Matricula(models.Model):
     blank=True,
     related_name='matriculas'
         )
-    
+
     estudiante = models.ForeignKey(Estudiante, on_delete=models.CASCADE, related_name='matriculas')
     fecha_registro = models.DateTimeField(auto_now_add=True)
+    fecha_finalizacion = models.DateTimeField(null=True, blank=True)
     categoria = models.ForeignKey(CategoriaVehiculo, on_delete=models.SET_NULL, null=True, blank=True, related_name='matriculas')
     estado = models.CharField(max_length=20, choices=ESTADOS, default='pendiente')
     modalidad = models.CharField(max_length=50, choices=MODALIDADES)
@@ -256,18 +257,11 @@ class Matricula(models.Model):
 
 
 class Recibo(models.Model):
-    ESTADO_CHOICES = [
-        ('pagado', 'Pagado'),
-        ('anticipo', 'Anticipo'),
-        ('anulado', 'Anulado'),
-    ]
-
     TIPO_PAGO_CHOICES = [
         ('completo', 'Completo'),
         ('anticipo', 'Anticipo'),
         ('beneficio', 'Beneficio'),
     ]
-
 
     matricula = models.ForeignKey(
     Matricula,
@@ -290,7 +284,6 @@ class Recibo(models.Model):
     cantidad = models.PositiveSmallIntegerField(default=15)
     monto_unitario = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('433.33'))
     concepto = models.CharField(max_length=200, default='Pago de curso')
-    estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='anticipo')
     observaciones = models.TextField(blank=True, null=True)
 
     class Meta:
@@ -350,7 +343,29 @@ class Calendario(models.Model):
     observaciones = models.TextField(blank=True, null=True)
 
     class Meta:
-        ordering = ['fecha', 'hora_inicio']
+        ordering = [
+            'fecha',
+            'hora_inicio',
+            'id',
+        ]
+
+        indexes = [
+            models.Index(
+                fields=[
+                    'fecha',
+                    'hora_inicio',
+                ],
+                name='cal_fecha_hora_idx',
+            ),
+            models.Index(
+                fields=[
+                    'instructor',
+                    'fecha',
+                    'hora_inicio',
+                ],
+                name='cal_inst_fecha_idx',
+            ),
+        ]
 
     def __str__(self):
         estudiante = self.matricula.estudiante
@@ -409,9 +424,9 @@ class Asistencia(models.Model):
             self.km_recorridos = 0
 
         super().save(*args, **kwargs)
-    
+
     def __str__(self):
-        
+
         return f"{self.As_estudiante}  {self.As_calendario}"
 
 
@@ -421,7 +436,7 @@ class Notas(models.Model):
         ('practico', 'Examen práctico'),
         ('teorico', 'Examen teórico'),
     ]
-       
+
     matricula = models.ForeignKey(
         Matricula,
         on_delete=models.CASCADE,
@@ -439,7 +454,7 @@ class Notas(models.Model):
         on_delete=models.CASCADE,
         related_name='notas'
     )
-    
+
 
     tipo_nota = models.CharField(
         max_length=20,
@@ -528,7 +543,7 @@ class SubtemaPlanEstudio(models.Model):
 
     def __str__(self):
         return f"{self.tema.titulo} - {self.titulo}"
-    
+
 
 
    # models.py
@@ -566,7 +581,7 @@ class ProgresoTema(models.Model):
 
     class Meta:
         unique_together = ['matricula', 'tema']
-        ordering = ['orden_general', 'tema__orden', 'id'] 
+        ordering = ['orden_general', 'tema__orden', 'id']
 
     def __str__(self):
         return f"{self.matricula.estudiante.nombre} - {self.tema.titulo}"
@@ -624,7 +639,7 @@ class ProgresoClaseTema(models.Model):
 
 class Notificacion(models.Model):
     """Notificaciones para el administrador"""
-    
+
     TIPOS_NOTIFICACION = (
     ('falta_estudiante', 'El estudiante no ha marcado su tema'),
     ('falta_instructor', 'El instructor no ha marcado la clase'),
@@ -633,21 +648,43 @@ class Notificacion(models.Model):
     ('intervencion_admin', 'El admin realizó una intervención'),
     ('plan_completado', 'El estudiante completó todo el plan'),
 )
-    
-    estudiante = models.ForeignKey('Usuario', on_delete=models.CASCADE, related_name='notificaciones')
-    tema = models.ForeignKey('TemaPlanEstudio', on_delete=models.CASCADE, null=True, blank=True)
+
+    estudiante = models.ForeignKey(
+        'Usuario',
+        on_delete=models.CASCADE,
+        related_name='notificaciones'
+    )
+
+    tema = models.ForeignKey(
+        'TemaPlanEstudio',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True
+    )
+
+    progreso_tema = models.ForeignKey(
+        'ProgresoTema',
+        on_delete=models.CASCADE,
+        related_name='notificaciones',
+        null=True,
+        blank=True,
+    )
 
     tipo = models.CharField(max_length=30, choices=TIPOS_NOTIFICACION)
     mensaje = models.TextField()
     leida = models.BooleanField(default=False)
     fecha_creacion = models.DateTimeField(auto_now_add=True)
-    
+
     class Meta:
         ordering = ['-fecha_creacion']
         constraints = [
             models.UniqueConstraint(
-                fields=['estudiante','tema','tipo'],
-                name='notificacion_unica_por_tema_tipo'
+                fields=[
+                    'estudiante',
+                    'progreso_tema',
+                    'tipo',
+                ],
+                name='notificacion_unica_por_progreso_tipo'
             )
         ]
 
@@ -658,7 +695,7 @@ class Notificacion(models.Model):
 
 class HistorialPlanEstudio(models.Model):
     """Historial de cambios en el progreso"""
-    
+
     progreso_tema = models.ForeignKey(ProgresoTema, on_delete=models.CASCADE, related_name='historial')
     usuario = models.ForeignKey('Usuario', on_delete=models.CASCADE)
     accion = models.CharField(max_length=50)
@@ -667,7 +704,7 @@ class HistorialPlanEstudio(models.Model):
     valor_nuevo_estudiante = models.BooleanField(null=True)
     valor_nuevo_instructor = models.BooleanField(null=True)
     fecha = models.DateTimeField(auto_now_add=True)
-    
+
     def __str__(self):
         return f"{self.fecha} - {self.usuario.username} - {self.accion}"
 
@@ -743,6 +780,154 @@ class ExamenTeorico(models.Model):
         estudiante = self.matricula.estudiante
         return f"Examen teórico - {estudiante.nombre} {estudiante.apellido}"
 
+class IntentoExamenTeorico(models.Model):
+
+    ESTADO_CHOICES = [
+        ('habilitado', 'Habilitado'),
+        ('iniciado', 'Iniciado'),
+        ('realizado', 'Realizado'),
+    ]
+
+    examen = models.ForeignKey(
+        ExamenTeorico,
+        on_delete=models.CASCADE,
+        related_name='intentos'
+    )
+
+    numero_intento = models.PositiveSmallIntegerField()
+
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADO_CHOICES,
+        default='habilitado'
+    )
+
+    nota = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True
+    )
+
+    fecha_habilitado = models.DateTimeField(
+        default=timezone.now
+    )
+
+    fecha_iniciado = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    fecha_realizado = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    class Meta:
+        ordering = [
+            'examen_id',
+            'numero_intento',
+        ]
+
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    'examen',
+                    'numero_intento',
+                ],
+                name='intento_unico_por_examen'
+            ),
+            models.CheckConstraint(
+                check=models.Q(
+                    numero_intento__gte=1
+                ),
+                name='numero_intento_mayor_cero'
+            ),
+        ]
+
+        indexes = [
+            models.Index(
+                fields=[
+                    'examen',
+                    '-numero_intento',
+                ],
+                name='idx_examen_ultimo_intento'
+            ),
+            models.Index(
+                fields=[
+                    'estado',
+                    'fecha_habilitado',
+                ],
+                name='idx_intento_estado_fecha'
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f'Examen #{self.examen_id} - '
+            f'Intento {self.numero_intento}'
+        )
+
+class PreguntaIntentoExamenTeorico(models.Model):
+
+    intento = models.ForeignKey(
+        IntentoExamenTeorico,
+        on_delete=models.CASCADE,
+        related_name='preguntas_asignadas'
+    )
+
+    pregunta = models.ForeignKey(
+        PreguntaExamenTeorico,
+        on_delete=models.PROTECT,
+        related_name='asignaciones_examen'
+    )
+
+    orden = models.PositiveSmallIntegerField()
+
+    class Meta:
+        ordering = [
+            'intento_id',
+            'orden',
+        ]
+
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    'intento',
+                    'pregunta',
+                ],
+                name='pregunta_unica_por_intento'
+            ),
+            models.UniqueConstraint(
+                fields=[
+                    'intento',
+                    'orden',
+                ],
+                name='orden_unico_por_intento'
+            ),
+            models.CheckConstraint(
+                check=models.Q(
+                    orden__gte=1
+                ),
+                name='orden_pregunta_mayor_cero'
+            ),
+        ]
+
+        indexes = [
+            models.Index(
+                fields=[
+                    'intento',
+                    'orden',
+                ],
+                name='idx_preguntas_intento_orden'
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f'Intento {self.intento.numero_intento} - '
+            f'Pregunta {self.orden}'
+        )
 
 class RespuestaExamenTeorico(models.Model):
 
@@ -752,21 +937,70 @@ class RespuestaExamenTeorico(models.Model):
         related_name='respuestas'
     )
 
+    intento = models.ForeignKey(
+        IntentoExamenTeorico,
+        on_delete=models.CASCADE,
+        related_name='respuestas',
+        null=True,
+        blank=True
+    )
+
     pregunta = models.ForeignKey(
         PreguntaExamenTeorico,
-        on_delete=models.CASCADE
+        on_delete=models.PROTECT,
+        related_name='respuestas_examen'
     )
 
     opcion_seleccionada = models.ForeignKey(
         OpcionPreguntaExamenTeorico,
-        on_delete=models.CASCADE
+        on_delete=models.PROTECT,
+        related_name='respuestas_seleccionadas'
     )
 
-    correcta = models.BooleanField(default=False)
+    correcta = models.BooleanField(
+        default=False
+    )
+
+    fecha_respuesta = models.DateTimeField(
+        default=timezone.now,
+        editable=False
+    )
+
+    class Meta:
+        ordering = [
+            'intento_id',
+            'pregunta_id',
+        ]
+
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    'intento',
+                    'pregunta',
+                ],
+                name='respuesta_unica_por_intento'
+            ),
+        ]
+
+        indexes = [
+            models.Index(
+                fields=[
+                    'examen',
+                    'intento',
+                ],
+                name='idx_respuesta_examen_intento'
+            ),
+        ]
 
     def __str__(self):
-        return f"Respuesta examen #{self.examen.id}"
-    
+        if self.intento_id:
+            return (
+                f'Examen #{self.examen_id} - '
+                f'Intento {self.intento.numero_intento}'
+            )
+
+        return f'Respuesta examen #{self.examen_id}'
+
 class PagoInstructor(models.Model):
     monto_por_alumno = models.DecimalField(
         max_digits=10,
@@ -778,7 +1012,7 @@ class PagoInstructor(models.Model):
     descripcion = models.CharField(max_length=150, blank=True, null=True)
 
     def __str__(self):
-        return f"C$ {self.monto_por_alumno} - {'Activo' if self.activo else 'Inactivo'}"   
+        return f"C$ {self.monto_por_alumno} - {'Activo' if self.activo else 'Inactivo'}"
 
 class CargoInstitucional(models.Model):
     TIPOS_CARGO = (
@@ -794,7 +1028,7 @@ class CargoInstitucional(models.Model):
     activo = models.BooleanField(default=True)
 
     def __str__(self):
-        return f"{self.nombre} - {self.cargo}" 
+        return f"{self.nombre} - {self.cargo}"
 
 # ============================================================
 # Generación automática de progreso de Plan de Estudio
@@ -821,12 +1055,18 @@ def crear_progresos_plan_matricula(matricula):
     if not tipo_curso:
         return 0
 
-    plan = PlanEstudio.objects.filter(
-        tipo_curso=tipo_curso,
-        activo=True
-    ).order_by("-id").first()
+    plan = getattr(
+        matricula,
+        'plan_de_estudio',
+        None,
+    )
 
     if not plan:
+        return 0
+
+    if str(plan.tipo_curso).strip().lower() != str(
+        tipo_curso
+    ).strip().lower():
         return 0
 
     temas = plan.temas.filter(
@@ -841,7 +1081,11 @@ def crear_progresos_plan_matricula(matricula):
             tema=tema,
             defaults={
                 "orden_general": orden,
-                "desbloqueado": orden == 1,
+                "desbloqueado": (
+                    str(tipo_curso).strip().lower()
+                    in ['intermedio', 'avanzado']
+                    or orden == 1
+                ),
             }
         )
 

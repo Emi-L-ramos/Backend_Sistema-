@@ -20,6 +20,7 @@ from .views import (
     AsistenciaViewSet,
     NotasViewSet,
     login,
+    cerrar_sesion,
     saldo,
     DashboardGananciasView,
     DashboardResumenView,
@@ -31,11 +32,12 @@ from .views import (
     reporte_induccion_instructores,
     reporte_kilometros_instructor,
     certificados_egresados,
-    certificados_egresados_word,
+    certificados_egresados_powerpoint,
 )
-from .views import ( ProgresoTemaViewSet, NotificacionViewSet
+from .views import (
+    ProgresoTemaViewSet,
+    NotificacionViewSet,
 )
-
 
 router = DefaultRouter()
 
@@ -59,12 +61,14 @@ router.register(r'examen-teorico', ExamenTeoricoViewSet)
 router.register(r'pagos-instructor', PagoInstructorViewSet, basename='pagos-instructor')
 router.register(r'cargos-institucionales', CargoInstitucionalViewSet, basename='cargos-institucionales')
 
-
-# app_escuela/api/urls.py
-
 urlpatterns = [
     path('', include(router.urls)),
     path('login/', login, name='login'),
+    path(
+        'logout/',
+        cerrar_sesion,
+        name='cerrar-sesion'
+    ),
     path('saldo/', saldo, name='saldo'),
     path('perfiles/', PerfilView.as_view(), name='perfiles'),
     path('dashboard/ganancias/', DashboardGananciasView.as_view(), name='dashboard-ganancias'),
@@ -92,8 +96,8 @@ urlpatterns = [
         name='certificados_egresados'
     ),
     path(
-        'certificados-egresados-word/',
-        certificados_egresados_word,
-        name='certificados_egresados_word'
+        'certificados-egresados-powerpoint/',
+        certificados_egresados_powerpoint,
+        name='certificados_egresados_powerpoint'
     ),
 ]

@@ -1,25 +1,43 @@
 """
 Django settings for Pescuela project.
 """
-
 import os
 from pathlib import Path
+
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
-SECRET_KEY = os.environ.get(
-    "SECRET_KEY",
-    "django-insecure-5zz7xfden4ks^m$1m!ggx6%&(74o(g9#rw8dtg^*cx(-zult-!"
-)
+def obtener_variable_obligatoria(nombre):
+    valor = os.environ.get(nombre)
+
+    if valor is None or not valor.strip():
+        raise ImproperlyConfigured(
+            f"La variable de entorno {nombre} es obligatoria."
+        )
+
+    return valor.strip()
+
+
+def obtener_lista_entorno(nombre, valor_predeterminado=""):
+    valor = os.environ.get(nombre, valor_predeterminado)
+
+    return [
+        elemento.strip()
+        for elemento in valor.split(",")
+        if elemento.strip()
+    ]
+
+SECRET_KEY = obtener_variable_obligatoria("SECRET_KEY")
 
 DEBUG = os.environ.get("DEBUG", "False").lower() == "true"
 
-ALLOWED_HOSTS = os.environ.get(
+ALLOWED_HOSTS = obtener_lista_entorno(
     "ALLOWED_HOSTS",
     "localhost,127.0.0.1"
-).split(",")
+)
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -77,6 +95,10 @@ DATABASES = {
         'PASSWORD': os.environ.get('MYSQL_PASSWORD', ''),
         'HOST': os.environ.get('MYSQL_HOST', '127.0.0.1'),
         'PORT': os.environ.get('MYSQL_PORT', '3306'),
+        'CONN_MAX_AGE': int(
+            os.environ.get('MYSQL_CONN_MAX_AGE', '60')
+        ),
+        'CONN_HEALTH_CHECKS': True,
         'OPTIONS': {
             'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
             'charset': 'utf8mb4',
@@ -84,15 +106,25 @@ DATABASES = {
     }
 }
 
-CORS_ALLOWED_ORIGINS = os.environ.get(
+CORS_ALLOWED_ORIGINS = obtener_lista_entorno(
     "CORS_ALLOWED_ORIGINS",
-    "https://esesaemca.cloud,https://www.esesaemca.cloud"
-).split(",")
+    (
+        "http://localhost:5173,"
+        "http://127.0.0.1:5173,"
+        "https://esesaemca.cloud,"
+        "https://www.esesaemca.cloud"
+    )
+)
 
-CSRF_TRUSTED_ORIGINS = os.environ.get(
+CSRF_TRUSTED_ORIGINS = obtener_lista_entorno(
     "CSRF_TRUSTED_ORIGINS",
-    "https://esesaemca.cloud,https://www.esesaemca.cloud"
-).split(",")
+    (
+        "http://localhost:5173,"
+        "http://127.0.0.1:5173,"
+        "https://esesaemca.cloud,"
+        "https://www.esesaemca.cloud"
+    )
+)
 
 CORS_ALLOW_CREDENTIALS = True
 
@@ -122,9 +154,12 @@ AUTH_PASSWORD_VALIDATORS = [
         'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        'NAME': (
+            'django.contrib.auth.password_validation.'
+            'MinimumLengthValidator'
+        ),
         'OPTIONS': {
-            'min_length': 6,
+            'min_length': 10,
         }
     },
     {
@@ -166,6 +201,12 @@ REST_FRAMEWORK = {
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend'
     ],
+    'DEFAULT_THROTTLE_RATES': {
+        'login': os.environ.get(
+            'LOGIN_THROTTLE_RATE',
+            '5/minute'
+        ),
+    },
 }
 
 LOGGING = {
@@ -184,3 +225,27 @@ LOGGING = {
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 USE_X_FORWARDED_HOST = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
+
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SAMESITE = 'Lax'
+
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
+    SECURE_HSTS_SECONDS = int(
+        os.environ.get(
+            'SECURE_HSTS_SECONDS',
+            '0'
+        )
+    )
+
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = (
+        SECURE_HSTS_SECONDS > 0
+    )
+    SECURE_HSTS_PRELOAD = (
+        SECURE_HSTS_SECONDS > 0
+    )
