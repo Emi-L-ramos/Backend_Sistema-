@@ -9781,6 +9781,15 @@ def reporte_induccion_instructores(request):
         )
     )
 
+    ahora_local = timezone.localtime(
+        timezone.now()
+    )
+    fecha_actual = ahora_local.date()
+    hora_actual = (
+        ahora_local.time()
+        .replace(tzinfo=None)
+    )
+
     matriculas = (
         Matricula.objects
         .select_related(
@@ -9796,11 +9805,31 @@ def reporte_induccion_instructores(request):
                 ultima_clase_valida
                 .values("fecha")[:1]
             ),
+            hora_finalizacion_reporte=Subquery(
+                ultima_clase_valida
+                .values("hora_fin")[:1]
+            ),
         )
         .filter(
             instructor_responsable_id=instructor_id,
-            estado="finalizado",
             fecha_finalizacion_reporte__isnull=False,
+            hora_finalizacion_reporte__isnull=False,
+        )
+        .filter(
+            Q(
+                fecha_finalizacion_reporte__lt=(
+                    fecha_actual
+                )
+            )
+            |
+            Q(
+                fecha_finalizacion_reporte=(
+                    fecha_actual
+                ),
+                hora_finalizacion_reporte__lte=(
+                    hora_actual
+                ),
+            )
         )
     )
 
