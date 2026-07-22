@@ -5494,15 +5494,11 @@ class DashboardResumenView(APIView):
             inicio_mes_fecha = inicio_mes.date()
             inicio_mes_siguiente_fecha = inicio_mes_siguiente.date()
 
-            # Todos los estudiantes que alguna vez tuvieron matrícula.
-            # No importa si la matrícula está pendiente, activa o finalizada.
+            # Total histórico de matrículas registradas.
+            # Cada matrícula cuenta, aunque un estudiante
+            # se haya matriculado más de una vez.
             total_matriculados = (
-                Matricula.objects
-                .values(
-                    'estudiante_id'
-                )
-                .distinct()
-                .count()
+                Matricula.objects.count()
             )
 
             # Estudiantes que tienen al menos una matrícula no finalizada.
@@ -9071,11 +9067,21 @@ def exportar_reporte_instructores_policial(request):
 
         fila += 1
 
-    matriculas = Matricula.objects.select_related(
-        'estudiante',
-        'categoria',
-    ).filter(
-        estado__in=['matriculado', 'finalizado']
+    matriculas = (
+        Matricula.objects
+        .select_related(
+            "estudiante",
+            "categoria",
+        )
+        .annotate(
+            fecha_finalizacion_reporte=models.Max(
+                "clases__fecha",
+                filter=(
+                    Q(clases__es_examen=False)
+                    & ~Q(clases__estado="cancelada")
+                ),
+            )
+        )
     )
 
     if inicio_rango:
@@ -9119,15 +9125,9 @@ def exportar_reporte_instructores_policial(request):
 
         estudiante = matricula.estudiante
 
-        fecha_finalizacion = Calendario.objects.filter(
-            matricula=matricula,
-            es_examen=False
-        ).order_by(
-            '-fecha'
-        ).values_list(
-            'fecha',
-            flat=True
-        ).first()
+        fecha_finalizacion = (
+            matricula.fecha_finalizacion_reporte
+        )
 
         if matricula.tipo_curso == "Principiante":
             horas_practicas = 15
@@ -9258,52 +9258,113 @@ def exportar_reporte_instructores_policial(request):
 
         fila += 1
 
-    matriculas_con_teorico = set()
-    matriculas_con_practico = set()
-
-    for nota in Notas.objects.all():
-        try:
-            valor_nota = float(nota.nota)
-        except (TypeError, ValueError):
-            continue
-
-        tipo_nota = str(nota.tipo_nota or "").strip().lower()
-
-        if tipo_nota == "teorico" and valor_nota >= 80:
-            matriculas_con_teorico.add(nota.matricula_id)
-
-        if tipo_nota == "practico" and valor_nota >= 80:
-            matriculas_con_practico.add(nota.matricula_id)
-
-    matriculas_egresadas_ids = matriculas_con_teorico.intersection(
-        matriculas_con_practico
+    egresados = (
+        Matricula.objects
+        .select_related(
+            "estudiante",
+            "categoria",
+            "plan_de_estudio",
+        )
+        .prefetch_related(
+            Prefetch(
+                "notas",
+                queryset=(
+                    Notas.objects
+                    .filter(
+                        tipo_nota__in=[
+                            "teorico",
+                            "practico",
+                        ]
+                    )
+                    .order_by(
+                        "-fecha_registro",
+                        "-id",
+                    )
+                ),
+                to_attr="notas_reporte_policial",
+            )
+        )
+        .annotate(
+            fecha_inicio_reporte=models.Min(
+                "clases__fecha",
+                filter=(
+                    Q(clases__es_examen=False)
+                    & ~Q(clases__estado="cancelada")
+                ),
+            ),
+            fecha_egreso_reporte=models.Max(
+                "clases__fecha",
+                filter=(
+                    Q(clases__es_examen=False)
+                    & ~Q(clases__estado="cancelada")
+                ),
+            ),
+        )
+        .filter(
+            tipo_curso__in=[
+                "Principiante",
+                "Intermedio",
+                "Avanzado",
+            ],
+            fecha_egreso_reporte__isnull=False,
+        )
     )
 
-    egresados = Matricula.objects.select_related(
-        'estudiante',
-        'categoria',
-    ).filter(
-        id__in=matriculas_egresadas_ids
-    )
-
-    if inicio_rango:
+    if fecha_desde_parseada:
         egresados = egresados.filter(
-            fecha_registro__gte=inicio_rango
+            fecha_egreso_reporte__gte=(
+                fecha_desde_parseada
+            )
         )
 
-    if fin_rango:
+    if fecha_hasta_parseada:
         egresados = egresados.filter(
-            fecha_registro__lt=fin_rango
+            fecha_egreso_reporte__lte=(
+                fecha_hasta_parseada
+            )
         )
 
     egresados = egresados.order_by(
-        'fecha_registro',
-        'id'
+        "estudiante__apellido",
+        "estudiante__nombre",
+        "id",
     )
 
     fila = fila_inicio_egresos
 
     for matricula in egresados:
+        notas_por_tipo = {}
+
+        for nota in matricula.notas_reporte_policial:
+            if nota.tipo_nota not in notas_por_tipo:
+                notas_por_tipo[nota.tipo_nota] = nota
+
+        nota_teorica_obj = notas_por_tipo.get(
+            "teorico"
+        )
+        nota_practica_obj = notas_por_tipo.get(
+            "practico"
+        )
+
+        if not nota_teorica_obj or not nota_practica_obj:
+            continue
+
+        nota_teorica = certificado_numero(
+            nota_teorica_obj.nota
+        )
+        nota_practica = certificado_numero(
+            nota_practica_obj.nota
+        )
+
+        if nota_teorica is None or nota_practica is None:
+            continue
+
+        if (
+            nota_teorica < Decimal("80")
+            or nota_practica < Decimal("80")
+        ):
+            continue
+
         copiar_estilo_fila(
             ws_egresos,
             fila_estilo_egresos,
@@ -9321,28 +9382,12 @@ def exportar_reporte_instructores_policial(request):
 
         estudiante = matricula.estudiante
 
-        fecha_finalizacion = Calendario.objects.filter(
-            matricula=matricula,
-            es_examen=False
-        ).order_by(
-            '-fecha'
-        ).values_list(
-            'fecha',
-            flat=True
-        ).first()
-
-        nota_teorica_obj = Notas.objects.filter(
-            matricula=matricula,
-            tipo_nota='teorico'
-        ).first()
-
-        nota_practica_obj = Notas.objects.filter(
-            matricula=matricula,
-            tipo_nota='practico'
-        ).first()
-
-        nota_teorica = nota_teorica_obj.nota if nota_teorica_obj else ""
-        nota_practica = nota_practica_obj.nota if nota_practica_obj else ""
+        fecha_inicio = (
+            matricula.fecha_inicio_reporte
+        )
+        fecha_finalizacion = (
+            matricula.fecha_egreso_reporte
+        )
 
         if matricula.tipo_curso == "Principiante":
             horas_practicas = 15
@@ -9412,7 +9457,11 @@ def exportar_reporte_instructores_policial(request):
         ws_egresos.cell(
             row=fila,
             column=11,
-            value=matricula.fecha_registro.strftime('%d/%m/%Y') if matricula.fecha_registro else ""
+            value=(
+                fecha_inicio.strftime("%d/%m/%Y")
+                if fecha_inicio
+                else ""
+            )
         )
 
         ws_egresos.cell(
