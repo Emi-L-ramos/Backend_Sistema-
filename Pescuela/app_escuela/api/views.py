@@ -9765,74 +9765,64 @@ def reporte_induccion_instructores(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    instructor_ultima_clase = (
+    ultima_clase_valida = (
         Calendario.objects
         .filter(
-            matricula_id=OuterRef('pk'),
+            matricula_id=OuterRef("pk"),
             es_examen=False,
         )
         .exclude(
-            estado='cancelada'
+            estado="cancelada"
         )
         .order_by(
-            '-fecha',
-            '-hora_fin',
-            '-id',
+            "-fecha",
+            "-hora_fin",
+            "-id",
         )
-        .values(
-            'instructor_id'
-        )[:1]
     )
 
     matriculas = (
         Matricula.objects
         .select_related(
-            'estudiante',
-            'categoria',
+            "estudiante",
+            "categoria",
         )
         .annotate(
             instructor_responsable_id=Subquery(
-                instructor_ultima_clase
-            )
+                ultima_clase_valida
+                .values("instructor_id")[:1]
+            ),
+            fecha_finalizacion_reporte=Subquery(
+                ultima_clase_valida
+                .values("fecha")[:1]
+            ),
         )
         .filter(
             instructor_responsable_id=instructor_id,
-            estado='finalizado',
-            fecha_finalizacion__isnull=False,
+            estado="finalizado",
+            fecha_finalizacion_reporte__isnull=False,
         )
     )
 
     if fecha_desde_parseada:
-        inicio_rango = timezone.make_aware(
-            datetime.combine(
-                fecha_desde_parseada,
-                datetime.min.time(),
-            ),
-            timezone.get_current_timezone(),
-        )
-
         matriculas = matriculas.filter(
-            fecha_finalizacion__gte=inicio_rango
+            fecha_finalizacion_reporte__gte=(
+                fecha_desde_parseada
+            )
         )
 
     if fecha_hasta_parseada:
-        fin_rango = timezone.make_aware(
-            datetime.combine(
-                fecha_hasta_parseada + timedelta(days=1),
-                datetime.min.time(),
-            ),
-            timezone.get_current_timezone(),
-        )
-
         matriculas = matriculas.filter(
-            fecha_finalizacion__lt=fin_rango
+            fecha_finalizacion_reporte__lte=(
+                fecha_hasta_parseada
+            )
         )
 
     matriculas = matriculas.distinct().order_by(
-        'fecha_finalizacion',
-        'estudiante__nombre',
-        'estudiante__apellido',
-        'id',
+        "fecha_finalizacion_reporte",
+        "estudiante__nombre",
+        "estudiante__apellido",
+        "id",
     )
 
     datos = []
@@ -9876,22 +9866,20 @@ def reporte_induccion_instructores(request):
                 else ''
             ),
 
-            'fecha_finalizacion': (
-                timezone.localtime(
-                    matricula.fecha_finalizacion
-                ).strftime('%d/%m/%Y')
-                if matricula.fecha_finalizacion
-                else ''
+            "fecha_finalizacion": (
+                matricula.fecha_finalizacion_reporte.strftime(
+                    "%d/%m/%Y"
+                )
+                if matricula.fecha_finalizacion_reporte
+                else ""
             ),
 
-            # Se conserva temporalmente para no romper
-            # el frontend antes del siguiente cambio.
-            'fecha': (
-                timezone.localtime(
-                    matricula.fecha_finalizacion
-                ).strftime('%d/%m/%Y')
-                if matricula.fecha_finalizacion
-                else ''
+            "fecha": (
+                matricula.fecha_finalizacion_reporte.strftime(
+                    "%d/%m/%Y"
+                )
+                if matricula.fecha_finalizacion_reporte
+                else ""
             ),
 
             'numero_recibo': (
