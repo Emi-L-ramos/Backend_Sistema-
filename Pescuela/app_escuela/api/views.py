@@ -2878,22 +2878,16 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             fechas_destino = {}
 
             if cambia_fecha:
-                fechas_originales = [
-                    clase.fecha
-                    for clase in clases
-                ]
-
-                nuevas_fechas = [
-                    fecha_obj,
-                    *fechas_originales[:-1],
-                ]
+                desplazamiento = (
+                    fecha_obj - instance.fecha
+                )
 
                 fechas_destino = {
-                    clase.id: destino
-                    for clase, destino in zip(
-                        clases,
-                        nuevas_fechas
+                    clase.id: (
+                        clase.fecha
+                        + desplazamiento
                     )
+                    for clase in clases
                 }
 
             planes = []
