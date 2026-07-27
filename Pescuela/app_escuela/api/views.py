@@ -2878,17 +2878,76 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             fechas_destino = {}
 
             if cambia_fecha:
-                desplazamiento = (
-                    fecha_obj - instance.fecha
-                )
+                modalidad = str(
+                    instance.matricula.modalidad
+                    or ''
+                ).strip().lower()
 
-                fechas_destino = {
-                    clase.id: (
-                        clase.fecha
-                        + desplazamiento
+                def fecha_permitida(fecha):
+                    if modalidad == 'regular':
+                        return fecha.weekday() < 5
+
+                    if modalidad == 'extraordinario':
+                        return fecha.weekday() >= 5
+
+                    # La modalidad Mixto permite
+                    # fechas entre semana y fines de semana.
+                    return True
+
+                if not fecha_permitida(fecha_obj):
+                    if modalidad == 'regular':
+                        return error(
+                            'La modalidad Regular solamente '
+                            'permite clases de lunes a viernes.'
+                        )
+
+                    if modalidad == 'extraordinario':
+                        return error(
+                            'La modalidad Extraordinario solamente '
+                            'permite clases los sábados y domingos.'
+                        )
+
+                if modalidad in [
+                    'regular',
+                    'extraordinario',
+                ]:
+                    fecha_destino = fecha_obj
+
+                    for indice, clase in enumerate(
+                        clases
+                    ):
+                        if indice > 0:
+                            fecha_destino += timedelta(
+                                days=1
+                            )
+
+                            while not fecha_permitida(
+                                fecha_destino
+                            ):
+                                fecha_destino += timedelta(
+                                    days=1
+                                )
+
+                        fechas_destino[
+                            clase.id
+                        ] = fecha_destino
+
+                else:
+                    # En modalidad Mixto se conserva
+                    # la separación original entre las
+                    # fechas seleccionadas manualmente.
+                    desplazamiento = (
+                        fecha_obj
+                        - instance.fecha
                     )
-                    for clase in clases
-                }
+
+                    fechas_destino = {
+                        clase.id: (
+                            clase.fecha
+                            + desplazamiento
+                        )
+                        for clase in clases
+                    }
 
             planes = []
 
