@@ -1150,6 +1150,9 @@ class ReciboSerializer(serializers.ModelSerializer):
         read_only=True
     )
 
+    monto_total_curso = serializers.SerializerMethodField()
+    por_pagar = serializers.SerializerMethodField()
+
     class Meta:
         model = Recibo
         fields = '__all__'
@@ -1161,6 +1164,64 @@ class ReciboSerializer(serializers.ModelSerializer):
             f"{estudiante.nombre} "
             f"{estudiante.apellido}"
         ).strip()
+
+    def get_monto_total_curso(self, obj):
+        matricula = obj.matricula
+        valor_curso = obj.valor_curso
+
+        if not valor_curso:
+            try:
+                valor_curso = self.obtener_valor_curso(
+                    matricula
+                )
+            except serializers.ValidationError:
+                return Decimal('0.00')
+
+        if matricula.tipo_curso == 'Principiante':
+            monto_total = Decimal(
+                str(valor_curso.precio_total)
+            )
+
+        elif matricula.tipo_curso in [
+            'Intermedio',
+            'Avanzado',
+        ]:
+            horas = Decimal(
+                str(matricula.horas_reforzamiento or 0)
+            )
+
+            monto_total = (
+                horas
+                * Decimal(str(valor_curso.precio_hora))
+            )
+
+        else:
+            monto_total = Decimal('0.00')
+
+        return monto_total.quantize(
+            Decimal('0.01'),
+            rounding=ROUND_HALF_UP,
+        )
+
+    def get_por_pagar(self, obj):
+        if obj.tipo_pago == 'beneficio':
+            return Decimal('0.00')
+
+        monto_total = Decimal(
+            str(self.get_monto_total_curso(obj))
+        )
+
+        monto_pagado = Decimal(
+            str(obj.monto_pagado or 0)
+        )
+
+        return max(
+            monto_total - monto_pagado,
+            Decimal('0.00'),
+        ).quantize(
+            Decimal('0.01'),
+            rounding=ROUND_HALF_UP,
+        )
 
     def obtener_valor_curso(self, matricula):
         """
