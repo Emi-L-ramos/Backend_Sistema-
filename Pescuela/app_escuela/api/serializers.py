@@ -1176,27 +1176,10 @@ class ReciboSerializer(serializers.ModelSerializer):
                 )
             except serializers.ValidationError:
                 return Decimal('0.00')
-
-        if matricula.tipo_curso == 'Principiante':
-            monto_total = Decimal(
-                str(valor_curso.precio_total)
-            )
-
-        elif matricula.tipo_curso in [
-            'Intermedio',
-            'Avanzado',
-        ]:
-            horas = Decimal(
-                str(matricula.horas_reforzamiento or 0)
-            )
-
-            monto_total = (
-                horas
-                * Decimal(str(valor_curso.precio_hora))
-            )
-
-        else:
-            monto_total = Decimal('0.00')
+ 
+        monto_total = Decimal(
+            str(valor_curso.precio_total or 0)
+        )
 
         return monto_total.quantize(
             Decimal('0.01'),
@@ -1204,7 +1187,12 @@ class ReciboSerializer(serializers.ModelSerializer):
         )
 
     def get_por_pagar(self, obj):
-        if obj.tipo_pago == 'beneficio':
+        tipo_pago = str(
+            obj.tipo_pago or ''
+        ).strip().lower()
+
+        # Solamente los anticipos tienen saldo pendiente.
+        if tipo_pago != 'anticipo':
             return Decimal('0.00')
 
         monto_total = Decimal(
