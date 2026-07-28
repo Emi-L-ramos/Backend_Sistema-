@@ -295,6 +295,14 @@ class UserSerializer(serializers.ModelSerializer):
                         'matricula_id': 'La matrícula no existe.'
                     })
 
+                if matricula.estado == 'finalizado':
+                    raise serializers.ValidationError({
+                        'matricula_id': (
+                            'No se puede crear usuario para una '
+                            'matrícula finalizada.'
+                        )
+                    })
+
                 if Usuario.objects.filter(
                     estudiante=matricula.estudiante,
                     rol__nombre__iexact='estudiante'
@@ -1835,9 +1843,9 @@ class CalendarioSerializer(serializers.ModelSerializer):
         matricula = data.get('matricula') or getattr(self.instance, 'matricula', None)
 
         if matricula:
-            if matricula.estado != 'matriculado':
+            if matricula.estado == 'finalizado':
                 raise serializers.ValidationError(
-                    'No se puede asignar horario porque la matrícula aún no está aprobada.'
+                    'No se puede asignar horario a una matrícula finalizada.'
                 )
 
             if not matricula.estudiante.usuarios.filter(rol__nombre__iexact='estudiante').exists():
@@ -1862,9 +1870,9 @@ class CrearBloqueCitasSerializer(serializers.Serializer):
         except Matricula.DoesNotExist:
             raise serializers.ValidationError('Matrícula no encontrada.')
 
-        if matricula.estado != 'matriculado':
+        if matricula.estado == 'finalizado':
             raise serializers.ValidationError(
-                'No se puede asignar horario porque la matrícula aún no está aprobada.'
+                'No se puede asignar horario a una matrícula finalizada.'
             )
 
         if not matricula.estudiante.usuarios.filter(rol__nombre__iexact='estudiante').exists():
@@ -1909,9 +1917,9 @@ class CrearCalendarioManualSerializer(serializers.Serializer):
         except Matricula.DoesNotExist:
             raise serializers.ValidationError('Matrícula no encontrada.')
 
-        if matricula.estado != 'matriculado':
+        if matricula.estado == 'finalizado':
             raise serializers.ValidationError(
-                'No se puede asignar horario porque la matrícula aún no está aprobada.'
+                'No se puede asignar horario a una matrícula finalizada.'
             )
 
         if not matricula.estudiante.usuarios.filter(rol__nombre__iexact='estudiante').exists():

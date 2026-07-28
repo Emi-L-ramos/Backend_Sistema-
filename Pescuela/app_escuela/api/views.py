@@ -1831,9 +1831,14 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        if matricula.estado != 'matriculado':
+        if matricula.estado == 'finalizado':
             return Response(
-                {'error': 'No se puede crear usuario porque la matrícula aún no está aprobada.'},
+                {
+                    'error': (
+                        'No se puede crear usuario para una '
+                        'matrícula finalizada.'
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
