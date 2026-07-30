@@ -242,6 +242,11 @@ class Matricula(models.Model):
     estudiante = models.ForeignKey(Estudiante, on_delete=models.CASCADE, related_name='matriculas')
     fecha_registro = models.DateTimeField(auto_now_add=True)
     fecha_finalizacion = models.DateTimeField(null=True, blank=True)
+    fecha_desactivacion_usuario = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+    )
     categoria = models.ForeignKey(CategoriaVehiculo, on_delete=models.SET_NULL, null=True, blank=True, related_name='matriculas')
     estado = models.CharField(max_length=20, choices=ESTADOS, default='pendiente')
     modalidad = models.CharField(max_length=50, choices=MODALIDADES)
@@ -250,6 +255,14 @@ class Matricula(models.Model):
     horas_reforzamiento = models.PositiveSmallIntegerField(null=True,blank=True)
     aparicion = models.CharField(max_length=50, choices=APARICIONES)
     incluye_examen_policial = models.BooleanField(default=False)
+    dias_programados = models.JSONField(
+        default=list,
+        blank=True,
+    )
+    fechas_programadas = models.JSONField(
+        default=list,
+        blank=True,
+    )
     observaciones = models.TextField(blank=True, null=True)
 
     def __str__(self):
@@ -1045,9 +1058,21 @@ def crear_progresos_plan_matricula(matricula):
     No duplica registros existentes.
     """
 
-    estado = (getattr(matricula, "estado", "") or "").lower()
+    estado = (
+        getattr(
+            matricula,
+            'estado',
+            '',
+        )
+        or ''
+    ).strip().lower()
 
-    if estado not in ["matriculado", "aprobada", "aprobado"]:
+    if estado not in [
+        'pendiente',
+        'matriculado',
+        'aprobada',
+        'aprobado',
+    ]:
         return 0
 
     tipo_curso = getattr(matricula, "tipo_curso", None)

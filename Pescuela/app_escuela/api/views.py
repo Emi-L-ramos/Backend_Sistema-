@@ -263,29 +263,76 @@ def obtener_rango_horario(matricula):
 
     return mapeo.get(matricula.horario)
 
-def crear_clase_recuperacion(clase_faltada):
-    matricula = clase_faltada.matricula
+def obtener_dias_programados(matricula):
+    dias = []
+
+    for valor in (
+        getattr(
+            matricula,
+            'dias_programados',
+            None,
+        )
+        or []
+    ):
+        try:
+            dia = int(valor)
+        except (TypeError, ValueError):
+            continue
+
+        if 0 <= dia <= 6:
+            dias.append(dia)
+
+    dias = sorted(set(dias))
+
+    if dias:
+        return dias
 
     modalidad = str(
         matricula.modalidad or ''
     ).strip().lower()
 
+    if modalidad == 'regular':
+        return [0, 1, 2, 3, 4]
+
+    if modalidad == 'extraordinario':
+        return [5, 6]
+
+    fechas = (
+        Calendario.objects
+        .filter(
+            matricula=matricula,
+            es_examen=False,
+        )
+        .exclude(
+            estado='cancelada'
+        )
+        .values_list(
+            'fecha',
+            flat=True,
+        )
+    )
+
+    return sorted({
+        fecha.weekday()
+        for fecha in fechas
+        if fecha
+    })
+
+def crear_clase_recuperacion(clase_faltada):
+    matricula = clase_faltada.matricula
+
+    dias_programados = obtener_dias_programados(
+        matricula
+    )
+
     def siguiente_fecha_valida(fecha_base):
         nueva_fecha = fecha_base + timedelta(days=1)
 
         while True:
-            es_fin_semana = (
-                nueva_fecha.weekday() >= 5
-            )
-
-            if modalidad == 'extraordinario':
-                if es_fin_semana:
-                    return nueva_fecha
-
-            elif modalidad == 'mixto':
-                return nueva_fecha
-
-            elif not es_fin_semana:
+            if (
+                nueva_fecha.weekday()
+                in dias_programados
+            ):
                 return nueva_fecha
 
             nueva_fecha += timedelta(days=1)
@@ -2064,6 +2111,75 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 )
             })
 
+        modalidad = str(
+            matricula.modalidad or ''
+        ).strip().lower()
+
+        if modalidad == 'regular':
+            dias_programados = [
+                0,
+                1,
+                2,
+                3,
+                4,
+            ]
+        elif modalidad == 'extraordinario':
+            dias_programados = [
+                5,
+                6,
+            ]
+        else:
+            dias_programados = sorted({
+                fecha.weekday()
+                for fecha in fechas
+            })
+
+        if not dias_programados:
+            raise serializers.ValidationError({
+                'error': (
+                    'No se pudieron determinar los días '
+                    'programados para esta matrícula.'
+                )
+            })
+
+        fechas_programadas = (
+            [
+                fecha.isoformat()
+                for fecha in fechas
+            ]
+            if modalidad == 'mixto'
+            else []
+        )
+
+        campos_matricula = []
+
+        if (
+            matricula.dias_programados
+            != dias_programados
+        ):
+            matricula.dias_programados = (
+                dias_programados
+            )
+            campos_matricula.append(
+                'dias_programados'
+            )
+
+        if (
+            matricula.fechas_programadas
+            != fechas_programadas
+        ):
+            matricula.fechas_programadas = (
+                fechas_programadas
+            )
+            campos_matricula.append(
+                'fechas_programadas'
+            )
+
+        if campos_matricula:
+            matricula.save(
+                update_fields=campos_matricula
+            )
+
         planes = []
 
         for fecha_clase, duracion_clase in zip(
@@ -2284,15 +2400,8 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                     ]
                 )
 
-                matricula = calendario.matricula
-
-                desactivar_usuarios_estudiante(
-                    matricula.estudiante
-                )
-
                 mensaje = (
-                    'El examen policial fue marcado como asistido. '
-                    'El acceso del estudiante fue desactivado '
+                    'El examen policial fue marcado como asistido '
                     'correctamente.'
                 )
 
@@ -2624,11 +2733,11 @@ class CalendarioViewSet(viewsets.ModelViewSet):
     def partial_update(self, request, *args, **kwargs):
         def error(
             mensaje,
-            codigo=status.HTTP_400_BAD_REQUEST
+            codigo=status.HTTP_400_BAD_REQUEST,
         ):
             return Response(
                 {'error': mensaje},
-                status=codigo
+                status=codigo,
             )
 
         if not es_admin(request.user):
@@ -2649,7 +2758,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
         aplicar_a = str(
             request.data.get(
                 'aplicar_a',
-                'solo'
+                'solo',
             )
             or 'solo'
         ).strip().lower()
@@ -2693,11 +2802,8 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 activo=True,
             ).exists():
                 return error(
-                    (
-                        'El instructor seleccionado no existe '
-                        'o se encuentra desactivado.'
-                    ),
-                    status.HTTP_400_BAD_REQUEST,
+                    'El instructor seleccionado no existe '
+                    'o se encuentra desactivado.'
                 )
 
         fecha_obj = None
@@ -2728,7 +2834,7 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             try:
                 return datetime.strptime(
                     valor,
-                    formato
+                    formato,
                 ).time()
             except ValueError:
                 return None
@@ -2766,24 +2872,48 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 'que la hora inicio.'
             )
 
+        def inicio_de(plan):
+            return datetime.combine(
+                plan['fecha'],
+                plan['hora_inicio'],
+            )
+
+        def fin_de(plan):
+            return datetime.combine(
+                plan['fecha'],
+                plan['hora_fin'],
+            )
+
         with transaction.atomic():
-            Matricula.objects.select_for_update().get(
-                id=instance.matricula_id
+            matricula = (
+                Matricula.objects
+                .select_for_update()
+                .get(id=instance.matricula_id)
             )
 
             ids_instructores = set(
-                Calendario.objects.filter(
-                    matricula_id=(
-                        instance.matricula_id
-                    ),
+                Calendario.objects
+                .filter(
+                    matricula_id=matricula.id,
                     es_examen=False,
-                    estado='pendiente',
-                    numero_clase__gte=(
-                        instance.numero_clase
-                    ),
-                ).values_list(
+                )
+                .filter(
+                    Q(id=instance.id)
+                    | Q(
+                        numero_clase__gt=(
+                            instance.numero_clase
+                        )
+                    )
+                )
+                .exclude(
+                    estado='cancelada'
+                )
+                .exclude(
+                    instructor_id__isnull=True
+                )
+                .values_list(
                     'instructor_id',
-                    flat=True
+                    flat=True,
                 )
             )
 
@@ -2830,41 +2960,36 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                     'asistencia registrada.'
                 )
 
-            cambia_fecha = (
-                fecha_obj is not None
-                and fecha_obj != instance.fecha
-            )
-
-            incluir_pendientes = (
-                aplicar_a == 'pendientes'
-                or cambia_fecha
-            )
-
-            if incluir_pendientes:
-                clases = list(
-                    Calendario.objects
-                    .select_for_update()
-                    .filter(
-                        matricula=instance.matricula,
-                        es_examen=False,
-                        estado='pendiente',
-                        numero_clase__gte=(
+            clases = list(
+                Calendario.objects
+                .select_for_update()
+                .filter(
+                    matricula=matricula,
+                    es_examen=False,
+                )
+                .filter(
+                    Q(id=instance.id)
+                    | Q(
+                        numero_clase__gt=(
                             instance.numero_clase
-                        ),
-                    )
-                    .order_by(
-                        'numero_clase',
-                        'fecha',
-                        'hora_inicio',
-                        'id',
+                        )
                     )
                 )
-            else:
-                clases = [instance]
+                .exclude(
+                    estado='cancelada'
+                )
+                .order_by(
+                    'numero_clase',
+                    'fecha',
+                    'hora_inicio',
+                    'id',
+                )
+            )
 
             if not clases:
                 return error(
-                    'No hay encuentros pendientes disponibles para actualizar.'
+                    'No hay encuentros disponibles '
+                    'para actualizar.'
                 )
 
             ids_clases = [
@@ -2872,94 +2997,26 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 for clase in clases
             ]
 
-            if Asistencia.objects.filter(
-                As_calendario_id__in=ids_clases
-            ).exists():
-                return error(
-                    'Uno de los encuentros pendientes '
-                    'ya tiene asistencia registrada.'
+            ids_con_asistencia = set(
+                Asistencia.objects
+                .filter(
+                    As_calendario_id__in=ids_clases
                 )
-
-            fechas_destino = {}
-
-            if cambia_fecha:
-                modalidad = str(
-                    instance.matricula.modalidad
-                    or ''
-                ).strip().lower()
-
-                def fecha_permitida(fecha):
-                    if modalidad == 'regular':
-                        return fecha.weekday() < 5
-
-                    if modalidad == 'extraordinario':
-                        return fecha.weekday() >= 5
-
-                    # La modalidad Mixto permite
-                    # fechas entre semana y fines de semana.
-                    return True
-
-                if not fecha_permitida(fecha_obj):
-                    if modalidad == 'regular':
-                        return error(
-                            'La modalidad Regular solamente '
-                            'permite clases de lunes a viernes.'
-                        )
-
-                    if modalidad == 'extraordinario':
-                        return error(
-                            'La modalidad Extraordinario solamente '
-                            'permite clases los sábados y domingos.'
-                        )
-
-                if modalidad in [
-                    'regular',
-                    'extraordinario',
-                ]:
-                    fecha_destino = fecha_obj
-
-                    for indice, clase in enumerate(
-                        clases
-                    ):
-                        if indice > 0:
-                            fecha_destino += timedelta(
-                                days=1
-                            )
-
-                            while not fecha_permitida(
-                                fecha_destino
-                            ):
-                                fecha_destino += timedelta(
-                                    days=1
-                                )
-
-                        fechas_destino[
-                            clase.id
-                        ] = fecha_destino
-
-                else:
-                    # En modalidad Mixto se conserva
-                    # la separación original entre las
-                    # fechas seleccionadas manualmente.
-                    desplazamiento = (
-                        fecha_obj
-                        - instance.fecha
-                    )
-
-                    fechas_destino = {
-                        clase.id: (
-                            clase.fecha
-                            + desplazamiento
-                        )
-                        for clase in clases
-                    }
+                .values_list(
+                    'As_calendario_id',
+                    flat=True,
+                )
+            )
 
             planes = []
 
             for clase in clases:
                 aplicar_datos = (
-                    aplicar_a == 'pendientes'
-                    or clase.id == instance.id
+                    clase.id == instance.id
+                    or (
+                        aplicar_a == 'pendientes'
+                        and clase.estado == 'pendiente'
+                    )
                 )
 
                 instructor_destino = (
@@ -2977,59 +3034,453 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                         'instructor asignado.'
                     )
 
+                fecha_destino = (
+                    fecha_obj
+                    if (
+                        clase.id == instance.id
+                        and fecha_obj is not None
+                    )
+                    else clase.fecha
+                )
+
+                hora_inicio_destino = (
+                    hora_inicio_obj
+                    if (
+                        aplicar_datos
+                        and envio_alguna_hora
+                    )
+                    else clase.hora_inicio
+                )
+
+                hora_fin_destino = (
+                    hora_fin_obj
+                    if (
+                        aplicar_datos
+                        and envio_alguna_hora
+                    )
+                    else clase.hora_fin
+                )
+
+                cambia_datos = (
+                    instructor_destino
+                    != clase.instructor_id
+                    or fecha_destino
+                    != clase.fecha
+                    or hora_inicio_destino
+                    != clase.hora_inicio
+                    or hora_fin_destino
+                    != clase.hora_fin
+                )
+
+                puede_modificarse = (
+                    clase.estado == 'pendiente'
+                    and clase.id
+                    not in ids_con_asistencia
+                )
+
+                if (
+                    cambia_datos
+                    and not puede_modificarse
+                ):
+                    return error(
+                        'No se puede modificar el encuentro '
+                        f'{clase.numero_clase} porque ya no '
+                        'está pendiente o tiene asistencia.'
+                    )
+
                 planes.append({
                     'clase': clase,
                     'instructor_id': (
                         instructor_destino
                     ),
-                    'fecha': fechas_destino.get(
-                        clase.id,
-                        clase.fecha
-                    ),
+                    'fecha': fecha_destino,
                     'hora_inicio': (
-                        hora_inicio_obj
-                        if (
-                            aplicar_datos
-                            and envio_alguna_hora
-                        )
-                        else clase.hora_inicio
+                        hora_inicio_destino
                     ),
-                    'hora_fin': (
-                        hora_fin_obj
-                        if (
-                            aplicar_datos
-                            and envio_alguna_hora
-                        )
-                        else clase.hora_fin
+                    'hora_fin': hora_fin_destino,
+                    'puede_modificarse': (
+                        puede_modificarse
                     ),
                 })
 
-            # Evita choques entre los propios
-            # encuentros que serán desplazados.
-            for indice, plan in enumerate(planes):
-                for otro in planes[indice + 1:]:
-                    chocan_entre_si = (
-                        plan['instructor_id']
-                        == otro['instructor_id']
-                        and plan['fecha']
-                        == otro['fecha']
-                        and plan['hora_inicio']
-                        < otro['hora_fin']
-                        and plan['hora_fin']
-                        > otro['hora_inicio']
+            plan_seleccionado = next(
+                plan
+                for plan in planes
+                if plan['clase'].id == instance.id
+            )
+
+            planes_siguientes = [
+                plan
+                for plan in planes
+                if (
+                    plan['clase'].numero_clase
+                    > instance.numero_clase
+                )
+            ]
+
+            clase_anterior = (
+                Calendario.objects
+                .select_for_update()
+                .filter(
+                    matricula=matricula,
+                    es_examen=False,
+                    numero_clase__lt=(
+                        instance.numero_clase
+                    ),
+                )
+                .exclude(
+                    estado='cancelada'
+                )
+                .order_by(
+                    '-numero_clase',
+                    '-id',
+                )
+                .first()
+            )
+
+            if clase_anterior:
+                fin_anterior = datetime.combine(
+                    clase_anterior.fecha,
+                    clase_anterior.hora_fin,
+                )
+
+                if inicio_de(
+                    plan_seleccionado
+                ) < fin_anterior:
+                    return error(
+                        'La nueva fecha y hora del '
+                        f'encuentro {instance.numero_clase} '
+                        'deben quedar después del encuentro '
+                        f'{clase_anterior.numero_clase}, que '
+                        f'termina el {clase_anterior.fecha} '
+                        f'a las '
+                        f'{clase_anterior.hora_fin.strftime("%H:%M")}.'
                     )
 
-                    if chocan_entre_si:
-                        return error(
-                            'Los cambios producirían dos '
-                            'encuentros en el mismo horario '
-                            f'el día {plan["fecha"]}.'
+            modalidad = str(
+                matricula.modalidad or ''
+            ).strip().lower()
+
+            es_mixto = modalidad == 'mixto'
+
+            fechas_programadas = []
+
+            if es_mixto:
+                for valor in (
+                    matricula.fechas_programadas
+                    or []
+                ):
+                    fecha_programada = parse_date(
+                        str(valor)
+                    )
+
+                    if fecha_programada:
+                        fechas_programadas.append(
+                            fecha_programada
                         )
 
-            # Comprueba choques con otras matrículas
-            # y con exámenes policiales.
+                if not fechas_programadas:
+                    return error(
+                        'La matrícula Mixta no tiene '
+                        'guardadas sus fechas originales.'
+                    )
+            else:
+                dias_programados = set(
+                    obtener_dias_programados(
+                        matricula
+                    )
+                )
+
+                if not dias_programados:
+                    return error(
+                        'No se encontraron los días '
+                        'programados para este calendario.'
+                    )
+
+            def siguiente_fecha_programada(
+                fecha_base,
+            ):
+                candidata = (
+                    fecha_base
+                    + timedelta(days=1)
+                )
+
+                while (
+                    candidata.weekday()
+                    not in dias_programados
+                ):
+                    candidata += timedelta(
+                        days=1
+                    )
+
+                return candidata
+
+            def siguiente_fecha_mixta(
+                plan,
+                fin_anterior,
+                indice_inicial,
+            ):
+                indice = max(
+                    int(indice_inicial),
+                    0,
+                )
+
+                while indice < len(
+                    fechas_programadas
+                ):
+                    candidata = (
+                        fechas_programadas[
+                            indice
+                        ]
+                    )
+
+                    inicio_candidato = (
+                        datetime.combine(
+                            candidata,
+                            plan['hora_inicio'],
+                        )
+                    )
+
+                    if (
+                        inicio_candidato
+                        >= fin_anterior
+                    ):
+                        return (
+                            candidata,
+                            indice + 1,
+                        )
+
+                    indice += 1
+
+                return (
+                    fin_anterior.date()
+                    + timedelta(days=1),
+                    indice,
+                )
+
+            cambia_fecha = (
+                plan_seleccionado['fecha']
+                != instance.fecha
+            )
+
+            adelanta_fecha = (
+                cambia_fecha
+                and plan_seleccionado['fecha']
+                < instance.fecha
+            )
+
+            hay_cambio_temporal = (
+                cambia_fecha
+                or any(
+                    plan['hora_inicio']
+                    != plan['clase'].hora_inicio
+                    or plan['hora_fin']
+                    != plan['clase'].hora_fin
+                    for plan in planes
+                )
+            )
+
+            if adelanta_fecha:
+                plan_anterior = plan_seleccionado
+                indice_mixto = max(
+                    instance.numero_clase - 1,
+                    0,
+                )
+
+                for plan in planes_siguientes:
+                    if es_mixto:
+                        (
+                            nueva_fecha_plan,
+                            indice_mixto,
+                        ) = siguiente_fecha_mixta(
+                            plan,
+                            fin_de(plan_anterior),
+                            indice_mixto,
+                        )
+                    else:
+                        nueva_fecha_plan = (
+                            siguiente_fecha_programada(
+                                plan_anterior['fecha']
+                            )
+                        )
+
+                    if (
+                        nueva_fecha_plan
+                        != plan['fecha']
+                        and not plan[
+                            'puede_modificarse'
+                        ]
+                    ):
+                        return error(
+                            'No se puede adelantar el '
+                            'calendario porque el encuentro '
+                            f'{plan["clase"].numero_clase} '
+                            'ya no está pendiente o tiene '
+                            'asistencia.'
+                        )
+
+                    plan['fecha'] = (
+                        nueva_fecha_plan
+                    )
+                    plan_anterior = plan
+
+            elif hay_cambio_temporal:
+                plan_anterior = plan_seleccionado
+                indice_mixto = None
+
+                for plan in planes_siguientes:
+                    if (
+                        inicio_de(plan)
+                        < fin_de(plan_anterior)
+                    ):
+                        if not plan[
+                            'puede_modificarse'
+                        ]:
+                            return error(
+                                'No se puede retrasar el '
+                                'calendario porque el encuentro '
+                                f'{plan["clase"].numero_clase} '
+                                'ya no está pendiente o tiene '
+                                'asistencia.'
+                            )
+
+                        if es_mixto:
+                            indice_inicial = max(
+                                plan[
+                                    'clase'
+                                ].numero_clase,
+                                (
+                                    indice_mixto
+                                    if indice_mixto
+                                    is not None
+                                    else 0
+                                ),
+                            )
+
+                            (
+                                plan['fecha'],
+                                indice_mixto,
+                            ) = siguiente_fecha_mixta(
+                                plan,
+                                fin_de(
+                                    plan_anterior
+                                ),
+                                indice_inicial,
+                            )
+                        else:
+                            plan['fecha'] = (
+                                siguiente_fecha_programada(
+                                    plan_anterior['fecha']
+                                )
+                            )
+
+                    plan_anterior = plan
+
+            if (
+                cambia_fecha
+                or hay_cambio_temporal
+            ):
+                plan_anterior = None
+
+                for plan in (
+                    [plan_seleccionado]
+                    + planes_siguientes
+                ):
+                    if (
+                        plan_anterior is not None
+                        and inicio_de(plan)
+                        < fin_de(plan_anterior)
+                    ):
+                        return error(
+                            'El encuentro '
+                            f'{plan["clase"].numero_clase} '
+                            'quedaría antes o se cruzaría con '
+                            'el encuentro '
+                            f'{plan_anterior["clase"].numero_clase}.'
+                        )
+
+                    plan_anterior = plan
+
             for plan in planes:
-                choque = (
+                clase = plan['clase']
+                plan['cambia'] = (
+                    clase.instructor_id
+                    != plan['instructor_id']
+                    or clase.fecha
+                    != plan['fecha']
+                    or clase.hora_inicio
+                    != plan['hora_inicio']
+                    or clase.hora_fin
+                    != plan['hora_fin']
+                )
+
+            planes_cambiados = [
+                plan
+                for plan in planes
+                if plan['cambia']
+            ]
+
+            for indice, plan in enumerate(planes):
+                for otro_plan in planes[indice + 1:]:
+                    if not (
+                        plan['cambia']
+                        or otro_plan['cambia']
+                    ):
+                        continue
+
+                    choque_interno = (
+                        plan['instructor_id']
+                        == otro_plan['instructor_id']
+                        and inicio_de(plan)
+                        < fin_de(otro_plan)
+                        and fin_de(plan)
+                        > inicio_de(otro_plan)
+                    )
+
+                    if choque_interno:
+                        return error(
+                            'No se guardó ningún cambio '
+                            'porque el instructor quedaría '
+                            'asignado a los encuentros '
+                            f'{plan["clase"].numero_clase} y '
+                            f'{otro_plan["clase"].numero_clase} '
+                            'en horarios que se cruzan.'
+                        )
+
+            for plan in planes_cambiados:
+                choque_estudiante = (
+                    Calendario.objects
+                    .select_for_update()
+                    .filter(
+                        matricula=matricula,
+                        fecha=plan['fecha'],
+                        hora_inicio__lt=(
+                            plan['hora_fin']
+                        ),
+                        hora_fin__gt=(
+                            plan['hora_inicio']
+                        ),
+                    )
+                    .exclude(
+                        id__in=ids_clases
+                    )
+                    .exclude(
+                        estado='cancelada'
+                    )
+                    .first()
+                )
+
+                if choque_estudiante:
+                    return error(
+                        'El estudiante ya tiene el '
+                        f'encuentro '
+                        f'{choque_estudiante.numero_clase} '
+                        f'el día {plan["fecha"]} de '
+                        f'{choque_estudiante.hora_inicio.strftime("%H:%M")} '
+                        f'a {choque_estudiante.hora_fin.strftime("%H:%M")}.'
+                    )
+
+                choque_instructor = (
                     Calendario.objects
                     .select_for_update()
                     .filter(
@@ -3050,29 +3501,32 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                     .exclude(
                         estado='cancelada'
                     )
-                    .exists()
+                    .select_related(
+                        'matricula__estudiante'
+                    )
+                    .first()
                 )
 
-                if choque:
-                    inicio = (
-                        plan['hora_inicio']
-                        .strftime('%H:%M')
-                    )
-                    fin = (
-                        plan['hora_fin']
-                        .strftime('%H:%M')
+                if choque_instructor:
+                    estudiante_ocupado = (
+                        choque_instructor
+                        .matricula.estudiante
                     )
 
                     return error(
-                        'El instructor ya tiene ocupado '
-                        f'el horario {inicio} - {fin} '
-                        f'el día {plan["fecha"]}.'
+                        'No se guardó ningún cambio porque '
+                        'el instructor ya tiene ocupado el '
+                        f'día {plan["fecha"]} de '
+                        f'{plan["hora_inicio"].strftime("%H:%M")} '
+                        f'a {plan["hora_fin"].strftime("%H:%M")} '
+                        f'con {estudiante_ocupado.nombre} '
+                        f'{estudiante_ocupado.apellido}.'
                     )
 
             clases_actualizadas = 0
             fechas_desplazadas = 0
 
-            for plan in planes:
+            for plan in planes_cambiados:
                 clase = plan['clase']
                 campos = []
 
@@ -3108,20 +3562,17 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                     )
                     campos.append('hora_fin')
 
-                if campos:
-                    clase.save(
-                        update_fields=campos
-                    )
-                    clases_actualizadas += 1
+                clase.save(
+                    update_fields=campos
+                )
+                clases_actualizadas += 1
 
-            # Conserva el instructor histórico utilizado
-            # por el reporte de inducción.
             if (
                 instructor_id is not None
                 and aplicar_a == 'pendientes'
             ):
                 Notas.objects.filter(
-                    matricula=instance.matricula,
+                    matricula=matricula,
                     tipo_nota='practico',
                 ).exclude(
                     instructor_id=instructor_id
@@ -3728,7 +4179,10 @@ class AsistenciaViewSet(viewsets.GenericViewSet):
             'instructor'
         ).filter(
             es_examen=False,
-            matricula__estado='matriculado'
+            matricula__estado__in=[
+                'pendiente',
+                'matriculado',
+            ],
         ).order_by(
             'matricula_id',
             'numero_clase',
@@ -4500,7 +4954,10 @@ class AsistenciaViewSet(viewsets.GenericViewSet):
 
         matricula = Matricula.objects.filter(
             estudiante=user.estudiante,
-            estado='matriculado'
+            estado__in=[
+                'pendiente',
+                'matriculado',
+            ],
         ).order_by('-id').first()
 
         if not matricula:
@@ -4573,7 +5030,10 @@ class AsistenciaViewSet(viewsets.GenericViewSet):
 
         clases = Calendario.objects.filter(
             es_examen=False,
-            matricula__estado='matriculado'
+            matricula__estado__in=[
+                'pendiente',
+                'matriculado',
+            ],
         ).exclude(
             estado='cancelada'
         )
@@ -4990,7 +5450,10 @@ class NotasViewSet(viewsets.ModelViewSet):
                 'plan_de_estudio',
             )
             .filter(
-                estado='matriculado',
+                estado__in=[
+                    'pendiente',
+                    'matriculado',
+                ],
                 clases__instructor_id=user.instructor_id,
                 clases__es_examen=False,
                 clases__estado__in=[
@@ -5214,16 +5677,9 @@ class NotasViewSet(viewsets.ModelViewSet):
 
             nota = serializer.save()
 
-            matricula_finalizada = (
-                actualizar_estado_matricula_por_notas(
-                    nota.matricula
-                )
+            actualizar_estado_matricula_por_notas(
+                nota.matricula
             )
-
-            if matricula_finalizada:
-                desactivar_usuarios_estudiante(
-                    nota.matricula.estudiante
-                )
 
         headers = self.get_success_headers(
             serializer.data
@@ -6898,21 +7354,26 @@ class ProgresoTemaViewSet(viewsets.ReadOnlyModelViewSet):
 
         resultado = []
 
+        estados_academicos_activos = [
+            'pendiente',
+            'matriculado',
+        ]
+
         if es_admin(user):
             matriculas = Matricula.objects.filter(
-                estado='matriculado'
+                estado__in=estados_academicos_activos
             )
 
         elif hasattr(user, 'instructor') and user.instructor:
             matriculas = Matricula.objects.filter(
                 clases__instructor=user.instructor,
-                estado='matriculado'
+                estado__in=estados_academicos_activos,
             ).distinct()
 
         elif hasattr(user, 'estudiante') and user.estudiante:
             matriculas = Matricula.objects.filter(
                 estudiante=user.estudiante,
-                estado='matriculado'
+                estado__in=estados_academicos_activos,
             )
 
         else:
@@ -7258,7 +7719,10 @@ class DashboardPlanViewSet(viewsets.ViewSet):
             'plan_de_estudio',
         ).filter(
             estudiante=estudiante,
-            estado='matriculado'
+            estado__in=[
+                'pendiente',
+                'matriculado',
+            ],
         ).order_by(
             '-id'
         ).first()
@@ -7814,8 +8278,8 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         if matricula.estado not in [
+            'pendiente',
             'matriculado',
-            'finalizado',
         ]:
             return Response(
                 {
@@ -7968,9 +8432,9 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
             .filter(
                 estudiante_id=user.estudiante_id,
                 estado__in=[
+                    'pendiente',
                     'matriculado',
-                    'finalizado',
-                ]
+                ],
             )
             .order_by(
                 '-id'
@@ -8508,16 +8972,9 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
                     comentario=comentario_nota,
                 )
 
-            matricula_finalizada = (
-                actualizar_estado_matricula_por_notas(
-                    nota_teorica.matricula
-                )
+            actualizar_estado_matricula_por_notas(
+                nota_teorica.matricula
             )
-
-            if matricula_finalizada:
-                desactivar_usuarios_estudiante(
-                    nota_teorica.matricula.estudiante
-                )
 
         return Response(
             {

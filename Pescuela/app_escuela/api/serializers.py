@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+from datetime import timedelta
 from io import BytesIO
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from PIL import Image as PILImage, UnidentifiedImageError
@@ -114,6 +115,19 @@ def actualizar_estado_matricula_por_notas(matricula):
                 'fecha_finalizacion'
             )
 
+        if (
+            not matricula_bloqueada
+            .fecha_desactivacion_usuario
+        ):
+            matricula_bloqueada.fecha_desactivacion_usuario = (
+                timezone.now()
+                + timedelta(hours=24)
+            )
+
+            campos_actualizados.append(
+                'fecha_desactivacion_usuario'
+            )
+
         if campos_actualizados:
             matricula_bloqueada.save(
                 update_fields=campos_actualizados
@@ -123,6 +137,11 @@ def actualizar_estado_matricula_por_notas(matricula):
 
         matricula.fecha_finalizacion = (
             matricula_bloqueada.fecha_finalizacion
+        )
+
+        matricula.fecha_desactivacion_usuario = (
+            matricula_bloqueada
+            .fecha_desactivacion_usuario
         )
 
         return True
@@ -956,6 +975,9 @@ class MatriculaSerializer(serializers.ModelSerializer):
     class Meta:
         model = Matricula
         fields = '__all__'
+        read_only_fields = [
+            'dias_programados',
+        ]
 
     def get_estudiante_nombre(self, obj):
         return f"{obj.estudiante.nombre} {obj.estudiante.apellido}"
