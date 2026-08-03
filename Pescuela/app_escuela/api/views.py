@@ -1259,7 +1259,12 @@ class MatriculaViewSet(viewsets.ModelViewSet):
                     'finalizado',
                 ],
             )
-            .exclude(estado='cancelada')
+            .exclude(
+                estado__in=[
+                    'cancelada',
+                    'reprogramada',
+                ]
+            )
             .values_list(
                 'matricula_id',
                 flat=True
@@ -1273,7 +1278,12 @@ class MatriculaViewSet(viewsets.ModelViewSet):
                 matricula_id=OuterRef('pk'),
                 es_examen=False,
             )
-            .exclude(estado='cancelada')
+            .exclude(
+                estado__in=[
+                    'cancelada',
+                    'reprogramada',
+                ]
+            )
         )
 
         clases_pendientes = clases_regulares.exclude(
@@ -3760,26 +3770,14 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        usuario_activo = matricula.estudiante.usuarios.filter(
-            rol__nombre__iexact='estudiante',
-            is_active=True,
-        ).exists()
-
-        if not usuario_activo:
-            return Response(
-                {
-                    'error': (
-                        'No se puede programar el examen porque el estudiante no tiene un usuario activo.'
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
         clases_regulares = Calendario.objects.filter(
             matricula=matricula,
             es_examen=False,
         ).exclude(
-            estado='cancelada'
+            estado__in=[
+                'cancelada',
+                'reprogramada',
+            ]
         )
 
         if not clases_regulares.exists():
@@ -5132,6 +5130,311 @@ class NotasViewSet(viewsets.ModelViewSet):
                 '-id',
             )
             .first()
+        )
+
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='finalizar-con-nota-actual',
+    )
+    def finalizar_con_nota_actual(
+        self,
+        request,
+    ):
+        user = request.user
+
+        if not (
+            es_admin(user)
+            or es_instructor(user)
+        ):
+            return Response(
+                {
+                    'error': (
+                        'Solo Administración, Secretaría '
+                        'o el instructor asignado pueden '
+                        'finalizar una matrícula con la '
+                        'nota teórica actual.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        matricula_id = request.data.get(
+            'matricula_id'
+        )
+
+        if not matricula_id:
+            return Response(
+                {
+                    'error': (
+                        'Debe indicar la matrícula que '
+                        'desea finalizar.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            with transaction.atomic():
+                matricula = (
+                    Matricula.objects
+                    .select_for_update()
+                    .select_related(
+                        'estudiante',
+                    )
+                    .get(
+                        id=matricula_id
+                    )
+                )
+
+                if (
+                    matricula.estado
+                    == 'finalizado'
+                ):
+                    return Response(
+                        {
+                            'error': (
+                                'Esta matrícula ya se '
+                                'encuentra finalizada.'
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if es_instructor(user):
+                    ultima_clase = (
+                        Calendario.objects
+                        .select_related(
+                            'instructor'
+                        )
+                        .filter(
+                            matricula_id=matricula.id,
+                            es_examen=False,
+                        )
+                        .exclude(
+                            estado__in=[
+                                'cancelada',
+                                'reprogramada',
+                            ]
+                        )
+                        .order_by(
+                            '-fecha',
+                            '-hora_fin',
+                            '-id',
+                        )
+                        .first()
+                    )
+
+                    if not ultima_clase:
+                        return Response(
+                            {
+                                'error': (
+                                    'La matrícula no tiene '
+                                    'clases prácticas asignadas.'
+                                )
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+
+                    if (
+                        ultima_clase.instructor_id
+                        != user.instructor_id
+                    ):
+                        return Response(
+                            {
+                                'error': (
+                                    'Solo el instructor '
+                                    'asignado a la última '
+                                    'clase práctica puede '
+                                    'realizar esta operación.'
+                                )
+                            },
+                            status=status.HTTP_403_FORBIDDEN,
+                        )
+
+                tiene_nota_practica = (
+                    Notas.objects
+                    .filter(
+                        matricula_id=matricula.id,
+                        tipo_nota='practico',
+                    )
+                    .exists()
+                )
+
+                if not tiene_nota_practica:
+                    return Response(
+                        {
+                            'error': (
+                                'No se puede finalizar la '
+                                'matrícula porque todavía '
+                                'no tiene nota práctica.'
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                nota_teorica = (
+                    Notas.objects
+                    .filter(
+                        matricula_id=matricula.id,
+                        tipo_nota='teorico',
+                    )
+                    .order_by(
+                        '-fecha_registro',
+                        '-id',
+                    )
+                    .first()
+                )
+
+                if not nota_teorica:
+                    return Response(
+                        {
+                            'error': (
+                                'No se puede finalizar la '
+                                'matrícula porque todavía '
+                                'no tiene nota teórica.'
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                try:
+                    valor_nota_teorica = Decimal(
+                        str(
+                            nota_teorica.nota
+                        )
+                        .strip()
+                        .replace(',', '.')
+                    )
+                except (
+                    InvalidOperation,
+                    ValueError,
+                    TypeError,
+                ):
+                    return Response(
+                        {
+                            'error': (
+                                'La nota teórica registrada '
+                                'no contiene un valor válido.'
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if not valor_nota_teorica.is_finite():
+                    return Response(
+                        {
+                            'error': (
+                                'La nota teórica registrada '
+                                'no contiene un valor válido.'
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if (
+                    valor_nota_teorica
+                    >= Decimal('80')
+                ):
+                    return Response(
+                        {
+                            'error': (
+                                'La nota teórica ya está '
+                                'aprobada. Esta operación '
+                                'solamente se utiliza para '
+                                'finalizar con una nota '
+                                'teórica reprobada.'
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                tiene_intento_abierto = (
+                    IntentoExamenTeorico.objects
+                    .filter(
+                        examen__matricula_id=matricula.id,
+                        estado__in=[
+                            'habilitado',
+                            'iniciado',
+                        ],
+                    )
+                    .exists()
+                )
+
+                if tiene_intento_abierto:
+                    return Response(
+                        {
+                            'error': (
+                                'El estudiante todavía '
+                                'tiene un intento teórico '
+                                'habilitado o iniciado. '
+                                'Debe terminar ese intento '
+                                'antes de cerrar la matrícula.'
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                matricula_finalizada = (
+                    actualizar_estado_matricula_por_notas(
+                        matricula,
+                        permitir_teoria_reprobada=True,
+                    )
+                )
+
+                if not matricula_finalizada:
+                    return Response(
+                        {
+                            'error': (
+                                'No fue posible finalizar '
+                                'la matrícula con las notas '
+                                'registradas.'
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                matricula.refresh_from_db()
+
+        except (
+            Matricula.DoesNotExist,
+            ValueError,
+            TypeError,
+        ):
+            return Response(
+                {
+                    'error': (
+                        'La matrícula indicada no existe.'
+                    )
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(
+            {
+                'success': True,
+                'message': (
+                    'La matrícula fue finalizada '
+                    'con la nota teórica actual. '
+                    'El usuario del estudiante se '
+                    'desactivará después del plazo '
+                    'de 24 horas.'
+                ),
+                'matricula_id': matricula.id,
+                'estado': matricula.estado,
+                'nota_teorica': str(
+                    nota_teorica.nota
+                ),
+                'fecha_finalizacion': (
+                    matricula
+                    .fecha_finalizacion
+                ),
+                'fecha_desactivacion_usuario': (
+                    matricula
+                    .fecha_desactivacion_usuario
+                ),
+            },
+            status=status.HTTP_200_OK,
         )
 
     @action(detail=False, methods=['get'], url_path='agrupadas')
@@ -8275,6 +8578,18 @@ class ExamenTeoricoViewSet(viewsets.ReadOnlyModelViewSet):
                     'error': 'Matrícula no encontrada.'
                 },
                 status=status.HTTP_404_NOT_FOUND
+            )
+
+        if matricula.estado == 'finalizado':
+            return Response(
+                {
+                    'error': (
+                        'La matrícula ya está finalizada. '
+                        'No se pueden habilitar nuevos '
+                        'intentos del examen teórico.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         if matricula.estado not in [

@@ -39,7 +39,7 @@ from django.db import transaction
 from ..models import ProgresoTema, ProgresoClaseTema, HistorialPlanEstudio, Notificacion
 from ..models import PlanEstudio, SubtemaPlanEstudio
 
-def actualizar_estado_matricula_por_notas(matricula):
+def actualizar_estado_matricula_por_notas(matricula, permitir_teoria_reprobada=False):
     """
     Finaliza la matrícula cuando existe una nota práctica
     y la nota teórica es igual o mayor a 80.
@@ -95,7 +95,10 @@ def actualizar_estado_matricula_por_notas(matricula):
         ):
             return False
 
-        if valor_nota_teorica < Decimal('80'):
+        if (
+            valor_nota_teorica < Decimal('80')
+            and not permitir_teoria_reprobada
+        ):
             return False
 
         campos_actualizados = []
@@ -2136,6 +2139,11 @@ class NotasSerializer(serializers.ModelSerializer):
 
     modalidad = serializers.CharField(
         source='matricula.modalidad',
+        read_only=True
+    )
+
+    estado_matricula = serializers.CharField(
+        source='matricula.estado',
         read_only=True
     )
 
