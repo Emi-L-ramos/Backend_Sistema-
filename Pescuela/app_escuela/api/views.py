@@ -1580,7 +1580,9 @@ def saldo(request):
     })
 
 class ReciboViewSet(viewsets.ModelViewSet):
-    queryset = Recibo.objects.all()
+    queryset = Recibo.objects.select_related(
+        'matricula__estudiante',
+    ).all()
     serializer_class = ReciboSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = PaginacionOpcional

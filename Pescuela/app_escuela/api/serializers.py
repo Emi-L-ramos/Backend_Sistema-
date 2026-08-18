@@ -218,9 +218,47 @@ class UserSerializer(serializers.ModelSerializer):
         return None
 
     def get_instructor_nombre(self, obj):
-        if obj.instructor:
-            return f"{obj.instructor.nombre or ''} {obj.instructor.apellido or ''}".strip()
-        return None
+        calendario = (
+            Calendario.objects
+            .filter(
+                matricula_id=obj.matricula_id,
+                es_examen=False,
+            )
+            .exclude(
+                estado='cancelada'
+            )
+            .select_related('instructor')
+            .order_by(
+                'numero_clase',
+                'fecha',
+                'hora_inicio',
+                'id',
+            )
+            .first()
+        )
+
+        if not calendario or not calendario.instructor:
+            return "Sin instructor asignado"
+
+        instructor = calendario.instructor
+
+        if hasattr(instructor, 'nombre') and hasattr(instructor, 'apellido'):
+            return (
+                f"{instructor.nombre} "
+                f"{instructor.apellido}"
+            ).strip()
+
+        if hasattr(instructor, 'usuario') and instructor.usuario:
+            usuario = instructor.usuario
+
+            nombre = (
+                f"{usuario.first_name} "
+                f"{usuario.last_name}"
+            ).strip()
+
+            return nombre if nombre else usuario.username
+
+        return "Sin instructor asignado"
 
     def obtener_matriculas_usuario(self, obj):
         if not obj.estudiante:
@@ -1169,14 +1207,13 @@ class ReciboSerializer(serializers.ModelSerializer):
         source='matricula',
         read_only=True
     )
-
     estudiante_nombre = serializers.SerializerMethodField()
-
     estudiante_cedula = serializers.CharField(
         source='matricula.estudiante.cedula',
         read_only=True
     )
-
+    tipo_curso = serializers.SerializerMethodField()
+    instructor_nombre = serializers.SerializerMethodField()
     monto_total_curso = serializers.SerializerMethodField()
     por_pagar = serializers.SerializerMethodField()
 
@@ -1191,6 +1228,22 @@ class ReciboSerializer(serializers.ModelSerializer):
             f"{estudiante.nombre} "
             f"{estudiante.apellido}"
         ).strip()
+
+    def get_tipo_curso(self, obj):
+        if obj.matricula and getattr(obj.matricula, 'tipo_curso', None):
+            return str(obj.matricula.tipo_curso)
+        return "Sin curso asignado"
+
+    def get_instructor_nombre(self, obj):
+        if obj.matricula and getattr(obj.matricula, 'instructor', None):
+            inst = obj.matricula.instructor
+            if hasattr(inst, 'nombre') and hasattr(inst, 'apellido'):
+                return f"{inst.nombre} {inst.apellido}".strip()
+            if hasattr(inst, 'usuario') and inst.usuario:
+                u = inst.usuario
+                nombre = f"{u.first_name} {u.last_name}".strip()
+                return nombre if nombre else u.username
+        return "Sin instructor asignado"
 
     def get_monto_total_curso(self, obj):
         matricula = obj.matricula
