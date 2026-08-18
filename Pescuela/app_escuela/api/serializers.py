@@ -34,6 +34,9 @@ from ..models import (
     RespuestaExamenTeorico,
     PagoInstructor,
     CargoInstitucional,
+    Certificado,
+    ConfiguracionCertificado,
+    calcular_libro_certificado,
 )
 from django.db import transaction
 from ..models import ProgresoTema, ProgresoClaseTema, HistorialPlanEstudio, Notificacion
@@ -2761,3 +2764,289 @@ class CargoInstitucionalSerializer(serializers.ModelSerializer):
     class Meta:
         model = CargoInstitucional
         fields = '__all__'
+
+class ConfiguracionCertificadoSerializer(
+    serializers.ModelSerializer
+):
+    usados_folio_actual = (
+        serializers.IntegerField(
+            read_only=True
+        )
+    )
+
+    espacios_disponibles = (
+        serializers.IntegerField(
+            read_only=True
+        )
+    )
+
+    siguiente_asiento = (
+        serializers.IntegerField(
+            read_only=True
+        )
+    )
+
+    siguiente_folio = (
+        serializers.IntegerField(
+            read_only=True
+        )
+    )
+
+    numero_libro = (
+        serializers.IntegerField(
+            read_only=True
+        )
+    )
+
+    actualizado_por_nombre = (
+        serializers.CharField(
+            source='actualizado_por.username',
+            read_only=True,
+            default='',
+        )
+    )
+
+    class Meta:
+        model = ConfiguracionCertificado
+
+        fields = [
+            'id',
+            'ultimo_asiento',
+            'folio_actual',
+            'usados_folio_actual',
+            'espacios_disponibles',
+            'siguiente_asiento',
+            'siguiente_folio',
+            'numero_libro',
+            'actualizado_en',
+            'actualizado_por',
+            'actualizado_por_nombre',
+        ]
+
+        read_only_fields = [
+            'id',
+            'usados_folio_actual',
+            'espacios_disponibles',
+            'siguiente_asiento',
+            'siguiente_folio',
+            'numero_libro',
+            'actualizado_en',
+            'actualizado_por',
+            'actualizado_por_nombre',
+        ]
+
+    def validate_ultimo_asiento(self, valor):
+        if valor < 1:
+            raise serializers.ValidationError(
+                'El último asiento debe ser '
+                'mayor que cero.'
+            )
+
+        return valor
+
+    def validate_folio_actual(self, valor):
+        if valor < 1:
+            raise serializers.ValidationError(
+                'El folio debe ser mayor '
+                'que cero.'
+            )
+
+        return valor
+
+class CertificadoSerializer(
+    serializers.ModelSerializer
+):
+    estudiante_nombre = (
+        serializers.SerializerMethodField()
+    )
+
+    estudiante_cedula = (
+        serializers.CharField(
+            source='estudiante.cedula',
+            read_only=True,
+        )
+    )
+
+    categoria_nombre = (
+        serializers.SerializerMethodField()
+    )
+
+    tipo_nombre = serializers.CharField(
+        source='get_tipo_display',
+        read_only=True,
+    )
+
+    confirmado_por_nombre = (
+        serializers.CharField(
+            source='confirmado_por.username',
+            read_only=True,
+        )
+    )
+
+    class Meta:
+        model = Certificado
+
+        fields = [
+            'id',
+            'matricula',
+            'estudiante',
+            'estudiante_nombre',
+            'estudiante_cedula',
+            'categoria_nombre',
+            'tipo',
+            'tipo_nombre',
+            'numero_asiento',
+            'numero_folio',
+            'numero_libro',
+            'fecha_inicio',
+            'fecha_finalizacion',
+            'nota_teorica',
+            'nota_practica',
+            'reforzamiento_confirmado',
+            'confirmado_por',
+            'confirmado_por_nombre',
+            'creado_en',
+            'actualizado_en',
+        ]
+
+        read_only_fields = [
+            'id',
+            'matricula',
+            'estudiante',
+            'tipo',
+            'numero_libro',
+            'fecha_inicio',
+            'fecha_finalizacion',
+            'nota_teorica',
+            'nota_practica',
+            'reforzamiento_confirmado',
+            'confirmado_por',
+            'creado_en',
+            'actualizado_en',
+        ]
+
+    def get_estudiante_nombre(self, obj):
+        return (
+            f'{obj.estudiante.nombre} '
+            f'{obj.estudiante.apellido}'
+        ).strip()
+
+    def get_categoria_nombre(self, obj):
+        categoria = obj.matricula.categoria
+
+        return (
+            categoria.nombre
+            if categoria
+            else ''
+        )
+
+    def validate_numero_asiento(self, valor):
+        certificados = Certificado.objects.filter(
+            numero_asiento=valor
+        )
+
+        if self.instance:
+            certificados = certificados.exclude(
+                pk=self.instance.pk
+            )
+
+        if certificados.exists():
+            raise serializers.ValidationError(
+                'Ya existe un certificado con '
+                'este número de asiento.'
+            )
+
+        return valor
+
+    def validate_numero_folio(self, valor):
+        certificados = Certificado.objects.filter(
+            numero_folio=valor
+        )
+
+        if self.instance:
+            certificados = certificados.exclude(
+                pk=self.instance.pk
+            )
+
+        if certificados.count() >= 10:
+            raise serializers.ValidationError(
+                'Este folio ya contiene '
+                '10 certificados.'
+            )
+
+        return valor
+
+    def update(self, instance, validated_data):
+        numero_folio = validated_data.get(
+            'numero_folio',
+            instance.numero_folio,
+        )
+
+        validated_data['numero_libro'] = (
+            calcular_libro_certificado(
+                numero_folio
+            )
+        )
+
+        return super().update(
+            instance,
+            validated_data,
+        )
+
+class GenerarCertificadosSerializer(
+    serializers.Serializer
+):
+    matricula_ids = serializers.ListField(
+        child=serializers.IntegerField(
+            min_value=1
+        ),
+        allow_empty=False,
+    )
+
+    tipo = serializers.ChoiceField(
+        choices=Certificado.TIPOS_CERTIFICADO
+    )
+
+    confirma_reforzamiento = (
+        serializers.BooleanField(
+            default=False
+        )
+    )
+
+    asiento_inicial = serializers.IntegerField(
+        min_value=1
+    )
+
+    folio_inicial = serializers.IntegerField(
+        min_value=1
+    )
+
+    def validate(self, datos):
+        tipo = datos.get('tipo')
+
+        confirmacion = datos.get(
+            'confirma_reforzamiento',
+            False,
+        )
+
+        if (
+            tipo == Certificado.TIPO_REFORZAMIENTO
+            and not confirmacion
+        ):
+            raise serializers.ValidationError({
+                'confirma_reforzamiento': (
+                    'Debe confirmar que los '
+                    'estudiantes realizaron al '
+                    'menos 8 horas de '
+                    'reforzamiento.'
+                )
+            })
+
+        ids = datos.get('matricula_ids', [])
+
+        # Elimina IDs repetidos conservando el orden.
+        datos['matricula_ids'] = list(
+            dict.fromkeys(ids)
+        )
+
+        return datos

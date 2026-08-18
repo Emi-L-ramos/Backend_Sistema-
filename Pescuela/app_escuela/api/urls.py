@@ -33,6 +33,13 @@ from .views import (
     reporte_kilometros_instructor,
     certificados_egresados,
     certificados_egresados_powerpoint,
+    configuracion_certificados,
+    candidatos_certificados,
+    certificados_guardados,
+    generar_certificados_guardados,
+    detalle_certificado,
+    imprimir_certificado_guardado,
+    imprimir_certificados_guardados
 )
 from .views import (
     ProgresoTemaViewSet,
@@ -95,9 +102,52 @@ urlpatterns = [
         certificados_egresados,
         name='certificados_egresados'
     ),
+
+    path(
+        'configuracion-certificados/',
+        configuracion_certificados,
+        name='configuracion-certificados',
+    ),
+
+    path(
+        'certificados-candidatos/',
+        candidatos_certificados,
+        name='certificados-candidatos',
+    ),
+
+    path(
+        'certificados-guardados/',
+        certificados_guardados,
+        name='certificados-guardados',
+    ),
+
+    path(
+    'certificados-generar/',
+    generar_certificados_guardados,
+    name='certificados-generar',
+    ),
+
+    path(
+        'certificados/imprimir-varios/',
+        imprimir_certificados_guardados,
+        name='imprimir-certificados-guardados',
+    ),
+
+    path(
+        'certificados/<int:certificado_id>/imprimir/',
+        imprimir_certificado_guardado,
+        name='imprimir-certificado',
+    ),
+
+    path(
+        'certificados/<int:certificado_id>/',
+        detalle_certificado,
+        name='detalle-certificado',
+    ),
+
     path(
         'certificados-egresados-powerpoint/',
         certificados_egresados_powerpoint,
-        name='certificados_egresados_powerpoint'
+        name='certificados_egresados_powerpoint',
     ),
 ]
