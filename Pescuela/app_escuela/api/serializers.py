@@ -1273,14 +1273,46 @@ class ReciboSerializer(serializers.ModelSerializer):
         return "Sin curso asignado"
 
     def get_instructor_nombre(self, obj):
-        if obj.matricula and getattr(obj.matricula, 'instructor', None):
-            inst = obj.matricula.instructor
-            if hasattr(inst, 'nombre') and hasattr(inst, 'apellido'):
-                return f"{inst.nombre} {inst.apellido}".strip()
-            if hasattr(inst, 'usuario') and inst.usuario:
-                u = inst.usuario
-                nombre = f"{u.first_name} {u.last_name}".strip()
-                return nombre if nombre else u.username
+        calendario = (
+            Calendario.objects
+            .filter(
+                matricula_id=obj.matricula_id,
+                es_examen=False,
+            )
+            .exclude(
+                estado='cancelada'
+            )
+            .select_related('instructor')
+            .order_by(
+                'numero_clase',
+                'fecha',
+                'hora_inicio',
+                'id',
+            )
+            .first()
+        )
+
+        if not calendario or not calendario.instructor:
+            return "Sin instructor asignado"
+
+        instructor = calendario.instructor
+
+        if hasattr(instructor, 'nombre') and hasattr(instructor, 'apellido'):
+            return (
+                f"{instructor.nombre} "
+                f"{instructor.apellido}"
+            ).strip()
+
+        if hasattr(instructor, 'usuario') and instructor.usuario:
+            usuario = instructor.usuario
+
+            nombre = (
+                f"{usuario.first_name} "
+                f"{usuario.last_name}"
+            ).strip()
+
+            return nombre if nombre else usuario.username
+
         return "Sin instructor asignado"
 
     def get_monto_total_curso(self, obj):
