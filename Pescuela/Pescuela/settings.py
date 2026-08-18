@@ -90,11 +90,26 @@ WSGI_APPLICATION = 'Pescuela.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.environ.get('MYSQL_DATABASE') or os.environ.get('DB_NAME', 'adiact_bd'),
-        'USER': os.environ.get('MYSQL_USER') or os.environ.get('DB_USER', 'adiact_user'),
-        'PASSWORD': os.environ.get('MYSQL_PASSWORD') or os.environ.get('DB_PASSWORD', ''),
-        'HOST': os.environ.get('MYSQL_HOST') or os.environ.get('DB_HOST', '127.0.0.1'),
-        'PORT': os.environ.get('MYSQL_PORT') or os.environ.get('DB_PORT', '3306'),
+        'NAME': os.environ.get('MYSQL_DATABASE') or os.environ.get(
+            'DB_NAME',
+            'adiact_bd'
+        ),
+        'USER': os.environ.get('MYSQL_USER') or os.environ.get(
+            'DB_USER',
+            'adiact_user'
+        ),
+        'PASSWORD': os.environ.get('MYSQL_PASSWORD') or os.environ.get(
+            'DB_PASSWORD',
+            ''
+        ),
+        'HOST': os.environ.get('MYSQL_HOST') or os.environ.get(
+            'DB_HOST',
+            '127.0.0.1'
+        ),
+        'PORT': os.environ.get('MYSQL_PORT') or os.environ.get(
+            'DB_PORT',
+            '3306'
+        ),
         'CONN_MAX_AGE': int(
             os.environ.get('MYSQL_CONN_MAX_AGE', '60')
         ),
