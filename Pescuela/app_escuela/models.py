@@ -1,5 +1,8 @@
 from decimal import Decimal
+
+from django.conf import settings
 from django.contrib.auth.models import AbstractUser
+from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.utils import timezone
 
@@ -273,7 +276,8 @@ class Recibo(models.Model):
     TIPO_PAGO_CHOICES = [
         ('completo', 'Completo'),
         ('anticipo', 'Anticipo'),
-        ('beneficio', 'Beneficio'),
+        ('descuento', 'Descuento'),
+        ('credito', 'Crédito'),
     ]
 
     matricula = models.ForeignKey(
@@ -290,8 +294,17 @@ class Recibo(models.Model):
         related_name='recibos'
     )
 
-    numero_recibo = models.CharField(max_length=50, unique=True)
-    monto_pagado = models.DecimalField(max_digits=10, decimal_places=2)
+    numero_recibo = models.CharField(
+        max_length=50,
+        unique=True,
+        null=True,
+        blank=True,
+    )
+    monto_pagado = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+    )
     fecha_pago = models.DateField(default=timezone.now)
     tipo_pago = models.CharField(max_length=20, choices=TIPO_PAGO_CHOICES)
     cantidad = models.PositiveSmallIntegerField(default=15)
@@ -304,7 +317,11 @@ class Recibo(models.Model):
 
     def __str__(self):
         estudiante = self.matricula.estudiante
-        return f"Recibo #{self.numero_recibo} - {estudiante.nombre} {estudiante.apellido}"
+        identificador = (
+            self.numero_recibo
+            or self.get_tipo_pago_display()
+        )
+        return f"Recibo #{identificador} - {estudiante.nombre} {estudiante.apellido}"
 
 
 class Calendario(models.Model):
@@ -1043,6 +1060,284 @@ class CargoInstitucional(models.Model):
     def __str__(self):
         return f"{self.nombre} - {self.cargo}"
 
+
+def calcular_libro_certificado(numero_folio):
+    """
+    Calcula el número del libro según el folio.
+
+    Folios 1-200: libro 1
+    Folios 201-400: libro 2
+    Folios 401-600: libro 3
+    """
+    if numero_folio < 1:
+        raise ValidationError(
+            'El número de folio debe ser '
+            'mayor que cero.'
+        )
+
+    return ((numero_folio - 1) // 200) + 1
+
+class ConfiguracionCertificado(models.Model):
+    """
+    Guarda el último asiento y folio registrados
+    por Administración.
+    """
+
+    ultimo_asiento = models.PositiveIntegerField(
+        verbose_name='Último número de asiento'
+    )
+
+    folio_actual = models.PositiveIntegerField(
+        verbose_name='Folio actual'
+    )
+
+    actualizado_en = models.DateTimeField(
+        auto_now=True
+    )
+
+    actualizado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='configuraciones_certificado',
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        verbose_name = (
+            'Configuración de certificados'
+        )
+        verbose_name_plural = (
+            'Configuración de certificados'
+        )
+
+    @property
+    def usados_folio_actual(self):
+        """
+        Obtiene cuántos espacios se han utilizado
+        en el folio actual.
+
+        2171 -> 1 utilizado
+        2175 -> 5 utilizados
+        2180 -> 10 utilizados
+        """
+        residuo = self.ultimo_asiento % 10
+
+        return residuo if residuo != 0 else 10
+
+    @property
+    def espacios_disponibles(self):
+        return 10 - self.usados_folio_actual
+
+    @property
+    def siguiente_asiento(self):
+        return self.ultimo_asiento + 1
+
+    @property
+    def siguiente_folio(self):
+        if self.usados_folio_actual >= 10:
+            return self.folio_actual + 1
+
+        return self.folio_actual
+
+    @property
+    def numero_libro(self):
+        return calcular_libro_certificado(
+            self.siguiente_folio
+        )
+
+    def clean(self):
+        errores = {}
+
+        if self.ultimo_asiento < 1:
+            errores['ultimo_asiento'] = (
+                'El último asiento debe ser '
+                'mayor que cero.'
+            )
+
+        if self.folio_actual < 1:
+            errores['folio_actual'] = (
+                'El folio debe ser mayor que cero.'
+            )
+
+        if errores:
+            raise ValidationError(errores)
+
+    def save(self, *args, **kwargs):
+        # Solo existirá una configuración general.
+        self.pk = 1
+
+        self.full_clean()
+
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return (
+            f'Último asiento: '
+            f'{self.ultimo_asiento} - '
+            f'Folio actual: '
+            f'{self.folio_actual}'
+        )
+
+
+class Certificado(models.Model):
+    TIPO_NORMAL = 'normal'
+    TIPO_REFORZAMIENTO = 'reforzamiento'
+
+    TIPOS_CERTIFICADO = [
+        (
+            TIPO_NORMAL,
+            'Curso Principiante',
+        ),
+        (
+            TIPO_REFORZAMIENTO,
+            'Principiante con reforzamiento',
+        ),
+    ]
+
+    matricula = models.OneToOneField(
+        Matricula,
+        on_delete=models.PROTECT,
+        related_name='certificado',
+    )
+
+    estudiante = models.ForeignKey(
+        Estudiante,
+        on_delete=models.PROTECT,
+        related_name='certificados',
+    )
+
+    tipo = models.CharField(
+        max_length=20,
+        choices=TIPOS_CERTIFICADO,
+        default=TIPO_NORMAL,
+    )
+
+    numero_asiento = models.PositiveIntegerField(
+        unique=True
+    )
+
+    numero_folio = models.PositiveIntegerField(
+        db_index=True
+    )
+
+    numero_libro = models.PositiveIntegerField(
+        db_index=True
+    )
+
+    fecha_inicio = models.DateField(
+        null=True,
+        blank=True,
+    )
+
+    fecha_finalizacion = models.DateField()
+
+    nota_teorica = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+    )
+
+    nota_practica = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+    )
+
+    reforzamiento_confirmado = models.BooleanField(
+        default=False
+    )
+
+    confirmado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='certificados_confirmados',
+    )
+
+    creado_en = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    actualizado_en = models.DateTimeField(
+        auto_now=True
+    )
+
+    class Meta:
+        ordering = [
+            '-numero_asiento'
+        ]
+
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(
+                    numero_asiento__gt=0
+                ),
+                name='cert_asiento_mayor_cero',
+            ),
+            models.CheckConstraint(
+                check=models.Q(
+                    numero_folio__gt=0
+                ),
+                name='cert_folio_mayor_cero',
+            ),
+            models.CheckConstraint(
+                check=models.Q(
+                    numero_libro__gt=0
+                ),
+                name='cert_libro_mayor_cero',
+            ),
+    ]
+        indexes = [
+            models.Index(
+                fields=[
+                    'numero_libro',
+                    'numero_folio',
+                    'numero_asiento',
+                ],
+                name='cert_lib_fol_asi_idx',
+            ),
+        ]
+
+    def clean(self):
+        errores = {}
+
+        libro_correcto = (
+            calcular_libro_certificado(
+                self.numero_folio
+            )
+        )
+
+        if self.numero_libro != libro_correcto:
+            errores['numero_libro'] = (
+                f'El folio {self.numero_folio} '
+                f'corresponde al libro '
+                f'{libro_correcto}.'
+            )
+
+        if (
+            self.tipo == self.TIPO_REFORZAMIENTO
+            and not self.reforzamiento_confirmado
+        ):
+            errores[
+                'reforzamiento_confirmado'
+            ] = (
+                'Debe confirmar que el estudiante '
+                'realizó al menos 8 horas de '
+                'reforzamiento.'
+            )
+
+        if errores:
+            raise ValidationError(errores)
+
+    def __str__(self):
+        nombre_estudiante = (
+            f'{self.estudiante.nombre} '
+            f'{self.estudiante.apellido}'
+        ).strip()
+
+        return (
+            f'Certificado '
+            f'{self.numero_asiento} - '
+            f'{nombre_estudiante}'
+        )
 # ============================================================
 # Generación automática de progreso de Plan de Estudio
 # ============================================================

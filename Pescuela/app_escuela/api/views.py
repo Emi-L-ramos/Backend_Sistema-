@@ -80,6 +80,9 @@ from ..models import (
     ProgresoClaseTema,
     Notificacion,
     HistorialPlanEstudio,
+    Certificado,
+    ConfiguracionCertificado,
+    calcular_libro_certificado,
 )
 from .serializers import (
     RolSerializer,
@@ -108,6 +111,9 @@ from .serializers import (
     ProgresoTemaSerializer,
     NotificacionSerializer,
     actualizar_estado_matricula_por_notas,
+    CertificadoSerializer,
+    ConfiguracionCertificadoSerializer,
+    GenerarCertificadosSerializer,
 )
 from .permissions import (
     es_administrativo as es_admin,
@@ -470,6 +476,7 @@ TIPOS_RECIBO_INGRESO = [
     'anticipo',
     'beneficio',
 ]
+
 
 def obtener_rango_mes(
     anio,
@@ -1555,13 +1562,29 @@ def saldo(request):
             status=400
         )
 
-    total_pagado = Recibo.objects.filter(
+    recibos_pago = Recibo.objects.filter(
         matricula=matricula,
-    ).aggregate(
+    ).exclude(
+        tipo_pago='credito'
+    )
+
+    total_pagado = recibos_pago.aggregate(
         total=models.Sum('monto_pagado')
     )['total'] or Decimal('0')
 
-    cantidad_pagos = Recibo.objects.filter(matricula=matricula).count()
+    cantidad_pagos = recibos_pago.count()
+
+    tiene_credito = Recibo.objects.filter(
+        matricula=matricula,
+        tipo_pago='credito',
+    ).exists()
+
+    tiene_pago_final = recibos_pago.filter(
+        tipo_pago__in=[
+            'completo',
+            'beneficio',
+        ]
+    ).exists()
 
     saldo_pendiente = monto_total - total_pagado
 
@@ -1577,6 +1600,11 @@ def saldo(request):
         'saldo_pendiente': float(saldo_pendiente),
         'cantidad_pagos': cantidad_pagos,
         'pagos_permitidos': 2,
+        'tiene_credito': tiene_credito,
+        'credito_pendiente': (
+            tiene_credito
+            and not tiene_pago_final
+        ),
     })
 
 class ReciboViewSet(viewsets.ModelViewSet):
@@ -1777,6 +1805,7 @@ class UserViewSet(viewsets.ModelViewSet):
         'post',
         'put',
         'patch',
+        'delete',
         'head',
         'options',
     ]
@@ -1812,6 +1841,12 @@ class UserViewSet(viewsets.ModelViewSet):
         if not es_admin(user):
             return queryset.filter(id=user.id)
 
+        if not user.is_superuser:
+            queryset = queryset.filter(
+                is_superuser=False,
+                rol__nombre__iregex=r'^(instructor|estudiante)$',
+            )
+
         rol_param = str(
             self.request.query_params.get('rol') or ''
         ).strip()
@@ -1844,25 +1879,142 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        return super().create(request, *args, **kwargs)
+        data = request.data.copy()
+
+        if request.user.is_superuser:
+            valor = str(data.get('is_superuser', '')).strip().lower()
+            es_superadmin_nuevo = valor in {'1', 'true', 'si', 'sí'}
+            data['is_superuser'] = es_superadmin_nuevo
+            data['is_staff'] = es_superadmin_nuevo
+        else:
+            rol = str(data.get('rol') or '').strip().lower()
+            if rol not in {'instructor', 'estudiante'}:
+                return Response(
+                    {
+                        'error': (
+                            'El administrador solo puede crear usuarios '
+                            'Instructor o Estudiante.'
+                        )
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            data['is_superuser'] = False
+            data['is_staff'] = False
+
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            serializer.data,
+            status=status.HTTP_201_CREATED,
+            headers=headers,
+        )
+
+    def _validar_edicion(self, request, usuario_objetivo):
+        if not es_admin(request.user):
+            return 'Solo el administrador puede editar usuarios.'
+
+        if not request.user.is_superuser:
+            rol_objetivo = str(
+                getattr(usuario_objetivo, 'rol_nombre', '') or ''
+            ).strip().lower()
+            if usuario_objetivo.is_superuser or rol_objetivo not in {
+                'instructor',
+                'estudiante',
+            }:
+                return (
+                    'El administrador solo puede editar usuarios '
+                    'Instructor o Estudiante.'
+                )
+
+            rol_nuevo = str(
+                request.data.get('rol', rol_objetivo) or ''
+            ).strip().lower()
+            if rol_nuevo not in {'instructor', 'estudiante'}:
+                return 'El administrador no puede asignar roles administrativos.'
+
+        if (
+            usuario_objetivo.id == request.user.id
+            and 'is_active' in request.data
+            and str(request.data.get('is_active')).strip().lower()
+            in {'0', 'false', 'no', ''}
+        ):
+            return 'No puedes desactivar tu propio usuario.'
+
+        if (
+            usuario_objetivo.id == request.user.id
+            and request.user.is_superuser
+            and 'is_superuser' in request.data
+            and str(request.data.get('is_superuser')).strip().lower()
+            in {'0', 'false', 'no', ''}
+        ):
+            return 'No puedes quitarte el permiso de superadministrador.'
+
+        return None
+
+    def _datos_edicion_seguros(self, request):
+        data = request.data.copy()
+        if not request.user.is_superuser:
+            data.pop('is_superuser', None)
+            data.pop('is_staff', None)
+            data.pop('is_active', None)
+        elif 'is_superuser' in data:
+            valor = str(data.get('is_superuser', '')).strip().lower()
+            data['is_superuser'] = valor in {'1', 'true', 'si', 'sí'}
+            data['is_staff'] = data['is_superuser']
+        return data
 
     def update(self, request, *args, **kwargs):
-        if not es_admin(request.user):
+        usuario_objetivo = self.get_object()
+        error = self._validar_edicion(request, usuario_objetivo)
+        if error:
             return Response(
-                {'error': 'Solo el administrador puede editar usuarios.'},
+                {'error': error},
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        return super().update(request, *args, **kwargs)
+        serializer = self.get_serializer(
+            usuario_objetivo,
+            data=self._datos_edicion_seguros(request),
+        )
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
 
     def partial_update(self, request, *args, **kwargs):
-        if not es_admin(request.user):
+        usuario_objetivo = self.get_object()
+        error = self._validar_edicion(request, usuario_objetivo)
+        if error:
             return Response(
-                {'error': 'Solo el administrador puede editar usuarios.'},
+                {'error': error},
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        return super().partial_update(request, *args, **kwargs)
+        serializer = self.get_serializer(
+            usuario_objetivo,
+            data=self._datos_edicion_seguros(request),
+            partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
+
+    def destroy(self, request, *args, **kwargs):
+        if not request.user.is_superuser:
+            return Response(
+                {'error': 'Solo el superadministrador puede eliminar usuarios.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        usuario_objetivo = self.get_object()
+        if usuario_objetivo.id == request.user.id:
+            return Response(
+                {'error': 'No puedes eliminar tu propio usuario.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return super().destroy(request, *args, **kwargs)
 
     @action(detail=False, methods=['post'], url_path='crear-estudiante')
     def crear_usuario_estudiante(self, request):
@@ -1952,6 +2104,9 @@ class UserViewSet(viewsets.ModelViewSet):
 
         data = request.data.copy()
         data['matricula_id'] = matricula.id
+        if not request.user.is_superuser:
+            data['is_superuser'] = False
+            data['is_staff'] = False
         data.setdefault('first_name', matricula.estudiante.nombre)
         data.setdefault('last_name', matricula.estudiante.apellido)
         correo_estudiante = str(
@@ -6137,6 +6292,9 @@ def login(request):
                 if user.rol
                 else 'sin rol'
             ),
+            'is_superuser': user.is_superuser,
+            'is_staff': user.is_staff,
+            'is_active': user.is_active,
         },
         status=status.HTTP_200_OK
     )
@@ -10130,6 +10288,7 @@ def exportar_reporte_instructores_policial(request):
             "estudiante",
             "categoria",
             "plan_de_estudio",
+            "certificado",
         )
         .prefetch_related(
             Prefetch(
@@ -10340,9 +10499,26 @@ def exportar_reporte_instructores_policial(request):
         ws_egresos.cell(row=fila, column=14, value=horas_practicas)
         ws_egresos.cell(row=fila, column=15, value=nota_teorica or "")
         ws_egresos.cell(row=fila, column=16, value=nota_practica or "")
-        ws_egresos.cell(row=fila, column=17, value="")
-        ws_egresos.cell(row=fila, column=18, value="")
-        ws_egresos.cell(row=fila, column=19, value="")
+        # Certificación de diplomas: Libro, Registro (asiento), Folio
+        # y Observaciones. Si todavía no se ha generado el certificado,
+        # las cuatro celdas permanecen vacías.
+        certificado = getattr(matricula, "certificado", None)
+
+        ws_egresos.cell(
+            row=fila,
+            column=17,
+            value=(certificado.numero_libro if certificado else ""),
+        )
+        ws_egresos.cell(
+            row=fila,
+            column=18,
+            value=(certificado.numero_asiento if certificado else ""),
+        )
+        ws_egresos.cell(
+            row=fila,
+            column=19,
+            value=(certificado.numero_folio if certificado else ""),
+        )
         ws_egresos.cell(row=fila, column=20, value="")
 
         fila += 1
@@ -11732,9 +11908,12 @@ def certificado_ppt_agregar_certificado(
     certificado_ppt_texto(
         slide,
         (
-            "Registrado en el Asiento No. _____ "
-            "del Folio No. ______ "
-            "del Libro ___."
+            "Registrado en el Asiento No. "
+            f"{item.get('numero_asiento', '_____')} "
+            "del Folio No. "
+            f"{item.get('numero_folio', '_____')} "
+            "del Libro "
+            f"{item.get('numero_libro', '___')}."
         ),
         x + 0.90,
         y + 3.03,
@@ -12004,6 +12183,1089 @@ def certificados_egresados_powerpoint(request):
     response["Content-Disposition"] = (
         f'attachment; filename='
         f'"certificados_{desde}_{hasta}.pptx"'
+    )
+
+    return response
+
+NOTA_MINIMA_CERTIFICADO = Decimal('80')
+
+
+def convertir_nota_certificado(valor):
+    """
+    Convierte una nota guardada como texto
+    en un Decimal válido.
+    """
+    try:
+        if valor in [None, '']:
+            return None
+
+        nota = Decimal(
+            str(valor)
+            .strip()
+            .replace(',', '.')
+        )
+
+        if not nota.is_finite():
+            return None
+
+        return nota
+
+    except (
+        InvalidOperation,
+        ValueError,
+        TypeError,
+    ):
+        return None
+
+
+def obtener_notas_certificado(matricula):
+    """
+    Obtiene las últimas notas teórica y práctica.
+    """
+    notas_por_tipo = {}
+
+    notas_precargadas = getattr(
+        matricula,
+        'notas_para_certificado',
+        [],
+    )
+
+    for nota in notas_precargadas:
+        if nota.tipo_nota not in notas_por_tipo:
+            notas_por_tipo[nota.tipo_nota] = nota
+
+    nota_teorica_obj = notas_por_tipo.get(
+        'teorico'
+    )
+
+    nota_practica_obj = notas_por_tipo.get(
+        'practico'
+    )
+
+    if not nota_teorica_obj or not nota_practica_obj:
+        return None
+
+    nota_teorica = convertir_nota_certificado(
+        nota_teorica_obj.nota
+    )
+
+    nota_practica = convertir_nota_certificado(
+        nota_practica_obj.nota
+    )
+
+    if (
+        nota_teorica is None
+        or nota_practica is None
+    ):
+        return None
+
+    if (
+        nota_teorica
+        < NOTA_MINIMA_CERTIFICADO
+        or nota_practica
+        < NOTA_MINIMA_CERTIFICADO
+    ):
+        return None
+
+    return {
+        'nota_teorica': nota_teorica,
+        'nota_practica': nota_practica,
+    }
+
+
+def obtener_queryset_candidatos_certificado():
+    """
+    Matrículas de Principiante finalizadas según
+    calendario y con sus últimas notas cargadas.
+    """
+    notas = (
+        Notas.objects
+        .filter(
+            tipo_nota__in=[
+                'teorico',
+                'practico',
+            ]
+        )
+        .order_by(
+            '-fecha_registro',
+            '-id',
+        )
+    )
+
+    return (
+        Matricula.objects
+        .select_related(
+            'estudiante',
+            'categoria',
+        )
+        .prefetch_related(
+            Prefetch(
+                'notas',
+                queryset=notas,
+                to_attr='notas_para_certificado',
+            )
+        )
+        .annotate(
+            fecha_inicio_certificado=models.Min(
+                'clases__fecha',
+                filter=(
+                    Q(clases__es_examen=False)
+                    & ~Q(
+                        clases__estado='cancelada'
+                    )
+                ),
+            ),
+            fecha_final_certificado=models.Max(
+                'clases__fecha',
+                filter=(
+                    Q(clases__es_examen=False)
+                    & ~Q(
+                        clases__estado='cancelada'
+                    )
+                ),
+            ),
+        )
+        .filter(
+            tipo_curso__iexact='Principiante',
+           
+        )
+        .order_by(
+            'estudiante__apellido',
+            'estudiante__nombre',
+            'id',
+        )
+    )
+
+@api_view(['GET', 'POST', 'PUT'])
+@permission_classes([IsAuthenticated])
+def configuracion_certificados(request):
+    if not es_admin(request.user):
+        return Response(
+            {
+                'detail': (
+                    'No tienes permiso para '
+                    'configurar certificados.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    configuracion = (
+        ConfiguracionCertificado.objects
+        .filter(pk=1)
+        .first()
+    )
+
+    if request.method == 'GET':
+        if not configuracion:
+            return Response({
+                'configurado': False,
+                'detail': (
+                    'Todavía no se ha registrado '
+                    'el último asiento y folio.'
+                ),
+            })
+
+        serializer = (
+            ConfiguracionCertificadoSerializer(
+                configuracion
+            )
+        )
+
+        return Response({
+            'configurado': True,
+            **serializer.data,
+        })
+
+    serializer = (
+        ConfiguracionCertificadoSerializer(
+            configuracion,
+            data=request.data,
+            partial=False,
+        )
+    )
+
+    serializer.is_valid(
+        raise_exception=True
+    )
+
+    configuracion = serializer.save(
+        actualizado_por=request.user
+    )
+
+    return Response(
+        {
+            'configurado': True,
+            **ConfiguracionCertificadoSerializer(
+                configuracion
+            ).data,
+        },
+        status=(
+            status.HTTP_200_OK
+            if configuracion
+            else status.HTTP_201_CREATED
+        ),
+    )
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def candidatos_certificados(request):
+    if not es_admin(request.user):
+        return Response(
+            {
+                'detail': (
+                    'No tienes permiso para '
+                    'consultar candidatos.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    desde_texto = request.query_params.get(
+        'desde',
+        '',
+    ).strip()
+
+    hasta_texto = request.query_params.get(
+        'hasta',
+        '',
+    ).strip()
+
+    buscar = request.query_params.get(
+        'buscar',
+        '',
+    ).strip()
+
+    if not buscar and not (
+        desde_texto and hasta_texto
+    ):
+        return Response(
+            {
+                'detail': (
+                    'Ingrese el nombre o cédula '
+                    'del estudiante, o seleccione '
+                    'ambas fechas.'
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    queryset = (
+        obtener_queryset_candidatos_certificado()
+    )
+
+    if buscar:
+        queryset = queryset.filter(
+            Q(
+                estudiante__nombre__icontains=buscar
+            )
+            | Q(
+                estudiante__apellido__icontains=buscar
+            )
+            | Q(
+                estudiante__cedula__icontains=buscar
+            )
+        )
+
+    else:
+        desde = parse_date(desde_texto)
+        hasta = parse_date(hasta_texto)
+
+        if (
+            not desde
+            or not hasta
+            or desde > hasta
+        ):
+            return Response(
+                {
+                    'detail': (
+                        'El rango de fechas '
+                        'no es válido.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        queryset = queryset.filter(
+            fecha_final_certificado__gte=desde,
+            fecha_final_certificado__lte=hasta,
+        )
+
+    resultados = []
+
+    for matricula in queryset:
+        notas = obtener_notas_certificado(
+            matricula
+        )
+
+        if not notas:
+            continue
+
+        certificado_existente = (
+            Certificado.objects
+            .filter(
+                matricula_id=matricula.id
+            )
+            .exists()
+        )
+
+        estudiante = matricula.estudiante
+
+        resultados.append({
+            'matricula_id': matricula.id,
+
+            'estudiante': (
+                f'{estudiante.nombre} '
+                f'{estudiante.apellido}'
+            ).strip(),
+
+            'cedula': estudiante.cedula,
+
+            'categoria': (
+                matricula.categoria.nombre
+                if matricula.categoria
+                else ''
+            ),
+
+            'fecha_inicio': (
+                matricula
+                .fecha_inicio_certificado
+                .isoformat()
+                if matricula
+                .fecha_inicio_certificado
+                else ''
+            ),
+
+            'fecha_finalizacion': (
+                matricula
+                .fecha_final_certificado
+                .isoformat()
+                if matricula
+                .fecha_final_certificado
+                else ''
+            ),
+
+            'nota_teorica': float(
+                notas['nota_teorica']
+            ),
+
+            'nota_practica': float(
+                notas['nota_practica']
+            ),
+
+            'ya_tiene_certificado': (
+                certificado_existente
+            ),
+        })
+
+    return Response(resultados)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def certificados_guardados(request):
+    if not es_admin(request.user):
+        return Response(
+            {
+                'detail': (
+                    'No tienes permiso para '
+                    'consultar certificados.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    buscar = request.query_params.get(
+        'buscar',
+        '',
+    ).strip()
+
+    certificados = (
+        Certificado.objects
+        .select_related(
+            'estudiante',
+            'matricula',
+            'matricula__categoria',
+            'confirmado_por',
+        )
+        .prefetch_related(
+            'matricula__recibos'
+        )
+        .all()
+    )
+
+    if buscar:
+        filtros = (
+            Q(
+                estudiante__nombre__icontains=buscar
+            )
+            | Q(
+                estudiante__apellido__icontains=buscar
+            )
+            | Q(
+                estudiante__cedula__icontains=buscar
+            )
+        )
+
+        if buscar.isdigit():
+            numero = int(buscar)
+
+            filtros = (
+                filtros
+                | Q(numero_asiento=numero)
+                | Q(numero_folio=numero)
+                | Q(numero_libro=numero)
+            )
+
+        certificados = certificados.filter(
+            filtros
+        )
+
+    serializer = CertificadoSerializer(
+        certificados,
+        many=True,
+    )
+
+    return Response(serializer.data)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def generar_certificados_guardados(request):
+    if not es_admin(request.user):
+        return Response(
+            {
+                'detail': (
+                    'No tienes permiso para '
+                    'generar certificados.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    serializer = GenerarCertificadosSerializer(
+        data=request.data
+    )
+
+    serializer.is_valid(
+        raise_exception=True
+    )
+
+    datos = serializer.validated_data
+
+    matricula_ids = datos[
+        'matricula_ids'
+    ]
+
+    tipo_certificado = datos['tipo']
+
+    confirma_reforzamiento = datos[
+        'confirma_reforzamiento'
+    ]
+
+    asiento_inicial = datos[
+        'asiento_inicial'
+    ]
+
+    folio_inicial = datos[
+        'folio_inicial'
+    ]
+
+    try:
+        with transaction.atomic():
+            configuracion = (
+                ConfiguracionCertificado.objects
+                .select_for_update()
+                .filter(pk=1)
+                .first()
+            )
+
+            if not configuracion:
+                return Response(
+                    {
+                        'detail': (
+                            'Primero debe registrar '
+                            'el último asiento y '
+                            'folio utilizados.'
+                        )
+                    },
+                    status=(
+                        status
+                        .HTTP_400_BAD_REQUEST
+                    ),
+                )
+
+            if (
+                asiento_inicial
+                != configuracion.siguiente_asiento
+            ):
+                return Response(
+                    {
+                        'detail': (
+                            'El asiento inicial cambió. '
+                            'Actualice la configuración '
+                            'e intente nuevamente.'
+                        ),
+                        'asiento_esperado': (
+                            configuracion
+                            .siguiente_asiento
+                        ),
+                    },
+                    status=(
+                        status
+                        .HTTP_409_CONFLICT
+                    ),
+                )
+
+            if (
+                folio_inicial
+                != configuracion.siguiente_folio
+            ):
+                return Response(
+                    {
+                        'detail': (
+                            'El folio inicial cambió. '
+                            'Actualice la configuración '
+                            'e intente nuevamente.'
+                        ),
+                        'folio_esperado': (
+                            configuracion
+                            .siguiente_folio
+                        ),
+                    },
+                    status=(
+                        status
+                        .HTTP_409_CONFLICT
+                    ),
+                )
+
+            matriculas = list(
+                obtener_queryset_candidatos_certificado()
+                .filter(
+                    id__in=matricula_ids
+                )
+            )
+
+            matriculas_por_id = {
+                matricula.id: matricula
+                for matricula in matriculas
+            }
+
+            ids_no_encontrados = [
+                matricula_id
+                for matricula_id
+                in matricula_ids
+                if matricula_id
+                not in matriculas_por_id
+            ]
+
+            if ids_no_encontrados:
+                return Response(
+                    {
+                        'detail': (
+                            'Algunas matrículas no '
+                            'existen o no cumplen '
+                            'los requisitos.'
+                        ),
+                        'matricula_ids': (
+                            ids_no_encontrados
+                        ),
+                    },
+                    status=(
+                        status
+                        .HTTP_400_BAD_REQUEST
+                    ),
+                )
+
+            ids_con_certificado = list(
+                Certificado.objects
+                .filter(
+                    matricula_id__in=(
+                        matricula_ids
+                    )
+                )
+                .values_list(
+                    'matricula_id',
+                    flat=True,
+                )
+            )
+
+            if ids_con_certificado:
+                return Response(
+                    {
+                        'detail': (
+                            'Algunos estudiantes ya '
+                            'tienen certificado.'
+                        ),
+                        'matricula_ids': (
+                            ids_con_certificado
+                        ),
+                    },
+                    status=(
+                        status
+                        .HTTP_400_BAD_REQUEST
+                    ),
+                )
+
+            certificados_creados = []
+
+            for matricula_id in matricula_ids:
+                matricula = (
+                    matriculas_por_id[
+                        matricula_id
+                    ]
+                )
+
+                notas = obtener_notas_certificado(
+                    matricula
+                )
+
+                if not notas:
+                    return Response(
+                        {
+                            'detail': (
+                                'La matrícula '
+                                f'{matricula.id} no '
+                                'tiene ambas notas '
+                                'mayores o iguales '
+                                'a 80.'
+                            )
+                        },
+                        status=(
+                            status
+                            .HTTP_400_BAD_REQUEST
+                        ),
+                    )
+
+                if (
+                    tipo_certificado
+                    == Certificado
+                    .TIPO_REFORZAMIENTO
+                    and not
+                    confirma_reforzamiento
+                ):
+                    return Response(
+                        {
+                            'detail': (
+                                'Debe confirmar las '
+                                '8 horas mínimas de '
+                                'reforzamiento.'
+                            )
+                        },
+                        status=(
+                            status
+                            .HTTP_400_BAD_REQUEST
+                        ),
+                    )
+
+                               # Si el asiento anterior termina
+                # en cero, el folio ya tiene
+                # sus 10 certificados.
+                if (
+                    configuracion.ultimo_asiento
+                    % 10
+                    == 0
+                ):
+                    configuracion.folio_actual += 1
+
+                configuracion.ultimo_asiento += 1
+
+                numero_asiento = (
+                    configuracion
+                    .ultimo_asiento
+                )
+
+                numero_folio = (
+                    configuracion
+                    .folio_actual
+                )
+
+                numero_libro = (
+                    calcular_libro_certificado(
+                        numero_folio
+                    )
+                )
+
+                certificado = Certificado(
+                    matricula=matricula,
+                    estudiante=(
+                        matricula.estudiante
+                    ),
+                    tipo=tipo_certificado,
+                    numero_asiento=(
+                        numero_asiento
+                    ),
+                    numero_folio=numero_folio,
+                    numero_libro=numero_libro,
+                    fecha_inicio=(
+                        matricula
+                        .fecha_inicio_certificado
+                    ),
+                    fecha_finalizacion=(
+                        matricula
+                        .fecha_final_certificado
+                    ),
+                    nota_teorica=(
+                        notas['nota_teorica']
+                    ),
+                    nota_practica=(
+                        notas['nota_practica']
+                    ),
+                    reforzamiento_confirmado=(
+                        tipo_certificado
+                        == Certificado
+                        .TIPO_REFORZAMIENTO
+                        and
+                        confirma_reforzamiento
+                    ),
+                    confirmado_por=request.user,
+                )
+
+                certificado.full_clean()
+                certificado.save()
+
+                certificados_creados.append(
+                    certificado
+                )
+
+            configuracion.actualizado_por = (
+                request.user
+            )
+
+            configuracion.save(
+                update_fields=[
+                    'ultimo_asiento',
+                    'folio_actual',
+                    'actualizado_por',
+                    'actualizado_en',
+                ]
+            )
+
+            respuesta = CertificadoSerializer(
+                certificados_creados,
+                many=True,
+            )
+
+            return Response(
+                respuesta.data,
+                status=status.HTTP_201_CREATED,
+            )
+
+    except (
+        IntegrityError,
+        DjangoValidationError,
+    ) as error:
+        return Response(
+            {
+                'detail': str(error)
+            },
+            status=(
+                status.HTTP_400_BAD_REQUEST
+            ),
+        )
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def detalle_certificado(
+    request,
+    certificado_id,
+):
+    if not es_admin(request.user):
+        return Response(
+            {
+                'detail': (
+                    'No tienes permiso para '
+                    'gestionar certificados.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    certificado = get_object_or_404(
+        Certificado.objects.select_related(
+            'estudiante',
+            'matricula',
+            'matricula__categoria',
+            'confirmado_por',
+        ),
+        pk=certificado_id,
+    )
+
+    if request.method == 'GET':
+        return Response(
+            CertificadoSerializer(
+                certificado
+            ).data
+        )
+
+    serializer = CertificadoSerializer(
+        certificado,
+        data=request.data,
+        partial=True,
+    )
+
+    serializer.is_valid(
+        raise_exception=True
+    )
+
+    certificado = serializer.save()
+
+    return Response(
+        CertificadoSerializer(
+            certificado
+        ).data
+    )
+
+def certificado_guardado_a_item(
+    certificado
+):
+    matricula = certificado.matricula
+
+    return {
+        'id': certificado.id,
+
+        'estudiante': (
+            f'{certificado.estudiante.nombre} '
+            f'{certificado.estudiante.apellido}'
+        ).strip().upper(),
+
+        'cedula': (
+            certificado.estudiante.cedula
+        ),
+
+        'categoria': (
+            matricula.categoria.nombre
+            if matricula.categoria
+            else ''
+        ),
+
+        'tipo_curso': (
+            matricula.tipo_curso
+        ),
+
+        'fecha_inicio': (
+            certificado.fecha_inicio
+        ),
+
+        'fecha_egreso': (
+            certificado.fecha_finalizacion
+        ),
+
+        'nota_teorica': (
+            certificado.nota_teorica
+        ),
+
+        'nota_practica': (
+            certificado.nota_practica
+        ),
+
+        'numero_asiento': (
+            certificado.numero_asiento
+        ),
+
+        'numero_folio': (
+            certificado.numero_folio
+        ),
+
+        'numero_libro': (
+            certificado.numero_libro
+        ),
+    }
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def imprimir_certificado_guardado(
+    request,
+    certificado_id,
+):
+    if not es_admin(request.user):
+        return Response(
+            {
+                'detail': (
+                    'No tienes permiso para '
+                    'imprimir certificados.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    certificado = get_object_or_404(
+        Certificado.objects.select_related(
+            'estudiante',
+            'matricula',
+            'matricula__categoria',
+        ),
+        pk=certificado_id,
+    )
+
+    item = certificado_guardado_a_item(
+        certificado
+    )
+
+    try:
+        presentacion = (
+            certificado_crear_powerpoint(
+                [item]
+            )
+        )
+
+    except (
+        FileNotFoundError,
+        ValueError,
+    ) as error:
+        return Response(
+            {
+                'detail': str(error)
+            },
+            status=(
+                status
+                .HTTP_400_BAD_REQUEST
+            ),
+        )
+
+    archivo = BytesIO()
+
+    presentacion.save(archivo)
+
+    archivo.seek(0)
+
+    response = HttpResponse(
+        archivo.getvalue(),
+        content_type=(
+            'application/vnd.openxmlformats-'
+            'officedocument.presentationml.'
+            'presentation'
+        ),
+    )
+
+    response['Content-Disposition'] = (
+        'attachment; '
+        f'filename="certificado_'
+        f'{certificado.numero_asiento}.pptx"'
+    )
+
+    return response
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def imprimir_certificados_guardados(
+    request
+):
+    if not es_admin(request.user):
+        return Response(
+            {
+                'detail': (
+                    'No tienes permiso para '
+                    'imprimir certificados.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    certificado_ids = request.data.get(
+        'certificado_ids',
+        [],
+    )
+
+    if not isinstance(
+        certificado_ids,
+        list,
+    ) or not certificado_ids:
+        return Response(
+            {
+                'detail': (
+                    'Seleccione al menos un '
+                    'certificado.'
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    certificado_ids = list(
+        dict.fromkeys(certificado_ids)
+    )
+
+    certificados = list(
+        Certificado.objects
+        .select_related(
+            'estudiante',
+            'matricula',
+            'matricula__categoria',
+        )
+        .filter(
+            id__in=certificado_ids
+        )
+        .order_by(
+            'numero_asiento'
+        )
+    )
+
+    if len(certificados) != len(
+        certificado_ids
+    ):
+        return Response(
+            {
+                'detail': (
+                    'Uno o más certificados '
+                    'no existen.'
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    items = [
+        certificado_guardado_a_item(
+            certificado
+        )
+        for certificado in certificados
+    ]
+
+    try:
+        # Esta función ya distribuye dos
+        # certificados en cada diapositiva.
+        presentacion = (
+            certificado_crear_powerpoint(
+                items
+            )
+        )
+
+    except (
+        FileNotFoundError,
+        ValueError,
+    ) as error:
+        return Response(
+            {
+                'detail': str(error)
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    archivo = BytesIO()
+
+    presentacion.save(archivo)
+
+    archivo.seek(0)
+
+    primer_asiento = (
+        certificados[0].numero_asiento
+    )
+
+    ultimo_asiento = (
+        certificados[-1].numero_asiento
+    )
+
+    response = HttpResponse(
+        archivo.getvalue(),
+        content_type=(
+            'application/vnd.openxmlformats-'
+            'officedocument.presentationml.'
+            'presentation'
+        ),
+    )
+
+    response['Content-Disposition'] = (
+        'attachment; '
+        f'filename="certificados_'
+        f'{primer_asiento}_'
+        f'{ultimo_asiento}.pptx"'
     )
 
     return response
