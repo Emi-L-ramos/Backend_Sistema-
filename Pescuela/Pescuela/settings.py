@@ -87,33 +87,14 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'Pescuela.wsgi.application'
 
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.mysql',
-#         'NAME': os.environ.get('MYSQL_DATABASE', 'adiact_bd'),
-#         'USER': os.environ.get('MYSQL_USER', 'adiact_user'),
-#         'PASSWORD': os.environ.get('MYSQL_PASSWORD', 'root'),
-#         'HOST': os.environ.get('MYSQL_HOST', '127.0.0.1'),
-#         'PORT': os.environ.get('MYSQL_PORT', '3306'),
-#         'CONN_MAX_AGE': int(
-#             os.environ.get('MYSQL_CONN_MAX_AGE', '60')
-#         ),
-#         'CONN_HEALTH_CHECKS': True,
-#         'OPTIONS': {
-#             'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
-#             'charset': 'utf8mb4',
-#         }
-#     }
-# }
-
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.environ.get('DB_NAME', 'adiact_bd'),      # Cambiado a DB_NAME
-        'USER': os.environ.get('DB_USER', 'root'),           # Cambiado a DB_USER
-        'PASSWORD': os.environ.get('DB_PASSWORD', ''),       # Cambiado a DB_PASSWORD
-        'HOST': os.environ.get('DB_HOST', '127.0.0.1'),      # Cambiado a DB_HOST
-        'PORT': os.environ.get('DB_PORT', '3306'),           # Cambiado a DB_PORT
+        'NAME': os.environ.get('MYSQL_DATABASE') or os.environ.get('DB_NAME', 'adiact_bd'),
+        'USER': os.environ.get('MYSQL_USER') or os.environ.get('DB_USER', 'adiact_user'),
+        'PASSWORD': os.environ.get('MYSQL_PASSWORD') or os.environ.get('DB_PASSWORD', ''),
+        'HOST': os.environ.get('MYSQL_HOST') or os.environ.get('DB_HOST', '127.0.0.1'),
+        'PORT': os.environ.get('MYSQL_PORT') or os.environ.get('DB_PORT', '3306'),
         'CONN_MAX_AGE': int(
             os.environ.get('MYSQL_CONN_MAX_AGE', '60')
         ),
