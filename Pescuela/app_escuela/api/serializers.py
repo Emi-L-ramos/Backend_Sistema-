@@ -119,8 +119,10 @@ def actualizar_estado_matricula_por_notas(matricula, permitir_teoria_reprobada=F
             )
 
         if (
-            not matricula_bloqueada
-            .fecha_desactivacion_usuario
+            not matricula_bloqueada.incluye_examen_policial
+            and str(matricula_bloqueada.tipo_curso or '').strip().lower()
+            != 'principiante'
+            and not matricula_bloqueada.fecha_desactivacion_usuario
         ):
             matricula_bloqueada.fecha_desactivacion_usuario = (
                 timezone.now()

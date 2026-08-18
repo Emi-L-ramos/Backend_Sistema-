@@ -2410,6 +2410,60 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                     ]
                 )
 
+                matricula = (
+                    calendario.matricula
+                )
+
+                tipo_curso = str(
+                    matricula.tipo_curso or ''
+                ).strip().lower()
+
+                debe_desactivar = (
+                    tipo_curso == 'principiante'
+                    or matricula.incluye_examen_policial
+                )
+
+                if debe_desactivar:
+                    estudiante = (
+                        matricula.estudiante
+                    )
+
+                    usuarios = list(
+                        estudiante.usuarios.filter(
+                            is_active=True
+                        )
+                    )
+
+                    ids_usuarios = [
+                        usuario.id
+                        for usuario in usuarios
+                    ]
+
+                    if ids_usuarios:
+                        Token.objects.filter(
+                            user_id__in=ids_usuarios
+                        ).delete()
+
+                        estudiante.usuarios.filter(
+                            id__in=ids_usuarios
+                        ).update(
+                            is_active=False
+                        )
+
+                    estudiante.activo = False
+                    estudiante.save(
+                        update_fields=[
+                            'activo',
+                        ]
+                    )
+
+                    matricula.fecha_desactivacion_usuario = timezone.now()
+                    matricula.save(
+                        update_fields=[
+                            'fecha_desactivacion_usuario',
+                        ]
+                    )
+
                 mensaje = (
                     'El examen policial fue marcado como asistido '
                     'correctamente.'
@@ -5804,10 +5858,6 @@ class NotasViewSet(viewsets.ModelViewSet):
             ):
                 continue
 
-            # Antes del último día, el estudiante no aparece. En el último día y posteriormente, permanece disponible hasta registrar la nota.
-            if ultima_clase.fecha > hoy:
-                continue
-
             resultado.append({
                 'id': matricula.id,
                 'estudiante_id': matricula.estudiante_id,
@@ -5869,8 +5919,6 @@ class NotasViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        hoy = timezone.localdate()
-
         with transaction.atomic():
             try:
                 matricula = (
@@ -5925,18 +5973,6 @@ class NotasViewSet(viewsets.ModelViewSet):
                         )
                     },
                     status=status.HTTP_403_FORBIDDEN
-                )
-
-            if ultima_clase.fecha > hoy:
-                return Response(
-                    {
-                        'error': (
-                            'La nota práctica estará disponible '
-                            'a partir del último día del curso: '
-                            f'{ultima_clase.fecha.strftime("%d/%m/%Y")}.'
-                        )
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
                 )
 
             if Notas.objects.filter(
