@@ -225,47 +225,9 @@ class UserSerializer(serializers.ModelSerializer):
         return None
 
     def get_instructor_nombre(self, obj):
-        calendario = (
-            Calendario.objects
-            .filter(
-                matricula_id=obj.matricula_id,
-                es_examen=False,
-            )
-            .exclude(
-                estado='cancelada'
-            )
-            .select_related('instructor')
-            .order_by(
-                'numero_clase',
-                'fecha',
-                'hora_inicio',
-                'id',
-            )
-            .first()
-        )
-
-        if not calendario or not calendario.instructor:
-            return "Sin instructor asignado"
-
-        instructor = calendario.instructor
-
-        if hasattr(instructor, 'nombre') and hasattr(instructor, 'apellido'):
-            return (
-                f"{instructor.nombre} "
-                f"{instructor.apellido}"
-            ).strip()
-
-        if hasattr(instructor, 'usuario') and instructor.usuario:
-            usuario = instructor.usuario
-
-            nombre = (
-                f"{usuario.first_name} "
-                f"{usuario.last_name}"
-            ).strip()
-
-            return nombre if nombre else usuario.username
-
-        return "Sin instructor asignado"
+        if obj.instructor:
+            return f"{obj.instructor.nombre or ''} {obj.instructor.apellido or ''}".strip()
+        return None
 
     def obtener_matriculas_usuario(self, obj):
         if not obj.estudiante:
