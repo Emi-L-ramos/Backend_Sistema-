@@ -477,6 +477,7 @@ TIPOS_RECIBO_INGRESO = [
     'beneficio',
 ]
 
+
 def obtener_rango_mes(
     anio,
     mes,
@@ -1561,13 +1562,29 @@ def saldo(request):
             status=400
         )
 
-    total_pagado = Recibo.objects.filter(
+    recibos_pago = Recibo.objects.filter(
         matricula=matricula,
-    ).aggregate(
+    ).exclude(
+        tipo_pago='credito'
+    )
+
+    total_pagado = recibos_pago.aggregate(
         total=models.Sum('monto_pagado')
     )['total'] or Decimal('0')
 
-    cantidad_pagos = Recibo.objects.filter(matricula=matricula).count()
+    cantidad_pagos = recibos_pago.count()
+
+    tiene_credito = Recibo.objects.filter(
+        matricula=matricula,
+        tipo_pago='credito',
+    ).exists()
+
+    tiene_pago_final = recibos_pago.filter(
+        tipo_pago__in=[
+            'completo',
+            'beneficio',
+        ]
+    ).exists()
 
     saldo_pendiente = monto_total - total_pagado
 
@@ -1583,6 +1600,11 @@ def saldo(request):
         'saldo_pendiente': float(saldo_pendiente),
         'cantidad_pagos': cantidad_pagos,
         'pagos_permitidos': 2,
+        'tiene_credito': tiene_credito,
+        'credito_pendiente': (
+            tiene_credito
+            and not tiene_pago_final
+        ),
     })
 
 class ReciboViewSet(viewsets.ModelViewSet):
@@ -1783,6 +1805,7 @@ class UserViewSet(viewsets.ModelViewSet):
         'post',
         'put',
         'patch',
+        'delete',
         'head',
         'options',
     ]
@@ -1818,6 +1841,12 @@ class UserViewSet(viewsets.ModelViewSet):
         if not es_admin(user):
             return queryset.filter(id=user.id)
 
+        if not user.is_superuser:
+            queryset = queryset.filter(
+                is_superuser=False,
+                rol__nombre__iregex=r'^(instructor|estudiante)$',
+            )
+
         rol_param = str(
             self.request.query_params.get('rol') or ''
         ).strip()
@@ -1850,25 +1879,142 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        return super().create(request, *args, **kwargs)
+        data = request.data.copy()
+
+        if request.user.is_superuser:
+            valor = str(data.get('is_superuser', '')).strip().lower()
+            es_superadmin_nuevo = valor in {'1', 'true', 'si', 'sí'}
+            data['is_superuser'] = es_superadmin_nuevo
+            data['is_staff'] = es_superadmin_nuevo
+        else:
+            rol = str(data.get('rol') or '').strip().lower()
+            if rol not in {'instructor', 'estudiante'}:
+                return Response(
+                    {
+                        'error': (
+                            'El administrador solo puede crear usuarios '
+                            'Instructor o Estudiante.'
+                        )
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            data['is_superuser'] = False
+            data['is_staff'] = False
+
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            serializer.data,
+            status=status.HTTP_201_CREATED,
+            headers=headers,
+        )
+
+    def _validar_edicion(self, request, usuario_objetivo):
+        if not es_admin(request.user):
+            return 'Solo el administrador puede editar usuarios.'
+
+        if not request.user.is_superuser:
+            rol_objetivo = str(
+                getattr(usuario_objetivo, 'rol_nombre', '') or ''
+            ).strip().lower()
+            if usuario_objetivo.is_superuser or rol_objetivo not in {
+                'instructor',
+                'estudiante',
+            }:
+                return (
+                    'El administrador solo puede editar usuarios '
+                    'Instructor o Estudiante.'
+                )
+
+            rol_nuevo = str(
+                request.data.get('rol', rol_objetivo) or ''
+            ).strip().lower()
+            if rol_nuevo not in {'instructor', 'estudiante'}:
+                return 'El administrador no puede asignar roles administrativos.'
+
+        if (
+            usuario_objetivo.id == request.user.id
+            and 'is_active' in request.data
+            and str(request.data.get('is_active')).strip().lower()
+            in {'0', 'false', 'no', ''}
+        ):
+            return 'No puedes desactivar tu propio usuario.'
+
+        if (
+            usuario_objetivo.id == request.user.id
+            and request.user.is_superuser
+            and 'is_superuser' in request.data
+            and str(request.data.get('is_superuser')).strip().lower()
+            in {'0', 'false', 'no', ''}
+        ):
+            return 'No puedes quitarte el permiso de superadministrador.'
+
+        return None
+
+    def _datos_edicion_seguros(self, request):
+        data = request.data.copy()
+        if not request.user.is_superuser:
+            data.pop('is_superuser', None)
+            data.pop('is_staff', None)
+            data.pop('is_active', None)
+        elif 'is_superuser' in data:
+            valor = str(data.get('is_superuser', '')).strip().lower()
+            data['is_superuser'] = valor in {'1', 'true', 'si', 'sí'}
+            data['is_staff'] = data['is_superuser']
+        return data
 
     def update(self, request, *args, **kwargs):
-        if not es_admin(request.user):
+        usuario_objetivo = self.get_object()
+        error = self._validar_edicion(request, usuario_objetivo)
+        if error:
             return Response(
-                {'error': 'Solo el administrador puede editar usuarios.'},
+                {'error': error},
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        return super().update(request, *args, **kwargs)
+        serializer = self.get_serializer(
+            usuario_objetivo,
+            data=self._datos_edicion_seguros(request),
+        )
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
 
     def partial_update(self, request, *args, **kwargs):
-        if not es_admin(request.user):
+        usuario_objetivo = self.get_object()
+        error = self._validar_edicion(request, usuario_objetivo)
+        if error:
             return Response(
-                {'error': 'Solo el administrador puede editar usuarios.'},
+                {'error': error},
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        return super().partial_update(request, *args, **kwargs)
+        serializer = self.get_serializer(
+            usuario_objetivo,
+            data=self._datos_edicion_seguros(request),
+            partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
+
+    def destroy(self, request, *args, **kwargs):
+        if not request.user.is_superuser:
+            return Response(
+                {'error': 'Solo el superadministrador puede eliminar usuarios.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        usuario_objetivo = self.get_object()
+        if usuario_objetivo.id == request.user.id:
+            return Response(
+                {'error': 'No puedes eliminar tu propio usuario.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return super().destroy(request, *args, **kwargs)
 
     @action(detail=False, methods=['post'], url_path='crear-estudiante')
     def crear_usuario_estudiante(self, request):
@@ -1958,6 +2104,9 @@ class UserViewSet(viewsets.ModelViewSet):
 
         data = request.data.copy()
         data['matricula_id'] = matricula.id
+        if not request.user.is_superuser:
+            data['is_superuser'] = False
+            data['is_staff'] = False
         data.setdefault('first_name', matricula.estudiante.nombre)
         data.setdefault('last_name', matricula.estudiante.apellido)
         correo_estudiante = str(
@@ -6107,6 +6256,9 @@ def login(request):
                 if user.rol
                 else 'sin rol'
             ),
+            'is_superuser': user.is_superuser,
+            'is_staff': user.is_staff,
+            'is_active': user.is_active,
         },
         status=status.HTTP_200_OK
     )
@@ -10100,6 +10252,7 @@ def exportar_reporte_instructores_policial(request):
             "estudiante",
             "categoria",
             "plan_de_estudio",
+            "certificado",
         )
         .prefetch_related(
             Prefetch(
@@ -10310,9 +10463,26 @@ def exportar_reporte_instructores_policial(request):
         ws_egresos.cell(row=fila, column=14, value=horas_practicas)
         ws_egresos.cell(row=fila, column=15, value=nota_teorica or "")
         ws_egresos.cell(row=fila, column=16, value=nota_practica or "")
-        ws_egresos.cell(row=fila, column=17, value="")
-        ws_egresos.cell(row=fila, column=18, value="")
-        ws_egresos.cell(row=fila, column=19, value="")
+        # Certificación de diplomas: Libro, Registro (asiento), Folio
+        # y Observaciones. Si todavía no se ha generado el certificado,
+        # las cuatro celdas permanecen vacías.
+        certificado = getattr(matricula, "certificado", None)
+
+        ws_egresos.cell(
+            row=fila,
+            column=17,
+            value=(certificado.numero_libro if certificado else ""),
+        )
+        ws_egresos.cell(
+            row=fila,
+            column=18,
+            value=(certificado.numero_asiento if certificado else ""),
+        )
+        ws_egresos.cell(
+            row=fila,
+            column=19,
+            value=(certificado.numero_folio if certificado else ""),
+        )
         ws_egresos.cell(row=fila, column=20, value="")
 
         fila += 1
@@ -12380,6 +12550,9 @@ def certificados_guardados(request):
             'matricula',
             'matricula__categoria',
             'confirmado_por',
+        )
+        .prefetch_related(
+            'matricula__recibos'
         )
         .all()
     )

@@ -184,6 +184,8 @@ class UserSerializer(serializers.ModelSerializer):
             'rol',
             'password',
             'is_active',
+            'is_superuser',
+            'is_staff',
             'matricula_id',
             'instructor_id',
             'estudiante_nombre',
@@ -195,7 +197,9 @@ class UserSerializer(serializers.ModelSerializer):
             'password': {
                 'write_only': True,
                 'required': False,
-            }
+            },
+            'is_superuser': {'required': False},
+            'is_staff': {'required': False},
         }
 
     def validate_password(self, password):
@@ -977,6 +981,7 @@ class MatriculaSerializer(serializers.ModelSerializer):
     tiene_usuario = serializers.SerializerMethodField()
     categoria_nombre = serializers.CharField(source='categoria.nombre', read_only=True)
     usa_checks = serializers.SerializerMethodField()
+    credito_pendiente = serializers.SerializerMethodField()
 
     class Meta:
         model = Matricula
@@ -1006,6 +1011,21 @@ class MatriculaSerializer(serializers.ModelSerializer):
         ).strip().lower()
 
         return tipo_curso == 'principiante'
+
+    def get_credito_pendiente(self, obj):
+        recibos = obj.recibos.all()
+
+        return bool(
+            recibos.filter(
+                tipo_pago='credito'
+            ).exists()
+            and not recibos.filter(
+                tipo_pago__in=[
+                    'completo',
+                    'beneficio',
+                ]
+            ).exists()
+        )
 
 #Cambios realizados es decir sse agreagron
     def validate(self, data):
@@ -1166,6 +1186,20 @@ class MatriculaSerializer(serializers.ModelSerializer):
         return matricula
 
 class ReciboSerializer(serializers.ModelSerializer):
+    numero_recibo = serializers.CharField(
+        required=False,
+        allow_null=True,
+        allow_blank=True,
+        max_length=50,
+    )
+
+    monto_pagado = serializers.DecimalField(
+        required=False,
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+    )
+
     matricula_data = MatriculaSerializer(
         source='matricula',
         read_only=True
@@ -1180,6 +1214,7 @@ class ReciboSerializer(serializers.ModelSerializer):
 
     monto_total_curso = serializers.SerializerMethodField()
     por_pagar = serializers.SerializerMethodField()
+    credito_pendiente = serializers.SerializerMethodField()
 
     class Meta:
         model = Recibo
@@ -1219,16 +1254,23 @@ class ReciboSerializer(serializers.ModelSerializer):
             obj.tipo_pago or ''
         ).strip().lower()
 
-        # Solamente los anticipos tienen saldo pendiente.
-        if tipo_pago != 'anticipo':
+        if tipo_pago not in [
+            'anticipo',
+            'credito',
+        ]:
             return Decimal('0.00')
 
         monto_total = Decimal(
             str(self.get_monto_total_curso(obj))
         )
 
-        monto_pagado = Decimal(
-            str(obj.monto_pagado or 0)
+        monto_pagado = (
+            obj.matricula.recibos
+            .exclude(tipo_pago='credito')
+            .aggregate(
+                total=models.Sum('monto_pagado')
+            )['total']
+            or Decimal('0.00')
         )
 
         return max(
@@ -1237,6 +1279,25 @@ class ReciboSerializer(serializers.ModelSerializer):
         ).quantize(
             Decimal('0.01'),
             rounding=ROUND_HALF_UP,
+        )
+
+    def get_credito_pendiente(self, obj):
+        recibos = obj.matricula.recibos.all()
+
+        tiene_credito = recibos.filter(
+            tipo_pago='credito'
+        ).exists()
+
+        tiene_pago_final = recibos.filter(
+            tipo_pago__in=[
+                'completo',
+                'beneficio',
+            ]
+        ).exists()
+
+        return bool(
+            tiene_credito
+            and not tiene_pago_final
         )
 
     def obtener_valor_curso(self, matricula):
@@ -1321,6 +1382,15 @@ class ReciboSerializer(serializers.ModelSerializer):
     def validate(self, data):
 
         if self.instance:
+            if self.instance.tipo_pago == 'credito':
+                raise serializers.ValidationError({
+                    'error': (
+                        'El registro de crédito no se edita. '
+                        'Registre un recibo nuevo cuando el '
+                        'estudiante realice un pago.'
+                    )
+                })
+
             campos_permitidos = {
                 'numero_recibo',
                 'monto_pagado',
@@ -1447,6 +1517,10 @@ class ReciboSerializer(serializers.ModelSerializer):
             matricula=matricula
         )
 
+        recibos_de_pago = recibos_previos.exclude(
+            tipo_pago='credito'
+        )
+
         if self.instance:
             recibos_previos = recibos_previos.exclude(
                 id=self.instance.id
@@ -1482,7 +1556,7 @@ class ReciboSerializer(serializers.ModelSerializer):
         )
 
         total_pagado_previo = (
-            recibos_previos.aggregate(
+            recibos_de_pago.aggregate(
                 total=models.Sum('monto_pagado')
             )['total']
             or Decimal('0.00')
@@ -1494,12 +1568,61 @@ class ReciboSerializer(serializers.ModelSerializer):
 
         if (
             not self.instance
-            and recibos_previos.count() >= 2
+            and recibos_de_pago.count() >= 2
         ):
             raise serializers.ValidationError(
                 'Esta matrícula ya tiene los dos recibos '
                 'permitidos.'
             )
+
+        if tipo_pago == 'credito':
+            if recibos_previos.filter(
+                tipo_pago='credito'
+            ).exists():
+                raise serializers.ValidationError(
+                    'Esta matrícula ya tiene un crédito '
+                    'registrado.'
+                )
+
+            if recibos_de_pago.exists():
+                raise serializers.ValidationError(
+                    'No se puede registrar crédito porque '
+                    'la matrícula ya tiene pagos.'
+                )
+
+            data['numero_recibo'] = None
+            data['monto_pagado'] = Decimal('0.00')
+
+            return data
+
+        numero_recibo = str(
+            data.get('numero_recibo') or ''
+        ).strip()
+
+        if not numero_recibo:
+            raise serializers.ValidationError({
+                'numero_recibo': (
+                    'Debe ingresar el número de recibo.'
+                )
+            })
+
+        numero_duplicado = Recibo.objects.filter(
+            numero_recibo=numero_recibo
+        )
+
+        if self.instance:
+            numero_duplicado = numero_duplicado.exclude(
+                pk=self.instance.pk
+            )
+
+        if numero_duplicado.exists():
+            raise serializers.ValidationError({
+                'numero_recibo': (
+                    'Ya existe un recibo con este número.'
+                )
+            })
+
+        data['numero_recibo'] = numero_recibo
 
         if (
             tipo_pago != 'beneficio'
@@ -1513,7 +1636,7 @@ class ReciboSerializer(serializers.ModelSerializer):
 
         if tipo_pago == 'completo':
             tiene_pago_final = (
-                recibos_previos.filter(
+                recibos_de_pago.filter(
                     tipo_pago__in=[
                         'completo',
                         'beneficio',
@@ -1528,7 +1651,7 @@ class ReciboSerializer(serializers.ModelSerializer):
                 )
 
             anticipos_previos = (
-                recibos_previos.filter(
+                recibos_de_pago.filter(
                     tipo_pago='anticipo'
                 )
             )
@@ -1553,7 +1676,7 @@ class ReciboSerializer(serializers.ModelSerializer):
 
         elif tipo_pago == 'anticipo':
             tiene_pago_final = (
-                recibos_previos.filter(
+                recibos_de_pago.filter(
                     tipo_pago__in=[
                         'completo',
                         'beneficio',
@@ -1568,7 +1691,7 @@ class ReciboSerializer(serializers.ModelSerializer):
                 )
 
             anticipos_previos = (
-                recibos_previos.filter(
+                recibos_de_pago.filter(
                     tipo_pago='anticipo'
                 )
             )
@@ -1697,6 +1820,33 @@ class ReciboSerializer(serializers.ModelSerializer):
             matricula,
             validated_data,
         )
+
+        if tipo_pago == 'credito':
+            validated_data['numero_recibo'] = None
+            validated_data['monto_pagado'] = (
+                Decimal('0.00')
+            )
+
+            matricula.estado = 'matriculado'
+            matricula.save(
+                update_fields=['estado']
+            )
+
+            return Recibo.objects.create(
+                **validated_data
+            )
+
+        if tipo_pago in [
+            'completo',
+            'anticipo',
+        ]:
+            # El pago real sustituye el registro informativo
+            # de crédito. Al estar dentro de transaction.atomic,
+            # si falla la creación del recibo el crédito se restaura.
+            Recibo.objects.filter(
+                matricula=matricula,
+                tipo_pago='credito',
+            ).delete()
 
         if tipo_pago == 'beneficio':
             matricula.estado = 'matriculado'
@@ -2883,6 +3033,18 @@ class CertificadoSerializer(
         )
     )
 
+    credito_pendiente = (
+        serializers.SerializerMethodField()
+    )
+
+    puede_imprimir = (
+        serializers.SerializerMethodField()
+    )
+
+    motivo_bloqueo = (
+        serializers.SerializerMethodField()
+    )
+
     class Meta:
         model = Certificado
 
@@ -2905,6 +3067,9 @@ class CertificadoSerializer(
             'reforzamiento_confirmado',
             'confirmado_por',
             'confirmado_por_nombre',
+            'credito_pendiente',
+            'puede_imprimir',
+            'motivo_bloqueo',
             'creado_en',
             'actualizado_en',
         ]
@@ -2939,6 +3104,29 @@ class CertificadoSerializer(
             if categoria
             else ''
         )
+
+    def get_credito_pendiente(self, obj):
+        recibos = obj.matricula.recibos.all()
+
+        return bool(
+            recibos.filter(
+                tipo_pago='credito'
+            ).exists()
+            and not recibos.filter(
+                tipo_pago__in=[
+                    'completo',
+                    'beneficio',
+                ]
+            ).exists()
+        )
+
+    def get_puede_imprimir(self, obj):
+        # El crédito es informativo y no bloquea la impresión.
+        # La elegibilidad conserva las reglas académicas existentes.
+        return True
+
+    def get_motivo_bloqueo(self, obj):
+        return ''
 
     def validate_numero_asiento(self, valor):
         certificados = Certificado.objects.filter(

@@ -276,7 +276,8 @@ class Recibo(models.Model):
     TIPO_PAGO_CHOICES = [
         ('completo', 'Completo'),
         ('anticipo', 'Anticipo'),
-        ('beneficio', 'Beneficio'),
+        ('descuento', 'Descuento'),
+        ('credito', 'Crédito'),
     ]
 
     matricula = models.ForeignKey(
@@ -293,8 +294,17 @@ class Recibo(models.Model):
         related_name='recibos'
     )
 
-    numero_recibo = models.CharField(max_length=50, unique=True)
-    monto_pagado = models.DecimalField(max_digits=10, decimal_places=2)
+    numero_recibo = models.CharField(
+        max_length=50,
+        unique=True,
+        null=True,
+        blank=True,
+    )
+    monto_pagado = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+    )
     fecha_pago = models.DateField(default=timezone.now)
     tipo_pago = models.CharField(max_length=20, choices=TIPO_PAGO_CHOICES)
     cantidad = models.PositiveSmallIntegerField(default=15)
@@ -307,7 +317,11 @@ class Recibo(models.Model):
 
     def __str__(self):
         estudiante = self.matricula.estudiante
-        return f"Recibo #{self.numero_recibo} - {estudiante.nombre} {estudiante.apellido}"
+        identificador = (
+            self.numero_recibo
+            or self.get_tipo_pago_display()
+        )
+        return f"Recibo #{identificador} - {estudiante.nombre} {estudiante.apellido}"
 
 
 class Calendario(models.Model):
