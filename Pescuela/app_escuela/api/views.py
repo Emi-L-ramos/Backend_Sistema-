@@ -13910,6 +13910,20 @@ def convertir_certificados_a_pdf(items):
         with open(ruta_pdf, 'rb') as archivo_pdf:
             return archivo_pdf.read()
 
+def respuesta_pdf_para_imprimir(contenido_pdf, nombre_archivo):
+    response = HttpResponse(
+        contenido_pdf,
+        content_type='application/pdf',
+    )
+
+    response['Content-Disposition'] = (
+        f'inline; filename="{nombre_archivo}.pdf"'
+    )
+
+    response['Content-Length'] = len(contenido_pdf)
+
+    return response
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
