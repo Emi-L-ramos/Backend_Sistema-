@@ -121,6 +121,27 @@ DATABASES = {
     }
 }
 
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.mysql',
+#         'NAME': os.environ.get('DB_NAME', 'adiact_bd'),      # Cambiado a DB_NAME
+#         'USER': os.environ.get('DB_USER', 'root'),           # Cambiado a DB_USER
+#         'PASSWORD': os.environ.get('DB_PASSWORD', ''),       # Cambiado a DB_PASSWORD
+#         'HOST': os.environ.get('DB_HOST', '127.0.0.1'),      # Cambiado a DB_HOST
+#         'PORT': os.environ.get('DB_PORT', '3306'),           # Cambiado a DB_PORT
+#         'CONN_MAX_AGE': int(
+#             os.environ.get('MYSQL_CONN_MAX_AGE', '60')
+#         ),
+#         'CONN_HEALTH_CHECKS': True,
+#         'OPTIONS': {
+#             'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
+#             'charset': 'utf8mb4',
+#         }
+#     }
+# }
+
+
+
 CORS_ALLOWED_ORIGINS = obtener_lista_entorno(
     "CORS_ALLOWED_ORIGINS",
     (
@@ -264,3 +285,5 @@ if not DEBUG:
     SECURE_HSTS_PRELOAD = (
         SECURE_HSTS_SECONDS > 0
     )
+
+LIBREOFFICE_BIN = r"C:\Program Files\LibreOffice\program\soffice.exe"

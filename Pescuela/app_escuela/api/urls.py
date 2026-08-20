@@ -19,6 +19,8 @@ from .views import (
     CalendarioViewSet,
     AsistenciaViewSet,
     NotasViewSet,
+    imprimir_certificado_directo,
+    imprimir_certificados_directo,
     login,
     cerrar_sesion,
     saldo,
@@ -40,6 +42,7 @@ from .views import (
     detalle_certificado,
     imprimir_certificado_guardado,
     imprimir_certificados_guardados
+   
 )
 from .views import (
     ProgresoTemaViewSet,
@@ -149,5 +152,17 @@ urlpatterns = [
         'certificados-egresados-powerpoint/',
         certificados_egresados_powerpoint,
         name='certificados_egresados_powerpoint',
+    ),
+
+    path(
+        'certificados/imprimir-varios-directo/',
+        imprimir_certificados_directo,
+        name='imprimir-certificados-directo',
+    ),
+
+    path(
+        'certificados/<int:certificado_id>/imprimir-directo/',
+        imprimir_certificado_directo,
+        name='imprimir-certificado-directo',
     ),
 ]

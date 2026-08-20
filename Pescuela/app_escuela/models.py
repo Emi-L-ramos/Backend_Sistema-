@@ -402,6 +402,58 @@ class Calendario(models.Model):
         return f"{estudiante.nombre} {estudiante.apellido} - Clase {self.numero_clase}"
 
 
+class HistorialCalendario(models.Model):
+    """
+    Bitácora administrativa de operaciones avanzadas del calendario.
+    No depende de una FK a Calendario para conservar evidencia incluso
+    cuando un superadministrador elimina una cita.
+    """
+    calendario_id = models.PositiveIntegerField(
+        db_index=True,
+        help_text='Identificador de la cita afectada, incluso si fue eliminada.'
+    )
+
+    matricula = models.ForeignKey(
+        Matricula,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='historial_calendario',
+    )
+
+    instructor = models.ForeignKey(
+        Instructor,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='historial_calendario',
+    )
+
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='acciones_calendario',
+    )
+
+    accion = models.CharField(max_length=80)
+    detalle = models.JSONField(default=dict, blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-creado_en', '-id']
+        indexes = [
+            models.Index(
+                fields=['calendario_id', 'creado_en'],
+                name='hist_calendario_fecha_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.accion} - cita #{self.calendario_id}'
+
+
 class Asistencia(models.Model):
     ESTADO_CHOICES = [
         ('asistio', 'Asistió'),

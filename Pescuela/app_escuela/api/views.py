@@ -6,7 +6,8 @@ import base64
 import tempfile
 import random
 import re
-
+import shutil
+import subprocess
 from copy import copy
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
@@ -80,9 +81,11 @@ from ..models import (
     ProgresoClaseTema,
     Notificacion,
     HistorialPlanEstudio,
+    HistorialCalendario,
     Certificado,
     ConfiguracionCertificado,
     calcular_libro_certificado,
+    
 )
 from .serializers import (
     RolSerializer,
@@ -438,6 +441,13 @@ def desactivar_usuarios_instructor(instructor):
     for usuario in usuarios:
         desactivar_usuario(usuario)
 
+def reactivar_usuarios_instructor(instructor):
+    usuarios = instructor.usuarios.all()
+
+    for usuario in usuarios:
+        usuario.is_active = True
+        usuario.save(update_fields=['is_active'])
+
 def obtener_ids_matriculas_egresadas():
     return (
         Matricula.objects
@@ -545,11 +555,13 @@ class RolViewSet(viewsets.ModelViewSet):
     queryset = Rol.objects.all()
     serializer_class = RolSerializer
     permission_classes = [IsAuthenticated]
+
     http_method_names = [
         'get',
         'post',
         'put',
         'patch',
+        'delete',
         'head',
         'options',
     ]
@@ -557,8 +569,12 @@ class RolViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
-                {'error': 'No tienes permiso para crear este registro.'},
-                status=status.HTTP_403_FORBIDDEN
+                {
+                    'error': (
+                        'No tienes permiso para crear este registro.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         return super().create(request, *args, **kwargs)
@@ -566,8 +582,12 @@ class RolViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
-                {'error': 'No tienes permiso para editar este registro.'},
-                status=status.HTTP_403_FORBIDDEN
+                {
+                    'error': (
+                        'No tienes permiso para editar este registro.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         return super().update(request, *args, **kwargs)
@@ -575,12 +595,61 @@ class RolViewSet(viewsets.ModelViewSet):
     def partial_update(self, request, *args, **kwargs):
         if not es_admin(request.user):
             return Response(
-                {'error': 'No tienes permiso para editar este registro.'},
-                status=status.HTTP_403_FORBIDDEN
+                {
+                    'error': (
+                        'No tienes permiso para editar este registro.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
             )
 
-        return super().partial_update(request, *args, **kwargs)
+        return super().partial_update(
+            request,
+            *args,
+            **kwargs
+        )
 
+    def destroy(self, request, *args, **kwargs):
+        if not request.user.is_superuser:
+            return Response(
+                {
+                    'error': (
+                        'Solo el superadministrador puede '
+                        'eliminar roles.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        rol = self.get_object()
+
+        usuarios_con_rol = Usuario.objects.filter(
+            rol=rol
+        ).count()
+
+        if usuarios_con_rol > 0:
+            return Response(
+                {
+                    'error': (
+                        f'No se puede eliminar el rol "{rol.nombre}" '
+                        f'porque está asignado a '
+                        f'{usuarios_con_rol} usuario(s).'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        nombre_rol = rol.nombre
+        rol.delete()
+
+        return Response(
+            {
+                'message': (
+                    f'Rol "{nombre_rol}" eliminado correctamente.'
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
 class CategoriaVehiculoViewSet(viewsets.ModelViewSet):
     queryset = CategoriaVehiculo.objects.all()
     serializer_class = CategoriaVehiculoSerializer
@@ -592,6 +661,7 @@ class CategoriaVehiculoViewSet(viewsets.ModelViewSet):
         'patch',
         'head',
         'options',
+        'delete',
     ]
 
     def create(self, request, *args, **kwargs):
@@ -622,6 +692,43 @@ class CategoriaVehiculoViewSet(viewsets.ModelViewSet):
 
         return super().partial_update(request, *args, **kwargs)
 
+    def destroy(self, request, *args, **kwargs):
+        if not request.user.is_superuser:
+            return Response(
+                {
+                    'error': (
+                        'Solo el superadministrador puede '
+                        'eliminar categorías.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        categoria = self.get_object()
+
+        if categoria.matriculas.exists():
+            return Response(
+                {
+                    'error': (
+                        'No se puede eliminar esta categoría porque '
+                        'está asignada a una o más matrículas.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        nombre_categoria = categoria.nombre
+        categoria.delete()
+
+        return Response(
+            {
+                'message': (
+                    f'Categoría "{nombre_categoria}" eliminada correctamente.'
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
+    
 class EstudianteViewSet(viewsets.ModelViewSet):
     queryset = Estudiante.objects.all()
     serializer_class = EstudianteSerializer
@@ -634,6 +741,7 @@ class EstudianteViewSet(viewsets.ModelViewSet):
         'patch',
         'head',
         'options',
+        
     ]
 
     def get_queryset(self):
@@ -860,6 +968,7 @@ class ValorCursoViewSet(viewsets.ModelViewSet):
         'patch',
         'head',
         'options',
+        'delete',
     ]
 
     def create(self, request, *args, **kwargs):
@@ -904,6 +1013,43 @@ class ValorCursoViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(tipo_curso=tipo_curso)
 
         return queryset
+    
+    def destroy(self, request, *args, **kwargs):
+        if not request.user.is_superuser:
+            return Response(
+                {
+                    'error': (
+                        'Solo el superadministrador puede '
+                        'eliminar valores de curso.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        valor_curso = self.get_object()
+
+        if valor_curso.recibos.exists():
+            return Response(
+                {
+                    'error': (
+                        'No se puede eliminar este valor porque '
+                        'ya está asociado a uno o más recibos.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        descripcion = str(valor_curso)
+        valor_curso.delete()
+
+        return Response(
+            {
+                'message': (
+                    f'Valor de curso "{descripcion}" eliminado correctamente.'
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class InstructorViewSet(viewsets.ModelViewSet):
@@ -918,6 +1064,7 @@ class InstructorViewSet(viewsets.ModelViewSet):
         'patch',
         'head',
         'options',
+        'delete',
     ]
     parser_classes = [JSONParser, MultiPartParser, FormParser]
 
@@ -938,6 +1085,71 @@ class InstructorViewSet(viewsets.ModelViewSet):
             )
 
         return super().create(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if not request.user.is_superuser:
+            return Response(
+                {
+                    'error': (
+                        'Solo el superadministrador puede '
+                        'eliminar instructores definitivamente.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        instructor = self.get_object()
+
+        clases_asignadas = instructor.agenda.count()
+        notas_registradas = instructor.notas_registradas.count()
+        usuarios_asociados = instructor.usuarios.count()
+
+        if clases_asignadas > 0 or notas_registradas > 0:
+            return Response(
+                {
+                    'error': (
+                        'No se puede eliminar este instructor porque '
+                        'tiene clases o notas registradas. '
+                        'Utiliza Desactivar en su lugar.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if usuarios_asociados > 0:
+            return Response(
+                {
+                    'error': (
+                        'No se puede eliminar este instructor porque '
+                        'tiene un usuario asociado. Desactívalo en lugar '
+                        'de eliminarlo.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        nombre_instructor = (
+            f'{instructor.nombre} {instructor.apellido}'
+        ).strip()
+
+        instructor.delete()
+
+        return Response(
+            {
+                'message': (
+                    f'Instructor "{nombre_instructor}" eliminado '
+                    'correctamente.'
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(
+            activo=True,
+            fecha_salida=None,
+            motivo_salida=None,
+        )
 
     def update(self, request, *args, **kwargs):
         if not es_admin(request.user):
@@ -1045,6 +1257,53 @@ class InstructorViewSet(viewsets.ModelViewSet):
             'instructor': self.get_serializer(instructor).data
         })
 
+    @action(detail=True, methods=['post'], url_path='reactivar')
+    def reactivar(self, request, pk=None):
+        if not es_admin(request.user):
+            return Response(
+                {
+                    'error': (
+                        'Solo Administración o Superadministración puede '
+                        'reactivar instructores.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        instructor = self.get_object()
+
+        if instructor.activo and not instructor.fecha_salida:
+            return Response(
+                {
+                    'error': 'El instructor ya se encuentra activo.'
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        instructor.activo = True
+        instructor.fecha_salida = None
+        instructor.motivo_salida = None
+        instructor.save(
+            update_fields=[
+                'activo',
+                'fecha_salida',
+                'motivo_salida',
+            ]
+        )
+
+        reactivar_usuarios_instructor(instructor)
+
+        return Response(
+            {
+                'message': (
+                    'Instructor reactivado correctamente. '
+                    'Ya puede volver a iniciar sesión.'
+                ),
+                'instructor': self.get_serializer(instructor).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
 
 class MatriculaViewSet(viewsets.ModelViewSet):
     queryset = Matricula.objects.select_related('estudiante').all()
@@ -1058,6 +1317,7 @@ class MatriculaViewSet(viewsets.ModelViewSet):
         'patch',
         'head',
         'options',
+        'delete',
     ]
 
     def get_queryset(self):
@@ -2224,6 +2484,334 @@ class CalendarioViewSet(viewsets.ModelViewSet):
             return qs.filter(matricula__estudiante_id=user.estudiante_id).order_by('fecha', 'hora_inicio')
 
         return qs.none()
+
+    @staticmethod
+    def _es_superadministrador(user):
+        return bool(
+            user
+            and getattr(user, 'is_authenticated', False)
+            and getattr(user, 'is_superuser', False)
+        )
+
+    def _respuesta_solo_superadmin(self):
+        return Response(
+            {
+                'error': (
+                    'Esta herramienta está permitida únicamente '
+                    'para el superadministrador.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    @staticmethod
+    def _resumen_cita(cita):
+        estudiante = cita.matricula.estudiante
+        return {
+            'id': cita.id,
+            'matricula_id': cita.matricula_id,
+            'estudiante': (
+                f'{estudiante.nombre or ""} '
+                f'{estudiante.apellido or ""}'
+            ).strip(),
+            'instructor_id': cita.instructor_id,
+            'fecha': cita.fecha.isoformat(),
+            'hora_inicio': cita.hora_inicio.strftime('%H:%M'),
+            'hora_fin': cita.hora_fin.strftime('%H:%M'),
+            'numero_clase': cita.numero_clase,
+            'estado': cita.estado,
+            'es_examen': cita.es_examen,
+        }
+
+    @staticmethod
+    def _registrar_historial_superadmin(request, cita, accion, detalle=None):
+        HistorialCalendario.objects.create(
+            calendario_id=cita.id,
+            matricula_id=cita.matricula_id,
+            instructor_id=cita.instructor_id,
+            usuario=request.user,
+            accion=accion,
+            detalle=detalle or {},
+        )
+
+    def _clases_del_bloque(self, cita, bloquear=False):
+        queryset = (
+            Calendario.objects
+            .filter(
+                matricula_id=cita.matricula_id,
+                es_examen=False,
+            )
+            .select_related(
+                'matricula__estudiante',
+                'instructor',
+            )
+            .order_by('numero_clase', 'fecha', 'hora_inicio', 'id')
+        )
+
+        return queryset.select_for_update() if bloquear else queryset
+
+    @action(detail=True, methods=['post'], url_path='cancelar-bloque')
+    def cancelar_bloque_superadmin(self, request, pk=None):
+        if not self._es_superadministrador(request.user):
+            return self._respuesta_solo_superadmin()
+
+        with transaction.atomic():
+            cita = (
+                Calendario.objects
+                .select_for_update()
+                .select_related('matricula__estudiante', 'instructor')
+                .get(pk=pk)
+            )
+            clases = list(self._clases_del_bloque(cita, bloquear=True))
+            clases_a_cancelar = [
+                clase for clase in clases
+                if clase.estado not in {'cancelada', 'completada'}
+            ]
+
+            for clase in clases_a_cancelar:
+                estado_anterior = clase.estado
+                clase.estado = 'cancelada'
+                clase.observaciones = (
+                    f'{clase.observaciones or ""}\n'
+                    '[Superadmin] Bloque cancelado.'
+                ).strip()
+                clase.save(update_fields=['estado', 'observaciones'])
+                self._registrar_historial_superadmin(
+                    request,
+                    clase,
+                    'Canceló bloque',
+                    {'estado_anterior': estado_anterior},
+                )
+
+        return Response({
+            'message': 'Bloque cancelado correctamente.',
+            'clases_canceladas': len(clases_a_cancelar),
+        })
+
+    @action(detail=True, methods=['post'], url_path='eliminar-bloque')
+    def eliminar_bloque_superadmin(self, request, pk=None):
+        if not self._es_superadministrador(request.user):
+            return self._respuesta_solo_superadmin()
+
+        if str(request.data.get('confirmacion') or '').strip().upper() != 'ELIMINAR':
+            return Response(
+                {'error': 'Para eliminar el bloque debe escribir ELIMINAR.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            cita = (
+                Calendario.objects
+                .select_for_update()
+                .select_related('matricula__estudiante', 'instructor')
+                .get(pk=pk)
+            )
+            clases = list(self._clases_del_bloque(cita, bloquear=True))
+
+            for clase in clases:
+                self._registrar_historial_superadmin(
+                    request,
+                    clase,
+                    'Eliminó bloque',
+                    {'cita_eliminada': self._resumen_cita(clase)},
+                )
+
+            cantidad = len(clases)
+            Calendario.objects.filter(id__in=[clase.id for clase in clases]).delete()
+
+        return Response({
+            'message': 'Bloque eliminado correctamente.',
+            'clases_eliminadas': cantidad,
+        })
+
+    @action(detail=True, methods=['post'], url_path='eliminar')
+    def eliminar_cita_superadmin(self, request, pk=None):
+        if not self._es_superadministrador(request.user):
+            return self._respuesta_solo_superadmin()
+
+        if str(request.data.get('confirmacion') or '').strip().upper() != 'ELIMINAR':
+            return Response(
+                {'error': 'Para eliminar la cita debe escribir ELIMINAR.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            cita = (
+                Calendario.objects
+                .select_for_update()
+                .select_related('matricula__estudiante', 'instructor')
+                .get(pk=pk)
+            )
+            resumen = self._resumen_cita(cita)
+            self._registrar_historial_superadmin(
+                request,
+                cita,
+                'Eliminó cita individual',
+                {'cita_eliminada': resumen},
+            )
+            cita.delete()
+
+        return Response({'message': 'Cita eliminada correctamente.'})
+
+    @action(detail=True, methods=['post'], url_path='forzar-disponibilidad')
+    def forzar_disponibilidad_superadmin(self, request, pk=None):
+        if not self._es_superadministrador(request.user):
+            return self._respuesta_solo_superadmin()
+
+        motivo = str(request.data.get('motivo') or '').strip()
+        if not motivo:
+            return Response(
+                {'error': 'Debe indicar el motivo para liberar el horario.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            cita = (
+                Calendario.objects
+                .select_for_update()
+                .select_related('matricula__estudiante', 'instructor')
+                .get(pk=pk)
+            )
+            estado_anterior = cita.estado
+            cita.estado = 'cancelada'
+            cita.observaciones = (
+                f'{cita.observaciones or ""}\n'
+                f'[Superadmin] Horario liberado. Motivo: {motivo}'
+            ).strip()
+            cita.save(update_fields=['estado', 'observaciones'])
+            self._registrar_historial_superadmin(
+                request,
+                cita,
+                'Forzó disponibilidad de horario',
+                {
+                    'estado_anterior': estado_anterior,
+                    'motivo': motivo,
+                },
+            )
+
+        return Response({
+            'message': 'Horario liberado correctamente.',
+            'calendario': self.get_serializer(cita).data,
+        })
+
+    @action(detail=True, methods=['get'], url_path='conflictos')
+    def detectar_conflictos_superadmin(self, request, pk=None):
+        if not self._es_superadministrador(request.user):
+            return self._respuesta_solo_superadmin()
+
+        cita = self.get_object()
+        candidatos = (
+            Calendario.objects
+            .filter(
+                fecha=cita.fecha,
+                hora_inicio__lt=cita.hora_fin,
+                hora_fin__gt=cita.hora_inicio,
+            )
+            .exclude(id=cita.id)
+            .exclude(estado='cancelada')
+            .select_related('matricula__estudiante', 'instructor')
+        )
+
+        conflictos = []
+        for otra in candidatos:
+            tipos = []
+            if otra.instructor_id == cita.instructor_id:
+                tipos.append('instructor')
+            if otra.matricula_id == cita.matricula_id:
+                tipos.append('estudiante')
+
+            if tipos:
+                conflictos.append({
+                    'tipos': tipos,
+                    'cita': self._resumen_cita(otra),
+                })
+
+        return Response({
+            'cita': self._resumen_cita(cita),
+            'conflictos': conflictos,
+            'cantidad': len(conflictos),
+        })
+
+    @action(detail=True, methods=['post'], url_path='reparar-estado')
+    def reparar_estado_superadmin(self, request, pk=None):
+        if not self._es_superadministrador(request.user):
+            return self._respuesta_solo_superadmin()
+
+        estado_nuevo = str(request.data.get('estado') or '').strip().lower()
+        motivo = str(request.data.get('motivo') or '').strip()
+        estados_validos = {
+            valor for valor, _etiqueta in Calendario.ESTADO_CHOICES
+        }
+
+        if estado_nuevo not in estados_validos:
+            return Response(
+                {'error': 'El estado indicado no es válido.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not motivo:
+            return Response(
+                {'error': 'Debe indicar el motivo de la reparación.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            cita = (
+                Calendario.objects
+                .select_for_update()
+                .select_related('matricula__estudiante', 'instructor')
+                .get(pk=pk)
+            )
+            estado_anterior = cita.estado
+            cita.estado = estado_nuevo
+            cita.observaciones = (
+                f'{cita.observaciones or ""}\n'
+                f'[Superadmin] Estado reparado a {estado_nuevo}. Motivo: {motivo}'
+            ).strip()
+            cita.save(update_fields=['estado', 'observaciones'])
+            self._registrar_historial_superadmin(
+                request,
+                cita,
+                'Reparó estado de la cita',
+                {
+                    'estado_anterior': estado_anterior,
+                    'estado_nuevo': estado_nuevo,
+                    'motivo': motivo,
+                },
+            )
+
+        return Response({
+            'message': 'Estado reparado correctamente.',
+            'calendario': self.get_serializer(cita).data,
+        })
+
+    @action(detail=True, methods=['get'], url_path='historial')
+    def historial_superadmin(self, request, pk=None):
+        if not self._es_superadministrador(request.user):
+            return self._respuesta_solo_superadmin()
+
+        historial = (
+            HistorialCalendario.objects
+            .filter(calendario_id=pk)
+            .select_related('usuario', 'instructor')
+            .order_by('-creado_en', '-id')
+        )
+
+        return Response({
+            'results': [
+                {
+                    'id': item.id,
+                    'accion': item.accion,
+                    'detalle': item.detalle,
+                    'fecha': item.creado_en.isoformat(),
+                    'usuario': (
+                        item.usuario.username
+                        if item.usuario else 'Usuario eliminado'
+                    ),
+                }
+                for item in historial
+            ],
+        })
 
     @transaction.atomic
     def crear_clases_regulares_seguras(
@@ -4289,6 +4877,10 @@ class CalendarioViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_201_CREATED
             )
+MARCADOR_ASISTENCIA_HABILITADA = (
+    '[ASISTENCIA_HABILITADA_MANUAL]'
+)
+
 
 class AsistenciaViewSet(viewsets.GenericViewSet):
     queryset = Asistencia.objects.select_related(
@@ -4473,10 +5065,17 @@ class AsistenciaViewSet(viewsets.GenericViewSet):
                 estado = asistencia.estado
                 asistencia_id = asistencia.id
                 justificado_por_admin = asistencia.justificado_por_admin
+
+                habilitada_manual = bool(
+                    estado == 'pendiente'
+                    and MARCADOR_ASISTENCIA_HABILITADA
+                    in (asistencia.observacion or '')
+                )
             else:
                 estado = 'pendiente'
                 asistencia_id = None
                 justificado_por_admin = False
+                habilitada_manual = False
 
             en_rango = fecha_inicio <= clase.fecha <= fecha_fin
             es_hoy = clase.fecha == hoy
@@ -4499,6 +5098,13 @@ class AsistenciaViewSet(viewsets.GenericViewSet):
                     )
                 )
             )
+            puede_habilitar = (
+                es_admin_asistencia
+                and estado == 'pendiente'
+                and not habilitada_manual # type: ignore
+                and clase.estado in ['pendiente', 'reprogramada']
+                and clase.fecha <= hoy
+            )
 
             resultado[matricula_id]['asistencias'][str(clase.numero_clase)] = {
                 'id': clase.id,
@@ -4519,8 +5125,10 @@ class AsistenciaViewSet(viewsets.GenericViewSet):
                 'es_pasado': es_pasado,
                 'es_futuro': es_futuro,
                 'puede_marcar': puede_marcar,
+                'habilitada_manual': habilitada_manual,
+                'puede_habilitar': puede_habilitar,
                 'bloqueado': not puede_marcar,
-            }
+                }
 
         for item in resultado.values():
             asistencias_estudiante = item['asistencias'].values()
@@ -4637,7 +5245,13 @@ class AsistenciaViewSet(viewsets.GenericViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
         else:
-            if clase.fecha != hoy:
+            habilitada_manual = Asistencia.objects.filter(
+                As_calendario=clase,
+                estado='pendiente',
+                observacion__contains=MARCADOR_ASISTENCIA_HABILITADA,
+            ).exists()
+
+            if clase.fecha != hoy and not habilitada_manual:
                 return Response(
                     {'error': 'Solo se puede marcar asistencia el día exacto de la clase.'},
                     status=status.HTTP_400_BAD_REQUEST
@@ -4674,6 +5288,117 @@ class AsistenciaViewSet(viewsets.GenericViewSet):
             'message': 'Asistencia registrada correctamente.',
             'data': serializer.data
         })
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='habilitar-marcado',
+    )
+        
+    def habilitar_marcado(self, request):
+        if not es_admin(request.user):
+            return Response(
+                {
+                    'error': (
+                        'Solo Administración o Superadministración puede '
+                        'habilitar una asistencia.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        clase_id = request.data.get('clase_id')
+
+        if not clase_id:
+            return Response(
+                {'error': 'Debe seleccionar la clase.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        clase = get_object_or_404(
+            Calendario.objects.select_related(
+                'matricula',
+                'matricula__estudiante',
+                'instructor',
+            ),
+            pk=clase_id,
+        )
+
+        if clase.es_examen:
+            return Response(
+                {
+                    'error': (
+                        'Los exámenes policiales no usan asistencia normal.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if clase.fecha > timezone.localdate():
+            return Response(
+                {
+                    'error': (
+                        'No se puede habilitar una clase futura.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if clase.estado not in ['pendiente', 'reprogramada']:
+            return Response(
+                {
+                    'error': (
+                        'La clase ya fue completada, cancelada o no admite '
+                        'marcado de asistencia.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        asistencia_existente = Asistencia.objects.filter(
+            As_calendario=clase,
+        ).exclude(
+            estado='pendiente',
+        ).exists()
+
+        if asistencia_existente:
+            return Response(
+                {
+                    'error': (
+                        'La clase ya tiene una asistencia registrada.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        usuario = (
+            request.user.get_full_name().strip()
+            or request.user.username
+        )
+
+        asistencia, _ = Asistencia.objects.update_or_create(
+            As_calendario=clase,
+            defaults={
+                'As_estudiante': clase.matricula.estudiante,
+                'estado': 'pendiente',
+                'observacion': (
+                    f'{MARCADOR_ASISTENCIA_HABILITADA} '
+                    f'Habilitada por {usuario}.'
+                ),
+                'justificado_por_admin': False,
+                'km_inicial': None,
+                'km_final': None,
+            },
+        )
+
+        return Response(
+            {
+                'success': True,
+                'message': (
+                    'Asistencia habilitada. El instructor ya puede marcarla.'
+                ),
+                'asistencia_id': asistencia.id,
+            }
+        )
 
     @action(detail=False, methods=['post'], url_path='finalizar-km')
     def finalizar_km(self, request):
@@ -10351,12 +11076,12 @@ def exportar_reporte_instructores_policial(request):
             )
         )
 
+    # Orden cronológico por Fecha Finaliza:
+# 28/07/2026, 29/07/2026, 30/07/2026...
     egresados = egresados.order_by(
-        "estudiante__apellido",
-        "estudiante__nombre",
+        "fecha_egreso_reporte",
         "id",
     )
-
     fila = fila_inicio_egresos
 
     for matricula in egresados:
@@ -10573,6 +11298,7 @@ class PagoInstructorViewSet(viewsets.ModelViewSet):
         'patch',
         'head',
         'options',
+        'delete',
     ]
 
     def _validar_permiso_administrativo(self, request):
@@ -10691,6 +11417,7 @@ class CargoInstitucionalViewSet(viewsets.ModelViewSet):
         'patch',
         'head',
         'options',
+        'delete',
     ]
 
     def create(self, request, *args, **kwargs):
@@ -10716,6 +11443,32 @@ class CargoInstitucionalViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
         return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if not request.user.is_superuser:
+            return Response(
+                {
+                    'error': (
+                        'Solo el superadministrador puede '
+                        'eliminar cargos institucionales.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        cargo = self.get_object()
+        descripcion = f'{cargo.nombre} - {cargo.cargo}'
+
+        cargo.delete()
+
+        return Response(
+            {
+                'message': (
+                    f'Cargo "{descripcion}" eliminado correctamente.'
+                )
+            },
+            status=status.HTTP_200_OK,
+        )
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -13071,6 +13824,193 @@ def certificado_guardado_a_item(
             certificado.numero_libro
         ),
     }
+
+def convertir_certificados_a_pdf(items):
+    """
+    Convierte el PowerPoint del certificado a PDF temporalmente
+    para imprimirlo directamente desde el navegador.
+    """
+    binario = (
+        getattr(settings, 'LIBREOFFICE_BIN', '')
+        or shutil.which('soffice')
+        or shutil.which('libreoffice')
+    )
+
+    if not binario and os.name == 'nt':
+        ruta_windows = (
+            r'C:\Program Files\LibreOffice\program\soffice.exe'
+        )
+
+        if os.path.exists(ruta_windows):
+            binario = ruta_windows
+
+    if not binario:
+        raise RuntimeError(
+            'LibreOffice no está instalado o no se encuentra en el sistema.'
+        )
+
+    presentacion = certificado_crear_powerpoint(items)
+
+    with tempfile.TemporaryDirectory() as carpeta_temporal:
+        ruta_pptx = os.path.join(
+            carpeta_temporal,
+            'certificados_para_imprimir.pptx',
+        )
+
+        presentacion.save(ruta_pptx)
+
+        proceso = subprocess.run(
+            [
+                binario,
+                '--headless',
+                '--convert-to',
+                'pdf',
+                '--outdir',
+                carpeta_temporal,
+                ruta_pptx,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+
+        ruta_pdf = os.path.join(
+            carpeta_temporal,
+            'certificados_para_imprimir.pdf',
+        )
+
+        if not os.path.exists(ruta_pdf):
+            detalle = (
+                proceso.stderr.strip()
+                or proceso.stdout.strip()
+                or 'LibreOffice no pudo convertir el certificado a PDF.'
+            )
+
+            raise RuntimeError(detalle)
+
+        with open(ruta_pdf, 'rb') as archivo_pdf:
+            return archivo_pdf.read()
+
+
+def respuesta_pdf_para_imprimir(contenido_pdf, nombre_archivo):
+    response = HttpResponse(
+        contenido_pdf,
+        content_type='application/pdf',
+    )
+
+    response['Content-Disposition'] = (
+        f'inline; filename="{nombre_archivo}.pdf"'
+    )
+
+    return response
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def imprimir_certificado_directo(
+    request,
+    certificado_id,
+):
+    if not es_admin(request.user):
+        return Response(
+            {
+                'detail': (
+                    'No tienes permiso para imprimir certificados.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    certificado = get_object_or_404(
+        Certificado.objects.select_related(
+            'estudiante',
+            'matricula',
+            'matricula__categoria',
+        ),
+        pk=certificado_id,
+    )
+
+    try:
+        contenido_pdf = convertir_certificados_a_pdf([
+            certificado_guardado_a_item(certificado)
+        ])
+    except (RuntimeError, ValueError) as error:
+        return Response(
+            {'detail': str(error)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    return respuesta_pdf_para_imprimir(
+        contenido_pdf,
+        f'certificado_{certificado.numero_asiento}',
+    )
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def imprimir_certificados_directo(request):
+    if not es_admin(request.user):
+        return Response(
+            {
+                'detail': (
+                    'No tienes permiso para imprimir certificados.'
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    certificado_ids = request.data.get(
+        'certificado_ids',
+        [],
+    )
+
+    if not isinstance(certificado_ids, list) or not certificado_ids:
+        return Response(
+            {'detail': 'Seleccione al menos un certificado.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    certificado_ids = list(dict.fromkeys(certificado_ids))
+
+    certificados = list(
+        Certificado.objects.select_related(
+            'estudiante',
+            'matricula',
+            'matricula__categoria',
+        ).filter(
+            id__in=certificado_ids
+        ).order_by(
+            'numero_asiento'
+        )
+    )
+
+    if len(certificados) != len(certificado_ids):
+        return Response(
+            {'detail': 'Uno o más certificados no existen.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        contenido_pdf = convertir_certificados_a_pdf([
+            certificado_guardado_a_item(certificado)
+            for certificado in certificados
+        ])
+    except (RuntimeError, ValueError) as error:
+        return Response(
+            {'detail': str(error)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    return respuesta_pdf_para_imprimir(
+        contenido_pdf,
+        (
+            f'certificados_{certificados[0].numero_asiento}_'
+            f'{certificados[-1].numero_asiento}'
+        ),
+    )
+
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
