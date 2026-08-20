@@ -13830,12 +13830,29 @@ def convertir_certificados_a_pdf(items):
     Convierte el PowerPoint del certificado a PDF temporalmente
     para imprimirlo directamente desde el navegador.
     """
-    binario = (
-        getattr(settings, 'LIBREOFFICE_BIN', '')
-        or shutil.which('soffice')
-        or shutil.which('libreoffice')
+    binario_configurado = getattr(
+        settings,
+        'LIBREOFFICE_BIN',
+        '',
     )
 
+    # Usa la configuración solo si esa ruta realmente existe.
+    binario = (
+        binario_configurado
+        if binario_configurado
+        and os.path.exists(binario_configurado)
+        else None
+    )
+
+    # Linux VPS: /usr/bin/libreoffice
+    # Windows local: normalmente soffice.exe queda disponible aquí
+    binario = (
+        binario
+        or shutil.which('libreoffice')
+        or shutil.which('soffice')
+    )
+
+    # Respaldo exclusivo para Windows.
     if not binario and os.name == 'nt':
         ruta_windows = (
             r'C:\Program Files\LibreOffice\program\soffice.exe'
@@ -13846,7 +13863,8 @@ def convertir_certificados_a_pdf(items):
 
     if not binario:
         raise RuntimeError(
-            'LibreOffice no está instalado o no se encuentra en el sistema.'
+            'LibreOffice no está instalado o no se encuentra '
+            'disponible en el sistema.'
         )
 
     presentacion = certificado_crear_powerpoint(items)
@@ -13891,19 +13909,6 @@ def convertir_certificados_a_pdf(items):
 
         with open(ruta_pdf, 'rb') as archivo_pdf:
             return archivo_pdf.read()
-
-
-def respuesta_pdf_para_imprimir(contenido_pdf, nombre_archivo):
-    response = HttpResponse(
-        contenido_pdf,
-        content_type='application/pdf',
-    )
-
-    response['Content-Disposition'] = (
-        f'inline; filename="{nombre_archivo}.pdf"'
-    )
-
-    return response
 
 
 @api_view(['GET'])

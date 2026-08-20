@@ -286,4 +286,4 @@ if not DEBUG:
         SECURE_HSTS_SECONDS > 0
     )
 
-LIBREOFFICE_BIN = r"C:\Program Files\LibreOffice\program\soffice.exe"
+LIBREOFFICE_BIN = os.environ.get('LIBREOFFICE_BIN', '')
