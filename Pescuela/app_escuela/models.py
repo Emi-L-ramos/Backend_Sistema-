@@ -1390,6 +1390,85 @@ class Certificado(models.Model):
             f'{self.numero_asiento} - '
             f'{nombre_estudiante}'
         )
+
+class RegistroAuditoria(models.Model):
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='registros_auditoria',
+    )
+
+    # Conserva el nombre aunque luego se elimine o desactive el usuario.
+    usuario_nombre = models.CharField(
+        max_length=150,
+        blank=True,
+    )
+
+    accion = models.CharField(
+        max_length=100,
+    )
+
+    modulo = models.CharField(
+        max_length=100,
+    )
+
+    detalle = models.TextField(
+        blank=True,
+    )
+
+    metodo = models.CharField(
+        max_length=10,
+        blank=True,
+    )
+
+    ruta = models.CharField(
+        max_length=255,
+        blank=True,
+    )
+
+    referencia = models.CharField(
+        max_length=100,
+        blank=True,
+    )
+
+    estado_http = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+    )
+
+    direccion_ip = models.GenericIPAddressField(
+        null=True,
+        blank=True,
+    )
+
+    creado_en = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    class Meta:
+        ordering = ['-creado_en']
+        indexes = [
+            models.Index(
+                fields=['-creado_en'],
+                name='auditoria_fecha_idx',
+            ),
+            models.Index(
+                fields=['modulo', '-creado_en'],
+                name='auditoria_modulo_idx',
+            ),
+            models.Index(
+                fields=['accion', '-creado_en'],
+                name='auditoria_accion_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f'{self.creado_en:%d/%m/%Y %H:%M} - '
+            f'{self.usuario_nombre} - {self.accion}'
+        )
 # ============================================================
 # Generación automática de progreso de Plan de Estudio
 # ============================================================

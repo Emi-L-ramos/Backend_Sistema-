@@ -56,6 +56,7 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.util import Inches, Pt
 from .pagination import PaginacionOpcional
+from ..auditoria import registrar_auditoria
 from ..models import (
     Rol,
     Usuario,
@@ -85,6 +86,7 @@ from ..models import (
     Certificado,
     ConfiguracionCertificado,
     calcular_libro_certificado,
+    RegistroAuditoria,
     
 )
 from .serializers import (
@@ -642,6 +644,19 @@ class RolViewSet(viewsets.ModelViewSet):
         nombre_rol = rol.nombre
         rol.delete()
 
+        registrar_auditoria(
+        usuario=user,
+        accion='Inició sesión',
+        modulo='Seguridad',
+        detalle='Inicio de sesión exitoso.',
+        request=request,
+        metodo='POST',
+        ruta=request.path,
+        estado_http=status.HTTP_200_OK,
+    )
+
+
+
         return Response(
             {
                 'message': (
@@ -650,6 +665,170 @@ class RolViewSet(viewsets.ModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
+    
+
+class AuditoriaView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not request.user.is_superuser:
+            return Response(
+                {
+                    'error': (
+                        'Solo el superadministrador puede '
+                        'consultar el historial de movimientos.'
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        registros = (
+            RegistroAuditoria.objects
+            .select_related('usuario')
+            .all()
+        )
+
+        buscar = (
+            request.query_params
+            .get('buscar', '')
+            .strip()
+        )
+
+        usuario = (
+            request.query_params
+            .get('usuario', '')
+            .strip()
+        )
+
+        modulo = (
+            request.query_params
+            .get('modulo', '')
+            .strip()
+        )
+
+        accion = (
+            request.query_params
+            .get('accion', '')
+            .strip()
+        )
+
+        fecha_desde = parse_date(
+            request.query_params.get(
+                'fecha_desde',
+                '',
+            )
+        )
+
+        fecha_hasta = parse_date(
+            request.query_params.get(
+                'fecha_hasta',
+                '',
+            )
+        )
+
+        if buscar:
+            registros = registros.filter(
+                Q(usuario_nombre__icontains=buscar)
+                | Q(accion__icontains=buscar)
+                | Q(modulo__icontains=buscar)
+                | Q(detalle__icontains=buscar)
+                | Q(referencia__icontains=buscar)
+            )
+
+        if usuario:
+            registros = registros.filter(
+                usuario_nombre__icontains=usuario
+            )
+
+        if modulo:
+            registros = registros.filter(
+                modulo__icontains=modulo
+            )
+
+        if accion:
+            registros = registros.filter(
+                accion__icontains=accion
+            )
+
+        if fecha_desde:
+            registros = registros.filter(
+                creado_en__date__gte=fecha_desde
+            )
+
+        if fecha_hasta:
+            registros = registros.filter(
+                creado_en__date__lte=fecha_hasta
+            )
+
+        try:
+            pagina = max(
+                int(
+                    request.query_params.get(
+                        'page',
+                        1,
+                    )
+                ),
+                1,
+            )
+        except (TypeError, ValueError):
+            pagina = 1
+
+        try:
+            tamanio = int(
+                request.query_params.get(
+                    'page_size',
+                    25,
+                )
+            )
+            tamanio = min(max(tamanio, 10), 100)
+        except (TypeError, ValueError):
+            tamanio = 25
+
+        total = registros.count()
+        inicio = (pagina - 1) * tamanio
+        registros_pagina = registros[
+            inicio:inicio + tamanio
+        ]
+
+        resultados = []
+
+        for registro in registros_pagina:
+            fecha_local = timezone.localtime(
+                registro.creado_en
+            )
+
+            resultados.append(
+                {
+                    'id': registro.id,
+                    'usuario': (
+                        registro.usuario_nombre
+                        or 'Usuario eliminado'
+                    ),
+                    'accion': registro.accion,
+                    'modulo': registro.modulo,
+                    'detalle': registro.detalle,
+                    'referencia': registro.referencia,
+                    'metodo': registro.metodo,
+                    'ruta': registro.ruta,
+                    'estado_http': registro.estado_http,
+                    'direccion_ip': registro.direccion_ip,
+                    'fecha': fecha_local.isoformat(),
+                    'fecha_legible': fecha_local.strftime(
+                        '%d/%m/%Y %I:%M %p'
+                    ),
+                }
+            )
+
+        return Response(
+            {
+                'count': total,
+                'page': pagina,
+                'page_size': tamanio,
+                'results': resultados,
+            },
+            status=status.HTTP_200_OK,
+        )
+    
 class CategoriaVehiculoViewSet(viewsets.ModelViewSet):
     queryset = CategoriaVehiculo.objects.all()
     serializer_class = CategoriaVehiculoSerializer
@@ -12644,20 +12823,35 @@ def certificado_ppt_agregar_certificado(
         0.78,
     )
 
+       # Evaluaciones en columna y centradas.
     certificado_ppt_texto(
         slide,
         (
             f"Evaluación Teórica: "
-            f"{int(item['nota_teorica'])} puntos.\n"
+            f"{int(item['nota_teorica'])} puntos."
+        ),
+        x + 0.85,
+        y + 2.58,
+        ancho - 1.70,
+        0.24,
+        tamano=10.5,
+        negrita=True,
+        alineacion=PP_ALIGN.CENTER,
+    )
+
+    certificado_ppt_texto(
+        slide,
+        (
             f"Evaluación Práctica: "
             f"{int(item['nota_practica'])} puntos."
         ),
-        x + 1.65,
-        y + 2.58,
-        ancho - 3.30,
-        0.50,
+        x + 0.85,
+        y + 2.82,
+        ancho - 1.70,
+        0.24,
         tamano=10.5,
         negrita=True,
+        alineacion=PP_ALIGN.CENTER,
     )
 
     certificado_ppt_texto(
@@ -12676,6 +12870,7 @@ def certificado_ppt_agregar_certificado(
         0.25,
         tamano=9.8,
         negrita=True,
+        
     )
 
     fecha_emision = item["fecha_egreso"]

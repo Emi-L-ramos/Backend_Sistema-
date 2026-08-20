@@ -41,7 +41,8 @@ from .views import (
     generar_certificados_guardados,
     detalle_certificado,
     imprimir_certificado_guardado,
-    imprimir_certificados_guardados
+    imprimir_certificados_guardados,
+    AuditoriaView,
    
 )
 from .views import (
@@ -164,5 +165,8 @@ urlpatterns = [
         'certificados/<int:certificado_id>/imprimir-directo/',
         imprimir_certificado_directo,
         name='imprimir-certificado-directo',
+    ),
+
+    path('auditoria/',AuditoriaView.as_view(),name='auditoria',
     ),
 ]
