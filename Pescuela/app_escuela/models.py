@@ -314,6 +314,7 @@ class Recibo(models.Model):
 
     class Meta:
         ordering = ['-fecha_pago']
+        
 
     def __str__(self):
         estudiante = self.matricula.estudiante

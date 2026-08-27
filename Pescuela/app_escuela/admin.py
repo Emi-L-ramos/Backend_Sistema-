@@ -40,6 +40,7 @@ admin.site.register(RespuestaExamenTeorico)
 admin.site.register(PagoInstructor)
 admin.site.register(CargoInstitucional)
 
+
 # 3. Registro seguro del Usuario
 try:
     admin.site.unregister(Usuario)
