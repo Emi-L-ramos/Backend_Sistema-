@@ -13138,6 +13138,7 @@ def certificados_egresados_powerpoint(request):
     return response
 
 NOTA_MINIMA_CERTIFICADO = Decimal('80')
+MIN_HORAS_CERTIFICADO_ESPECIAL = 6
 
 
 def convertir_nota_certificado(valor):
@@ -13223,10 +13224,14 @@ def obtener_notas_certificado(matricula):
     }
 
 
-def obtener_queryset_candidatos_certificado():
+def obtener_queryset_candidatos_certificado(
+    incluir_intermedio=False,
+):
     """
-    Matrículas de Principiante finalizadas según
-    calendario y con sus últimas notas cargadas.
+    Matrículas elegibles para certificado.
+
+    - Por fecha: solo Principiante.
+    - Por búsqueda manual: permite Principiante e Intermedio.
     """
     notas = (
         Notas.objects
@@ -13241,6 +13246,15 @@ def obtener_queryset_candidatos_certificado():
             '-id',
         )
     )
+
+    filtro_curso = Q(
+        tipo_curso__iexact='Principiante'
+    )
+
+    if incluir_intermedio:
+        filtro_curso |= Q(
+            tipo_curso__iexact='Intermedio'
+        )
 
     return (
         Matricula.objects
@@ -13275,10 +13289,7 @@ def obtener_queryset_candidatos_certificado():
                 ),
             ),
         )
-        .filter(
-            tipo_curso__iexact='Principiante',
-           
-        )
+        .filter(filtro_curso)
         .order_by(
             'estudiante__apellido',
             'estudiante__nombre',
@@ -13401,7 +13412,9 @@ def candidatos_certificados(request):
         )
 
     queryset = (
-        obtener_queryset_candidatos_certificado()
+        obtener_queryset_candidatos_certificado(
+            incluir_intermedio=bool(buscar)
+        )
     )
 
     if buscar:
@@ -13444,6 +13457,14 @@ def candidatos_certificados(request):
     resultados = []
 
     for matricula in queryset:
+        if (
+            matricula.tipo_curso == 'Intermedio'
+            and int(
+                matricula.horas_reforzamiento or 0
+            ) < MIN_HORAS_CERTIFICADO_ESPECIAL
+        ):
+            continue
+
         notas = obtener_notas_certificado(
             matricula
         )
@@ -13688,7 +13709,9 @@ def generar_certificados_guardados(request):
                 )
 
             matriculas = list(
-                obtener_queryset_candidatos_certificado()
+                obtener_queryset_candidatos_certificado(
+                        incluir_intermedio=True
+                    )
                 .filter(
                     id__in=matricula_ids
                 )
@@ -13763,6 +13786,23 @@ def generar_certificados_guardados(request):
                         matricula_id
                     ]
                 )
+
+                if (
+                    matricula.tipo_curso == 'Intermedio'
+                    and int(
+                        matricula.horas_reforzamiento or 0
+                    ) < MIN_HORAS_CERTIFICADO_ESPECIAL
+                ):
+                    return Response(
+                        {
+                            'detail': (
+                                'El estudiante de curso Intermedio '
+                                'debe tener al menos 6 horas para '
+                                'generar el certificado.'
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
                 notas = obtener_notas_certificado(
                     matricula
@@ -13901,7 +13941,7 @@ def generar_certificados_guardados(request):
 
     except (
         IntegrityError,
-        DjangoValidationError,
+        DjangoValidationError, # pyright: ignore[reportUndefinedVariable]
     ) as error:
         return Response(
             {
