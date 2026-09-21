@@ -10,13 +10,15 @@ import shutil
 import subprocess
 from copy import copy
 from datetime import date, datetime, timedelta
+from django.utils import timezone # pyright: ignore[reportMissingModuleSource]
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from django.core.exceptions import ValidationError as DjangoValidationError # pyright: ignore[reportMissingModuleSource]
 from io import BytesIO
-from django.conf import settings
-from django.contrib.auth import authenticate
-from django.contrib.auth.models import update_last_login
-from django.db import IntegrityError, models, transaction
-from django.db.models import (
+from django.conf import settings # pyright: ignore[reportMissingModuleSource]
+from django.contrib.auth import authenticate # pyright: ignore[reportMissingModuleSource]
+from django.contrib.auth.models import update_last_login # pyright: ignore[reportMissingModuleSource]
+from django.db import IntegrityError, models, transaction # pyright: ignore[reportMissingModuleSource]
+from django.db.models import ( # pyright: ignore[reportMissingModuleSource]
     F,
     Q,
     Sum,
@@ -27,34 +29,34 @@ from django.db.models import (
     OuterRef,
     Subquery,
 )
-from django.db.models.functions import Cast, TruncMonth
-from django.http import HttpResponse
-from django.shortcuts import get_object_or_404
-from django.utils import timezone
-from django.utils.dateparse import parse_date
-from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import status, viewsets, serializers
-from rest_framework.authtoken.models import Token
-from rest_framework.decorators import (
+from django.db.models.functions import Cast, TruncMonth # pyright: ignore[reportMissingModuleSource]
+from django.http import HttpResponse # pyright: ignore[reportMissingModuleSource] # pyright: ignore[reportMissingModuleSource]
+from django.shortcuts import get_object_or_404 # pyright: ignore[reportMissingModuleSource]
+from django.utils import timezone # pyright: ignore[reportMissingModuleSource]
+from django.utils.dateparse import parse_date # pyright: ignore[reportMissingModuleSource]
+from django_filters.rest_framework import DjangoFilterBackend # pyright: ignore[reportMissingModuleSource]
+from rest_framework import status, viewsets, serializers # pyright: ignore[reportMissingImports] # pyright: ignore[reportMissingImports]
+from rest_framework.authtoken.models import Token # pyright: ignore[reportMissingImports]
+from rest_framework.decorators import ( # pyright: ignore[reportMissingImports] # pyright: ignore[reportMissingImports]
     action,
     api_view,
     authentication_classes,
     permission_classes,
     throttle_classes,
 )
-from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.response import Response
-from rest_framework.throttling import SimpleRateThrottle
-from rest_framework.views import APIView
-from openpyxl import Workbook, load_workbook
-from openpyxl.drawing.image import Image as ExcelImage
-from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-from pptx import Presentation
-from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE
-from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
-from pptx.util import Inches, Pt
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser # pyright: ignore[reportMissingImports]
+from rest_framework.permissions import IsAuthenticated, AllowAny # pyright: ignore[reportMissingImports] # pyright: ignore[reportMissingImports]
+from rest_framework.response import Response # pyright: ignore[reportMissingImports] # pyright: ignore[reportMissingImports]
+from rest_framework.throttling import SimpleRateThrottle # pyright: ignore[reportMissingImports]
+from rest_framework.views import APIView # pyright: ignore[reportMissingImports]
+from openpyxl import Workbook, load_workbook # pyright: ignore[reportMissingModuleSource]
+from openpyxl.drawing.image import Image as ExcelImage # pyright: ignore[reportMissingModuleSource]
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment # pyright: ignore[reportMissingModuleSource]
+from pptx import Presentation # pyright: ignore[reportMissingImports]
+from pptx.dml.color import RGBColor # pyright: ignore[reportMissingImports]
+from pptx.enum.shapes import MSO_SHAPE # pyright: ignore[reportMissingImports]
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR # pyright: ignore[reportMissingImports]
+from pptx.util import Inches, Pt # pyright: ignore[reportMissingImports]
 from .pagination import PaginacionOpcional
 from ..auditoria import registrar_auditoria
 from ..models import (
@@ -13138,7 +13140,8 @@ def certificados_egresados_powerpoint(request):
     return response
 
 NOTA_MINIMA_CERTIFICADO = Decimal('80')
-MIN_HORAS_CERTIFICADO_ESPECIAL = 6
+MIN_HORAS_CERTIFICADO_ESPECIAL = 2
+MAX_HORAS_CERTIFICADO_ESPECIAL = 14
 
 
 def convertir_nota_certificado(valor):
@@ -13457,11 +13460,17 @@ def candidatos_certificados(request):
     resultados = []
 
     for matricula in queryset:
+        horas = int(
+    matricula.horas_reforzamiento or 0
+)
+
         if (
             matricula.tipo_curso == 'Intermedio'
-            and int(
-                matricula.horas_reforzamiento or 0
-            ) < MIN_HORAS_CERTIFICADO_ESPECIAL
+            and not (
+                MIN_HORAS_CERTIFICADO_ESPECIAL
+                <= horas
+                <= MAX_HORAS_CERTIFICADO_ESPECIAL
+            )
         ):
             continue
 
@@ -13787,23 +13796,27 @@ def generar_certificados_guardados(request):
                     ]
                 )
 
+                horas = int(
+                    matricula.horas_reforzamiento or 0
+                )
+
                 if (
                     matricula.tipo_curso == 'Intermedio'
-                    and int(
-                        matricula.horas_reforzamiento or 0
-                    ) < MIN_HORAS_CERTIFICADO_ESPECIAL
+                    and not (
+                        MIN_HORAS_CERTIFICADO_ESPECIAL
+                        <= horas
+                        <= MAX_HORAS_CERTIFICADO_ESPECIAL
+                    )
                 ):
                     return Response(
                         {
                             'detail': (
-                                'El estudiante de curso Intermedio '
-                                'debe tener al menos 6 horas para '
-                                'generar el certificado.'
+                                'El certificado especial por horas '
+                                'solo se puede generar entre 2 y 14 horas.'
                             )
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-
                 notas = obtener_notas_certificado(
                     matricula
                 )
@@ -13874,6 +13887,32 @@ def generar_certificados_guardados(request):
                     )
                 )
 
+                fecha_inicio_certificado = (
+                    matricula.fecha_inicio_certificado
+                )
+
+                fecha_finalizacion_certificado = (
+                    matricula.fecha_final_certificado
+                )
+
+                if (
+                    tipo_certificado
+                    == Certificado.TIPO_REFORZAMIENTO
+                    and not fecha_finalizacion_certificado
+                ):
+                    fecha_finalizacion_certificado = (
+                        timezone.localdate()
+                    )
+
+                if (
+                    tipo_certificado
+                    == Certificado.TIPO_REFORZAMIENTO
+                    and not fecha_inicio_certificado
+                ):
+                    fecha_inicio_certificado = (
+                        fecha_finalizacion_certificado
+                    )
+
                 certificado = Certificado(
                     matricula=matricula,
                     estudiante=(
@@ -13885,14 +13924,11 @@ def generar_certificados_guardados(request):
                     ),
                     numero_folio=numero_folio,
                     numero_libro=numero_libro,
-                    fecha_inicio=(
-                        matricula
-                        .fecha_inicio_certificado
-                    ),
-                    fecha_finalizacion=(
-                        matricula
-                        .fecha_final_certificado
-                    ),
+
+                    fecha_inicio=fecha_inicio_certificado,
+
+                    fecha_finalizacion=fecha_finalizacion_certificado,
+
                     nota_teorica=(
                         notas['nota_teorica']
                     ),
